@@ -1,0 +1,34 @@
+# Repository Guidelines
+
+## Project Structure
+
+This is a Rust 2024 Cargo project. Core implementation lives in `src/`: `code.rs` handles repository indexing and retrieval, `memory.rs` manages explicit memories, `db.rs` owns SQLite persistence and migrations, and `mcp.rs` implements the MCP interface. Unit tests are in `src/tests.rs` and module-local test blocks; the CLI integration test is in `tests/mcp_stdio.rs`. User and architecture documentation is in `docs/`, client examples in `examples/`, and benchmark and maintenance scripts in `scripts/`.
+
+## Build, Test, and Development
+
+- `cargo build --locked` builds the project using the committed dependency lockfile.
+- `cargo run -- --help` runs the CLI help from the working tree; add a command and its options to try a feature.
+- `cargo test --locked` runs unit and integration tests.
+- `cargo fmt --check` checks Rust formatting; run `cargo fmt` to apply it.
+- `cargo clippy --all-targets --all-features -- -D warnings` checks all Rust targets for lint issues.
+- `cargo build --release --locked` creates the optimized release binary.
+
+## Coding Style
+
+Follow `rustfmt` defaults (four-space indentation). Use `snake_case` for modules, functions, and variables, and `PascalCase` for types and traits. Keep changes focused within the existing module boundaries, return actionable errors, and document behavior that affects CLI or MCP users. Avoid adding dependencies without a clear need; commit `Cargo.lock` changes with dependency updates.
+
+## Testing Guidelines
+
+Add regression tests alongside the affected unit tests in `src/` or in `tests/` for end-to-end behavior. Use descriptive test names that state the behavior, such as `mcp_stdio_handshake_lists_tools_and_returns_grounded_result`. Tests should use temporary directories and databases for filesystem or persistence scenarios. Run `cargo test --locked` before submitting changes that affect behavior.
+
+## Commits and Pull Requests
+
+Recent commits use concise subjects, often with Conventional Commit prefixes such as `feat:`. Use a clear imperative summary, optionally scoped (for example, `fix: preserve partial index status`). Pull requests should explain user-visible behavior and design choices, list validation commands and results, link related issues when available, and update relevant docs or changelog entries. Include benchmark evidence when changing performance claims or indexing behavior.
+
+## Data and Documentation
+
+Midnight stores explicit memories and index metadata locally. Changes to storage, retention, path exclusions, or indexing limits should be reflected in the relevant privacy, architecture, API, or performance docs. Do not add secrets, private repositories, or generated benchmark data to commits.
+
+## The Projects Future
+
+The Projects are evolving very quickly. Don't limit yourself—if there are major changes to the core, don't restrict it, but stay on the same track; let it happen and allow it, and edit these rules, which may change as the project progresses, and edit your rules whenever necessary.
