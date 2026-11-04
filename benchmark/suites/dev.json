@@ -1,0 +1,48 @@
+{
+  "suite": "dev",
+  "frozen_from": "benchmark/manifest.json at run preparation",
+  "query_count": 5,
+  "queries": [
+    {
+      "id": "exact-symbol",
+      "kind": "exact-symbol",
+      "query": "benchmark_target_00000",
+      "relevant_paths": [
+        "src/00000.rs"
+      ]
+    },
+    {
+      "id": "path",
+      "kind": "path",
+      "query": "src/00007.rs",
+      "relevant_paths": [
+        "src/00007.rs"
+      ]
+    },
+    {
+      "id": "lexical",
+      "kind": "lexical",
+      "query": "delta cache invalidation token",
+      "relevant_paths": [
+        "src/00002.rs"
+      ]
+    },
+    {
+      "id": "cross-file-symbol",
+      "kind": "cross-file",
+      "query": "common_retry_budget",
+      "relevant_paths": [
+        "src/00004.rs",
+        "src/00005.rs"
+      ]
+    },
+    {
+      "id": "natural-language",
+      "kind": "natural-language",
+      "query": "stale revision consistency",
+      "relevant_paths": [
+        "src/00003.rs"
+      ]
+    }
+  ]
+}

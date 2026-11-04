@@ -24,27 +24,26 @@ For a raw source, `source_uri` is optional. Derived memories must cite a raw `so
 
 `search` returns `{results, token_budget, estimated_tokens, truncated, token_estimator}`. Each result includes a source path, optional current line range and snippet, freshness, scope, generation/completeness, match reason, deterministic score components, and estimated token count. Stale or unavailable source results never include a snippet or line range. `open-range` allows at most 200 lines and rejects absolute paths and `..` traversal.
 
-Code search supports exact paths and symbols, whole-token lexical matches, and identifier-boundary fragments such as `refreshTok` matching `refreshToken`. Arbitrary substrings inside a token, such as `reshTok`, are unsupported.
-
 ## MCP
 
 Run `aether-midnight mcp` with JSON-RPC messages over stdio. The implementation pins [MCP protocol version 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25), advertises tools, and accepts `initialize`, `ping`, `tools/list`, and `tools/call`. It does not use a third-party MCP SDK. This is the 2025-11-25 handshake subset; the later stateless protocol revision and other transports are not implemented.
 
 Available tools are `index_repository`, `search_code`, `open_range`, `list_symbols`, `repo_map`, `index_status`, `remember`, `recall`, `list_memories`, and `forget`. Every code tool receives `repo_path`; every memory tool receives `scope`.
 
-## Node.js
+## Node.js and Bun client examples
 
-The Node.js example starts the Rust MCP process. It was verified with Node.js 24.22.1; Bun was unavailable in this iteration.
+The same no-dependency client example is provided for Node.js and Bun and starts the Rust MCP process. Runtime verification is pending (not run) in the latest benchmark run:
 
 ```sh
 export AETHER_MIDNIGHT_BIN="$PWD/target/release/aether-midnight"
 export AETHER_REPO="$PWD"
 node examples/node/client.mjs
+# or: bun examples/node/client.mjs
 ```
 
 Optional variables: `AETHER_MIDNIGHT_DB` selects the SQLite file and `AETHER_QUERY` selects the code query. The example initializes the server, calls `search_code`, and prints the returned tool payload.
 
-## Go (unverified in this iteration)
+## Go
 
 ```sh
 export AETHER_MIDNIGHT_BIN="$PWD/target/release/aether-midnight"
@@ -52,4 +51,4 @@ export AETHER_REPO="$PWD"
 (cd examples/go && go run .)
 ```
 
-`examples/go` contains a Go module and JSON-RPC stdio client; this example was not verified in this iteration. It uses the same optional environment variables as the Node example. Both clients require the Rust executable to be built or installed separately.
+`examples/go` contains a small Go module and JSON-RPC stdio client. It uses the same optional environment variables as the Node example. Go runtime verification is pending (not run) in the latest benchmark run. Both clients require the Rust executable to be built or installed separately.

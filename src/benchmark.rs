@@ -64,6 +64,7 @@ pub fn run(
     let primary_db = base.path().join("midnight.sqlite3");
     let run_count = index_samples.max(1);
     let mut full_index_ms = Vec::with_capacity(run_count);
+    let mut full_index_database_bytes = Vec::with_capacity(run_count);
     let mut wal_checkpoint_ms = Vec::with_capacity(run_count);
     let mut full_index_samples = Vec::with_capacity(run_count);
     let mut index_reports = Vec::with_capacity(run_count);
@@ -85,6 +86,7 @@ pub fn run(
         code::wal_checkpoint(&db_path)?;
         let checkpoint_elapsed = checkpoint_started.elapsed().as_secs_f64() * 1000.0;
         wal_checkpoint_ms.push(checkpoint_elapsed);
+        full_index_database_bytes.push(code::database_bytes(&db_path));
         full_index_samples.push(json!({
             "sample_number":sample+1,
             "cache_state":"OS file cache unknown; the harness does not evict it",
@@ -110,10 +112,10 @@ pub fn run(
     }
 
     let cold_query = &manifest.queries[0].query;
-    let empty_db = base.path().join("empty.sqlite3");
     let binary = std::env::current_exe().context("locate benchmark executable")?;
     let mut first_useful_ms = Vec::with_capacity(samples.max(1));
-    for _ in 0..samples.max(1) {
+    for sample in 0..samples.max(1) {
+        let empty_db = base.path().join(format!("empty-{sample}.sqlite3"));
         let before = Instant::now();
         let output = Command::new(&binary)
             .arg("--db")
@@ -161,8 +163,9 @@ pub fn run(
 
     let quality = retrieval_quality(&primary_db, &repo, &manifest.queries)?;
     let rg = ripgrep_baseline(&repo, &manifest.queries)?;
-    let incremental = incremental_samples(&primary_db, &repo, samples.clamp(1, 10))?;
-    let partial_context = partial_context_during_index(base.path(), &repo, cold_query)?;
+    let memory_scaling = memory_scaling(base.path())?;
+    let incremental = incremental_samples(&primary_db, &repo, 30)?;
+    let partial_context = partial_context_during_index(base.path(), &repo, cold_query, 30)?;
     let stress = stress_cycles_run(base.path(), stress_cycles.max(1))?;
 
     let source_bytes = primary_status.eligible_bytes.max(1);
@@ -208,7 +211,9 @@ pub fn run(
             "seed":manifest.fixture.seed,"generator":manifest.fixture.generator,
             "eligible_files":primary_status.eligible_files,"eligible_bytes":primary_status.eligible_bytes,
             "skipped_files":primary_report.skipped.values().sum::<u64>(),"skip_reasons":primary_report.skipped,
-            "index_bytes":index_bytes,"index_to_source_ratio":index_bytes as f64/source_bytes as f64
+            "index_bytes":index_bytes,"index_to_source_ratio":index_bytes as f64/source_bytes as f64,
+            "database_bytes_distribution":distribution_u64(&full_index_database_bytes),
+            "index_to_source_ratio_samples":distribution_f64(&full_index_database_bytes.iter().map(|n|*n as f64/source_bytes as f64).collect::<Vec<_>>())
         },
         "timings":{
             "first_useful_context_fresh_process_empty_index":distribution(&first_useful_ms),
@@ -223,8 +228,10 @@ pub fn run(
             "ripgrep_identical_query_set":rg
         },
         "retrieval_quality":quality,
+        "memory_scaling":memory_scaling,
         "resources":{
             "peak_process_rss_bytes":code::peak_rss_bytes(),
+            "peak_process_rss_status":"anecdotal; one process-wide high-water observation",
             "allocator_live_heap_bytes":Value::Null,
             "memory_mapped_pages_bytes":Value::Null,
             "rss_measurement_scope":"benchmark process only; peak high-water mark",
@@ -236,6 +243,7 @@ pub fn run(
             "maximum_queued_artifacts":index_reports.iter().map(|r|r.max_queued_artifacts).max().unwrap_or(0),
             "maximum_pipeline_artifacts":index_reports.iter().map(|r|r.max_pipeline_artifacts).max().unwrap_or(0),
             "rss_after_stress_cycles_bytes":stress.get("rss_samples_bytes").cloned().unwrap_or(json!([])),
+            "rss_after_stress_cycles_distribution":distribution_u64(&stress.get("rss_samples_bytes").and_then(Value::as_array).cloned().unwrap_or_default().iter().filter_map(Value::as_u64).collect::<Vec<_>>()),
             "stress":stress,
             "unavailable_measurements":"allocator live heap and mmap pages are not instrumented on this build"
         },
@@ -455,10 +463,169 @@ fn sqlite_file_bytes(path: &Path) -> u64 {
     .sum()
 }
 
-fn partial_context_during_index(base: &Path, repo: &Path, query: &str) -> Result<Value> {
+fn memory_scaling(base: &Path) -> Result<Value> {
+    let scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
+    let mut sizes = Vec::new();
+    for target in [1_000usize, 10_000, 100_000] {
+        let db_path = base.join(format!("memory-{target}.sqlite3"));
+        let mut source_ids = std::collections::HashMap::new();
+        let setup_started = Instant::now();
+        for scope in scopes {
+            let record = memory::remember(&db_path, scope, "source", "benchmark namespace anchor", Some("benchmark://anchor"), None, None, None, None, None)?;
+            source_ids.insert(scope, record.id);
+        }
+        let mut quality = Vec::new();
+        for index in 0..(target - scopes.len()) {
+            let scope = scopes[index % scopes.len()];
+            let (kind, token) = if index < 25 {
+                ("source", format!("sourcequality{index:03}"))
+            } else if index < 50 {
+                ("derived", format!("derivedquality{index:03}"))
+            } else if index % 2 == 0 {
+                ("source", format!("memoryload{index:06}"))
+            } else {
+                ("derived", format!("memoryload{index:06}"))
+            };
+            let source_id = source_ids[scope];
+            let record = memory::remember(&db_path, scope, kind, &format!("{token} namespace workload record {index}"),
+                Some("benchmark://load"), (kind == "derived").then_some(source_id), None, None, None, None)?;
+            if index < 50 {
+                quality.push((scope.to_string(), token, record.id, kind.to_string()));
+            }
+        }
+        let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
+        code::wal_checkpoint(&db_path)?;
+        let db_bytes_before_ops = code::database_bytes(&db_path);
+
+        let mut store_ms = Vec::new();
+        let mut database_size_during_store = Vec::new();
+        let mut rss_during_store = Vec::new();
+        for index in 0..30 {
+            let start = Instant::now();
+            memory::remember(&db_path, scopes[index % 4], "source", &format!("store sample marker {target} {index}"),
+                Some("benchmark://store"), None, None, None, None, None)?;
+            store_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            database_size_during_store.push(code::database_bytes(&db_path));
+            if let Some(rss) = current_rss_bytes() { rss_during_store.push(rss); }
+        }
+
+        let mut prior_ids = std::collections::HashMap::new();
+        for scope in scopes {
+            let seed = memory::remember(&db_path, scope, "derived", "update chain seed", Some("benchmark://update"),
+                Some(source_ids[scope]), None, None, Some("2020-01-01T00:00:00Z"), None)?;
+            prior_ids.insert(scope, seed.id);
+        }
+        let mut update_ms = Vec::new();
+        for index in 0..30 {
+            let scope = scopes[index % 4];
+            let day = index / 4 + 2;
+            let valid_from = format!("2020-01-{day:02}T00:00:00Z");
+            let start = Instant::now();
+            let updated = memory::remember(&db_path, scope, "derived", &format!("updated fact sample {index}"), Some("benchmark://update"),
+                Some(source_ids[scope]), Some(prior_ids[scope]), None, Some(&valid_from), None)?;
+            update_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            prior_ids.insert(scope, updated.id);
+        }
+
+        let mut delete_ids = Vec::new();
+        for index in 0..30 {
+            let scope = scopes[index % 4];
+            let record = memory::remember(&db_path, scope, "source", &format!("delete sample marker {target} {index}"),
+                Some("benchmark://delete"), None, None, None, None, None)?;
+            delete_ids.push((scope, record.id));
+        }
+        let mut delete_ms = Vec::new();
+        for (scope, id) in delete_ids {
+            let start = Instant::now();
+            if !memory::forget(&db_path, scope, id)? { bail!("memory delete benchmark did not delete id {id}"); }
+            delete_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mut recall_ms = Vec::new();
+        for index in 0..100 {
+            let start = Instant::now();
+            let result = memory::recall(&db_path, scopes[index % 4], "namespace", None, 10)?;
+            if result.is_empty() { bail!("memory recall benchmark returned no results at size {target}"); }
+            recall_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mut quality_scores = [0.0f64; 3];
+        let mut mrr = 0.0;
+        let mut quality_hits = 0usize;
+        let mut leakage_checks = 0usize;
+        let mut quality_source_scores = [0.0f64; 3];
+        let mut quality_derived_scores = [0.0f64; 3];
+        let mut source_count = 0usize;
+        let mut derived_count = 0usize;
+        let mut source_mrr = 0.0;
+        let mut derived_mrr = 0.0;
+        let mut quality_rows = Vec::new();
+        let mut leakage_rows = Vec::new();
+        for (scope, token, expected_id, _kind) in &quality {
+            let results = memory::recall(&db_path, scope, token, None, 10)?;
+            let rank = results.iter().position(|result| result.memory.id == *expected_id);
+            if rank.is_some() { quality_hits += 1; }
+            let kind = if token.starts_with("sourcequality") { "source" } else { "derived" };
+            let (kind_count, kind_scores, kind_mrr) = if kind == "source" {
+                (&mut source_count, &mut quality_source_scores, &mut source_mrr)
+            } else {
+                (&mut derived_count, &mut quality_derived_scores, &mut derived_mrr)
+            };
+            *kind_count += 1;
+            if let Some(rank) = rank {
+                for (i, limit) in [1usize, 5, 10].iter().enumerate() {
+                    if rank < *limit { quality_scores[i] += 1.0; }
+                    if rank < *limit { kind_scores[i] += 1.0; }
+                }
+                mrr += 1.0 / (rank as f64 + 1.0);
+                *kind_mrr += 1.0 / (rank as f64 + 1.0);
+            }
+            quality_rows.push(json!({"query":token,"namespace":scope,"expected_kind":kind,"expected_memory_id":expected_id,
+                "rank":rank.map(|r|r+1),"found":rank.is_some()}));
+            for other in scopes.iter().copied().filter(|other| *other != scope) {
+                leakage_checks += 1;
+                let foreign = memory::recall(&db_path, other, token, None, 10)?;
+                leakage_rows.push(json!({"query":token,"target_scope":scope,"queried_foreign_scope":other,"returned_count":foreign.len()}));
+                if !foreign.is_empty() {
+                    bail!("cross-namespace memory leakage for query {token} into {other}");
+                }
+            }
+        }
+        code::wal_checkpoint(&db_path)?;
+        let db_bytes_after_ops = code::database_bytes(&db_path);
+        let current_rss = current_rss_bytes();
+        sizes.push(json!({"memory_count":target,"namespace_count":scopes.len(),"namespaces":scopes,
+            "setup_ms":setup_ms,"setup_sample_count":1,"setup_status":"anecdotal","records_loaded":target,"db_bytes_before_measured_ops":db_bytes_before_ops,
+            "db_bytes_after_measured_ops":db_bytes_after_ops,"db_growth_bytes_during_operations":db_bytes_after_ops.saturating_sub(db_bytes_before_ops),
+            "database_bytes_during_30_store_samples":distribution_u64(&database_size_during_store),
+            "database_growth_bytes_during_30_store_samples":distribution_u64(&database_size_during_store.iter()
+                .map(|bytes|bytes.saturating_sub(db_bytes_before_ops)).collect::<Vec<_>>()),
+            "current_rss_during_30_store_samples_bytes":distribution_u64(&rss_during_store),
+            "store":distribution(&store_ms),"update_by_supersession":distribution(&update_ms),"delete":distribution(&delete_ms),"recall":distribution(&recall_ms),
+            "current_rss_bytes_after_workload":current_rss,"current_rss_after_workload_status":"anecdotal; one observation",
+            "process_peak_rss_bytes":code::peak_rss_bytes(),"process_peak_rss_status":"anecdotal; process-wide cumulative high-water across all sizes",
+            "retrieval_quality":{"labeled_query_count":quality.len(),"recall_at_1":quality_scores[0]/quality.len().max(1) as f64,
+                "recall_at_5":quality_scores[1]/quality.len().max(1) as f64,"recall_at_10":quality_scores[2]/quality.len().max(1) as f64,
+                "mrr":mrr/quality.len().max(1) as f64,"found_expected_record_count":quality_hits,"cross_namespace_checks":leakage_checks,
+                "by_kind":{"source":{"query_count":source_count,"recall_at_1":quality_source_scores[0]/source_count.max(1) as f64,
+                    "recall_at_5":quality_source_scores[1]/source_count.max(1) as f64,"recall_at_10":quality_source_scores[2]/source_count.max(1) as f64,"mrr":source_mrr/source_count.max(1) as f64},
+                    "derived":{"query_count":derived_count,"recall_at_1":quality_derived_scores[0]/derived_count.max(1) as f64,
+                    "recall_at_5":quality_derived_scores[1]/derived_count.max(1) as f64,"recall_at_10":quality_derived_scores[2]/derived_count.max(1) as f64,"mrr":derived_mrr/derived_count.max(1) as f64}},
+                "queries":quality_rows,"cross_namespace_leaks":0,"cross_namespace_isolation":"pass","cross_namespace_checks_raw":leakage_rows}}));
+    }
+    Ok(json!({"memory_records_include_source_and_derived_across_four_namespaces":true,"workloads":sizes,
+        "rss_method":"current process resident set from ps after workload; process peak resident set via getrusage high-water value; peak is cumulative across sizes"}))
+}
+
+
+fn partial_context_during_index(base: &Path, repo: &Path, query: &str, count: usize) -> Result<Value> {
+    let binary = std::env::current_exe().context("locate benchmark executable")?;
+    let mut search_ms = Vec::with_capacity(count);
+    let mut details = Vec::with_capacity(count);
+    for sample in 0..(count * 10) {
+    if search_ms.len() >= count { break; }
     let temp = TempDir::new_in(base)?;
     let db_path = temp.path().join("partial.sqlite3");
-    let binary = std::env::current_exe().context("locate benchmark executable")?;
     let mut indexer = Command::new(&binary)
         .arg("--db")
         .arg(&db_path)
@@ -486,6 +653,11 @@ fn partial_context_during_index(base: &Path, repo: &Path, query: &str) -> Result
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
+    if !partial_observed || indexer.try_wait()?.is_some() {
+        let _ = indexer.wait();
+        details.push(json!({"sample":sample,"partial_catalog_observed":partial_observed,"index_active_before_search":false}));
+        continue;
+    }
     let search_started = Instant::now();
     let output = Command::new(&binary)
         .arg("--db")
@@ -501,7 +673,7 @@ fn partial_context_during_index(base: &Path, repo: &Path, query: &str) -> Result
         .stderr(Stdio::piped())
         .output()
         .context("search while full indexing continues")?;
-    let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+    let elapsed_ms = search_started.elapsed().as_secs_f64() * 1000.0;
     let indexing_running_at_result = indexer.try_wait()?.is_none();
     let index_exit = indexer.wait()?;
     let index_total_ms = index_started.elapsed().as_secs_f64() * 1000.0;
@@ -517,17 +689,14 @@ fn partial_context_during_index(base: &Path, repo: &Path, query: &str) -> Result
         .and_then(|results| results.first());
     let marked_partial = result
         .is_some_and(|result| result["index_complete"] == false && value["truncated"] == true);
-    Ok(json!({
-        "search_ms":search_ms,
-        "sample_count":1,
-        "partial_catalog_observed_before_search":partial_observed,
-        "index_process_running_when_search_returned":indexing_running_at_result,
-        "useful_result_returned":result.is_some(),
-        "result_explicitly_partial":marked_partial,
-        "result_freshness":result.and_then(|value|value["freshness"].as_str()),
-        "index_process_completed_successfully":index_exit.success(),
-        "full_index_process_elapsed_ms":index_total_ms
-    }))
+    search_ms.push(elapsed_ms);
+    details.push(json!({"sample":sample,"search_ms":elapsed_ms,"partial_catalog_observed_before_search":partial_observed,
+        "index_process_running_when_search_returned":indexing_running_at_result,"useful_result_returned":result.is_some(),
+        "result_explicitly_partial":marked_partial,"result_freshness":result.and_then(|value|value["freshness"].as_str()),
+        "index_process_completed_successfully":index_exit.success(),"full_index_process_elapsed_ms":index_total_ms}));
+    }
+    Ok(json!({"sample_count":search_ms.len(),"timing":distribution(&search_ms),"samples":details,
+        "insufficient_samples_reason":(search_ms.len()<count).then_some("some concurrent indexing attempts completed before a partial catalog could be queried")}))
 }
 
 fn retrieval_quality(db_path: &Path, repo: &Path, queries: &[BenchmarkQuery]) -> Result<Value> {
@@ -738,30 +907,29 @@ fn stress_cycles_run(base: &Path, cycles: usize) -> Result<Value> {
 }
 
 fn environment(repo: &Path, sqlite: &str) -> Value {
-    let cpu = command_stdout("sysctl", &["-n", "machdep.cpu.brand_string"])
-        .or_else(|| command_stdout("sysctl", &["-n", "hw.model"]))
-        .or_else(linux_cpu_model);
-    let cores = command_stdout("sysctl", &["-n", "hw.logicalcpu"])
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .or_else(|| {
-            std::thread::available_parallelism()
-                .ok()
-                .map(|n| n.get() as u32)
-        });
-    let memory = command_stdout("sysctl", &["-n", "hw.memsize"])
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .or_else(linux_memory_bytes);
+    let cpu = linux_cpu_model();
+    let cores = std::thread::available_parallelism()
+        .ok()
+        .map(|n| n.get() as u32);
+    let system_cores = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .map(|contents| contents.lines().filter(|line| line.starts_with("processor\t")).count() as u32);
+    let memory = linux_memory_bytes();
     let memory_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok());
-    let storage = command_stdout("df", &["-h", repo.to_string_lossy().as_ref()])
-        .and_then(|s| s.lines().last().map(str::to_string));
-    json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu":cpu,"logical_cores_available_to_process":cores,"ram_bytes":memory,"memory_limit_bytes":memory_limit,
-        "storage_mount":storage,"rustc":command_stdout("rustc",&["--version"]),"cargo_profile":if cfg!(debug_assertions){"debug"}else{"release"},
+    let storage = command_stdout("findmnt", &["-n", "-o", "SOURCE,FSTYPE,TARGET", "--target", repo.to_string_lossy().as_ref()]);
+    let disk_devices = command_stdout("lsblk", &["-dn", "-o", "NAME,ROTA,TYPE,TRAN,MODEL"]);
+    json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu_model":cpu,
+        "logical_core_count_system":system_cores,"logical_core_count_available_to_process":cores,
+        "ram_bytes":memory,"memory_limit_bytes":memory_limit,"disk_devices_and_media_fields":disk_devices,
+        "filesystem_mount_source_type_target":storage,"kernel":command_stdout("uname", &["-r"]),
+        "rustc":command_stdout("rustc",&["--version"]),"cargo_profile":if cfg!(debug_assertions){"debug"}else{"release"},
         "sqlite_version":sqlite,"rusqlite_crate":"0.41.1","tree_sitter_crate":"0.27.1",
         "tree_sitter_grammar_crates":{"rust":"0.24.2","python":"0.25.0","typescript":"0.23.2"},
-        "ripgrep":command_version("rg",&["--version"]),"node":command_version("node",&["--version"]),
-        "bun":command_version("bun",&["--version"]),"go":command_version("go",&["version"]),"corpus_root":repo})
+        "ripgrep":command_version("rg",&["--version"]),"out_of_scope_runtimes":{"Go":"pending (not run)","Node.js":"pending (not run)","Bun":"pending (not run)"},
+        "pending_platforms":{"macOS reference host":"pending (not run)","Windows":"pending (not run)","ARM":"pending (not run)"},
+        "corpus_root":repo})
 }
 
 fn linux_cpu_model() -> Option<String> {
@@ -795,7 +963,29 @@ fn distribution(values: &[f64]) -> Value {
         let ix = ((sorted.len() - 1) as f64 * p).ceil() as usize;
         sorted[ix.min(sorted.len() - 1)]
     };
-    json!({"p50_ms":percentile(0.50),"p95_ms":percentile(0.95),"min_ms":sorted.first().copied(),"max_ms":sorted.last().copied(),"sample_count":sorted.len(),"samples_ms":sorted})
+    json!({"p50_ms":percentile(0.50),"p95_ms":percentile(0.95),"p99_ms":percentile(0.99),"min_ms":sorted.first().copied(),"max_ms":sorted.last().copied(),"n":sorted.len(),"sample_count":sorted.len(),"samples_ms":sorted})
+}
+
+fn distribution_u64(values: &[u64]) -> Value {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let percentile = |p: f64| -> u64 {
+        if sorted.is_empty() { return 0; }
+        let ix = ((sorted.len() - 1) as f64 * p).ceil() as usize;
+        sorted[ix.min(sorted.len() - 1)]
+    };
+    json!({"p50":percentile(0.50),"p95":percentile(0.95),"p99":percentile(0.99),"n":sorted.len(),"samples_sorted":sorted})
+}
+
+fn distribution_f64(values: &[f64]) -> Value {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let percentile = |p: f64| -> f64 {
+        if sorted.is_empty() { return 0.0; }
+        let ix = ((sorted.len() - 1) as f64 * p).ceil() as usize;
+        sorted[ix.min(sorted.len() - 1)]
+    };
+    json!({"p50":percentile(0.50),"p95":percentile(0.95),"p99":percentile(0.99),"n":sorted.len(),"samples_sorted":sorted})
 }
 
 fn command_stdout(command: &str, args: &[&str]) -> Option<String> {

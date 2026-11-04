@@ -1,0 +1,766 @@
+{
+  "suite": "held-out",
+  "frozen_before_measurement": true,
+  "query_count": 64,
+  "corpus": "aether-midnight repository at run time; repository-relative Rust source symbols are ground truth",
+  "queries": [
+    {
+      "id": "symbol-01",
+      "category": "exact-symbol",
+      "query": "run",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "run"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-02",
+      "category": "exact-symbol",
+      "query": "partial_context_during_index",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "partial_context_during_index"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-03",
+      "category": "exact-symbol",
+      "query": "retrieval_quality",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "retrieval_quality"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-04",
+      "category": "exact-symbol",
+      "query": "memory_quality_cases",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "memory_quality_cases"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-05",
+      "category": "exact-symbol",
+      "query": "ripgrep_baseline",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "ripgrep_baseline"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-06",
+      "category": "exact-symbol",
+      "query": "incremental_samples",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "incremental_samples"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-07",
+      "category": "exact-symbol",
+      "query": "stress_cycles_run",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "stress_cycles_run"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-08",
+      "category": "exact-symbol",
+      "query": "environment",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "environment"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-09",
+      "category": "exact-symbol",
+      "query": "distribution",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "distribution"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-10",
+      "category": "exact-symbol",
+      "query": "command_stdout",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "command_stdout"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-11",
+      "category": "exact-symbol",
+      "query": "command_version",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "command_version"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-12",
+      "category": "exact-symbol",
+      "query": "current_rss_bytes",
+      "relevant": [
+        {
+          "path": "src/benchmark.rs",
+          "symbol": "current_rss_bytes"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-13",
+      "category": "exact-symbol",
+      "query": "index_repository",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "index_repository"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-14",
+      "category": "exact-symbol",
+      "query": "index_scoped",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "index_scoped"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-15",
+      "category": "exact-symbol",
+      "query": "acquire_index_lock",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "acquire_index_lock"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-16",
+      "category": "exact-symbol",
+      "query": "report",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "report"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-17",
+      "category": "exact-symbol",
+      "query": "publish_progress",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "publish_progress"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-18",
+      "category": "exact-symbol",
+      "query": "flush_batch",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "flush_batch"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-19",
+      "category": "exact-symbol",
+      "query": "index_status",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "index_status"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-20",
+      "category": "exact-symbol",
+      "query": "search_code",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "search_code"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-21",
+      "category": "exact-symbol",
+      "query": "search_code_with_budget",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "search_code_with_budget"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-22",
+      "category": "exact-symbol",
+      "query": "indexed_candidates",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "indexed_candidates"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-23",
+      "category": "exact-symbol",
+      "query": "code_match_query",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "code_match_query"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-24",
+      "category": "exact-symbol",
+      "query": "make_results",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "make_results"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-25",
+      "category": "exact-symbol",
+      "query": "cold_search",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "cold_search"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-26",
+      "category": "exact-symbol",
+      "query": "open_range",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "open_range"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-27",
+      "category": "exact-symbol",
+      "query": "list_symbols",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "list_symbols"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-28",
+      "category": "exact-symbol",
+      "query": "repo_map",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "repo_map"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-29",
+      "category": "exact-symbol",
+      "query": "current_text",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "current_text"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-30",
+      "category": "exact-symbol",
+      "query": "safe_relative_path",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "safe_relative_path"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-31",
+      "category": "exact-symbol",
+      "query": "excerpt",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "excerpt"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-32",
+      "category": "exact-symbol",
+      "query": "first_lines",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "first_lines"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-33",
+      "category": "exact-symbol",
+      "query": "bounded_snippet",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "bounded_snippet"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-34",
+      "category": "exact-symbol",
+      "query": "pack_context",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "pack_context"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-35",
+      "category": "exact-symbol",
+      "query": "estimate_tokens",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "estimate_tokens"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-36",
+      "category": "exact-symbol",
+      "query": "truncate_to_tokens",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "truncate_to_tokens"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-37",
+      "category": "exact-symbol",
+      "query": "modified_ns",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "modified_ns"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-38",
+      "category": "exact-symbol",
+      "query": "read_limited_from_root",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "read_limited_from_root"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-39",
+      "category": "exact-symbol",
+      "query": "read_bounded",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "read_bounded"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-40",
+      "category": "exact-symbol",
+      "query": "has_binary_controls",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "has_binary_controls"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-41",
+      "category": "exact-symbol",
+      "query": "is_secret_path",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "is_secret_path"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-42",
+      "category": "exact-symbol",
+      "query": "is_vcs_metadata_path",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "is_vcs_metadata_path"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-43",
+      "category": "exact-symbol",
+      "query": "valid_aetherignore",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "valid_aetherignore"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-44",
+      "category": "exact-symbol",
+      "query": "default_generated_path",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "default_generated_path"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-45",
+      "category": "exact-symbol",
+      "query": "bump",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "bump"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-46",
+      "category": "exact-symbol",
+      "query": "language_for",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "language_for"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-47",
+      "category": "exact-symbol",
+      "query": "extract",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "extract"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-48",
+      "category": "exact-symbol",
+      "query": "extract_with_budget",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "extract_with_budget"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-49",
+      "category": "exact-symbol",
+      "query": "collect_symbols",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "collect_symbols"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "symbol-50",
+      "category": "exact-symbol",
+      "query": "peak_rss_bytes",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "peak_rss_bytes"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "paraphrase-1",
+      "category": "natural-language",
+      "query": "persist an explicitly stored memory",
+      "relevant": [
+        {
+          "path": "src/memory.rs",
+          "symbol": "remember"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "paraphrase-2",
+      "category": "natural-language",
+      "query": "retrieve memory records that match this text",
+      "relevant": [
+        {
+          "path": "src/memory.rs",
+          "symbol": "recall"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "paraphrase-3",
+      "category": "natural-language",
+      "query": "find code in a repository using a query",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "search_code"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "paraphrase-4",
+      "category": "natural-language",
+      "query": "scan repository files and build the index",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "index_repository"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "multi-1",
+      "category": "multi-term",
+      "query": "memory namespace scope validation",
+      "relevant": [
+        {
+          "path": "src/memory.rs",
+          "symbol": "validate_scope"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "multi-2",
+      "category": "multi-term",
+      "query": "code query token matching",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "code_match_query"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "multi-3",
+      "category": "multi-term",
+      "query": "SQLite database migration transaction",
+      "relevant": [
+        {
+          "path": "src/db.rs",
+          "symbol": "migrate"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "multi-4",
+      "category": "multi-term",
+      "query": "MCP stdio JSON protocol",
+      "relevant": [
+        {
+          "path": "src/mcp.rs",
+          "symbol": "run_stdio"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "boundary-snake",
+      "category": "snake_case-boundary",
+      "query": "memory match query",
+      "relevant": [
+        {
+          "path": "src/memory.rs",
+          "symbol": "memory_match_query"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "boundary-camel",
+      "category": "camelCase-boundary",
+      "query": "index repository",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "index_repository"
+        }
+      ],
+      "expected": "hit"
+    },
+    {
+      "id": "expected-miss-1",
+      "category": "unsupported-in-token-fragment",
+      "query": "dex_repository",
+      "relevant": [
+        {
+          "path": "src/code.rs",
+          "symbol": "index_repository"
+        }
+      ],
+      "expected": "expected-miss"
+    },
+    {
+      "id": "expected-miss-2",
+      "category": "unsupported-in-token-fragment",
+      "query": "emory_match_quer",
+      "relevant": [
+        {
+          "path": "src/memory.rs",
+          "symbol": "memory_match_query"
+        }
+      ],
+      "expected": "expected-miss"
+    },
+    {
+      "id": "negative-1",
+      "category": "ambiguous-negative",
+      "query": "blue river mountain",
+      "relevant": [],
+      "expected": "no-match"
+    },
+    {
+      "id": "negative-2",
+      "category": "ambiguous-negative",
+      "query": "quantum banana semaphore",
+      "relevant": [],
+      "expected": "no-match"
+    }
+  ]
+}
