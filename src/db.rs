@@ -1,0 +1,261 @@
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OpenFlags};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+
+use crate::INDEX_FORMAT_VERSION;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RepoScope {
+    pub root: PathBuf,
+    pub repo_id: String,
+    pub worktree_id: String,
+    pub branch: Option<String>,
+    pub revision: Option<String>,
+}
+
+pub fn default_db_path() -> Result<PathBuf> {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .context("OS application-data directory is unavailable")?;
+    Ok(base.join("aether-midnight").join("midnight.sqlite3"))
+}
+
+pub fn open_db(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create database directory {}", parent.display()))?;
+    }
+    create_private_db_file(path)?;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open database {}", path.display()))?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "temp_store", "MEMORY")?;
+    migrate(&connection)?;
+    set_private_db_permissions(path)?;
+    Ok(connection)
+}
+
+fn create_private_db_file(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("create database file {}", path.display()))
+        }
+    }
+}
+
+fn set_private_db_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict database permissions for {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn migrate(connection: &Connection) -> Result<()> {
+    let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version > 1 {
+        bail!("database schema {version} is newer than this binary supports (1)");
+    }
+    if version == 0 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE metadata (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE repositories (
+                 repo_id TEXT NOT NULL,
+                 worktree_id TEXT NOT NULL,
+                 root TEXT NOT NULL,
+                 branch TEXT,
+                 revision TEXT,
+                 generation INTEGER NOT NULL DEFAULT 0,
+                 is_complete INTEGER NOT NULL DEFAULT 0 CHECK(is_complete IN (0,1)),
+                 structural_complete INTEGER NOT NULL DEFAULT 0 CHECK(structural_complete IN (0,1)),
+                 last_index_started TEXT,
+                 last_index_finished TEXT,
+                 eligible_files INTEGER NOT NULL DEFAULT 0,
+                 eligible_bytes INTEGER NOT NULL DEFAULT 0,
+                 skipped_json TEXT NOT NULL DEFAULT '{}',
+                 PRIMARY KEY(repo_id, worktree_id)
+             );
+             CREATE TABLE code_files (
+                 id INTEGER PRIMARY KEY,
+                 repo_id TEXT NOT NULL,
+                 worktree_id TEXT NOT NULL,
+                 rel_path TEXT NOT NULL,
+                 content_hash TEXT NOT NULL,
+                 language TEXT NOT NULL,
+                 size_bytes INTEGER NOT NULL,
+                 modified_ns INTEGER NOT NULL,
+                 indexed_generation INTEGER NOT NULL,
+                 parse_error INTEGER NOT NULL DEFAULT 0 CHECK(parse_error IN (0,1)),
+                 UNIQUE(repo_id, worktree_id, rel_path),
+                 FOREIGN KEY(repo_id, worktree_id)
+                   REFERENCES repositories(repo_id, worktree_id) ON DELETE CASCADE
+             );
+             CREATE INDEX code_files_scope_path
+                 ON code_files(repo_id, worktree_id, rel_path);
+             CREATE INDEX code_files_generation
+                 ON code_files(repo_id, worktree_id, indexed_generation);
+             CREATE VIRTUAL TABLE code_trigram USING fts5(
+                 content,
+                 tokenize='trigram case_sensitive 0'
+             );
+             CREATE TABLE code_symbols (
+                 id INTEGER PRIMARY KEY,
+                 file_id INTEGER NOT NULL REFERENCES code_files(id) ON DELETE CASCADE,
+                 name TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 line_start INTEGER NOT NULL,
+                 line_end INTEGER NOT NULL,
+                 byte_start INTEGER NOT NULL,
+                 byte_end INTEGER NOT NULL
+             );
+             CREATE INDEX code_symbols_name ON code_symbols(name COLLATE NOCASE);
+             CREATE INDEX code_symbols_file ON code_symbols(file_id);
+             CREATE TABLE memories (
+                 id INTEGER PRIMARY KEY,
+                 scope TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('source','derived')),
+                 content TEXT NOT NULL,
+                 source_uri TEXT,
+                 source_id INTEGER,
+                 supersedes_id INTEGER,
+                 created_at TEXT NOT NULL,
+                 observed_at TEXT,
+                 valid_from TEXT,
+                 valid_to TEXT,
+                 deleted_at TEXT,
+                 FOREIGN KEY(source_id) REFERENCES memories(id),
+                 FOREIGN KEY(supersedes_id) REFERENCES memories(id)
+             );
+             CREATE INDEX memories_scope_active
+                 ON memories(scope, deleted_at, created_at);
+             CREATE INDEX memories_source ON memories(source_id);
+             CREATE VIRTUAL TABLE memory_fts USING fts5(
+                 content,
+                 tokenize='unicode61 remove_diacritics 2'
+             );
+             CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
+                 DELETE FROM memory_fts WHERE rowid = old.id;
+             END;
+             CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
+             WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+                 DELETE FROM memory_fts WHERE rowid = new.id;
+             END;
+             INSERT INTO metadata(key,value) VALUES
+                 ('index_format_version','1'), ('schema_version','1');
+             PRAGMA user_version=1;
+             COMMIT;",
+        )?;
+    }
+    let format: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='index_format_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    if format.parse::<u32>().ok() != Some(INDEX_FORMAT_VERSION) {
+        bail!("unsupported index format version {format}");
+    }
+    Ok(())
+}
+
+pub fn repo_scope(path: &Path) -> Result<RepoScope> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("resolve repository {}", path.display()))?;
+    if !root.is_dir() {
+        bail!("repository path is not a directory: {}", root.display());
+    }
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let common = git(&["rev-parse", "--git-common-dir"])
+        .map(|p| {
+            let path = PathBuf::from(p);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            };
+            path.canonicalize().unwrap_or(path)
+        })
+        .unwrap_or_else(|| root.clone());
+    let branch = git(&["branch", "--show-current"]).filter(|s| !s.is_empty());
+    let revision = git(&["rev-parse", "HEAD"]);
+    let repo_id = hash_bytes(common.to_string_lossy().as_bytes());
+    let worktree_id = hash_bytes(root.to_string_lossy().as_bytes());
+    Ok(RepoScope {
+        root,
+        repo_id,
+        worktree_id,
+        branch,
+        revision,
+    })
+}
+
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+pub fn now_utc() -> String {
+    format_utc(time::OffsetDateTime::now_utc())
+}
+
+pub fn normalize_timestamp(value: &str) -> Result<String> {
+    let parsed = time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .context("timestamp must use RFC 3339 format")?;
+    Ok(format_utc(parsed.to_offset(time::UtcOffset::UTC)))
+}
+
+fn format_utc(value: time::OffsetDateTime) -> String {
+    let date = value.date();
+    let clock = value.time();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+        clock.hour(),
+        clock.minute(),
+        clock.second(),
+        clock.nanosecond()
+    )
+}
