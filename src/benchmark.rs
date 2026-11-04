@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,14 +26,32 @@ struct Fixture {
 #[derive(Debug, Deserialize)]
 struct BenchmarkQuery {
     id: String,
+    #[serde(alias = "category", default)]
     kind: String,
     query: String,
+    #[serde(default)]
     relevant_paths: Vec<String>,
+    #[serde(default)]
+    relevant: Vec<GroundTruth>,
+    #[serde(default)]
+    expected: String,
+    #[serde(default)]
+    expected_behavior: String,
+}
+#[derive(Debug, Deserialize, Serialize)]
+struct GroundTruth {
+    path: String,
+    symbol: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+struct QuerySuite {
+    queries: Vec<BenchmarkQuery>,
 }
 
 pub fn run(
     _requested_db: &Path,
     repo: &Path,
+    heldout_repo: &Path,
     manifest_path: &Path,
     samples: usize,
     index_samples: usize,
@@ -162,6 +180,21 @@ pub fn run(
     }
 
     let quality = retrieval_quality(&primary_db, &repo, &manifest.queries)?;
+    let suite_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let dev_suite: QuerySuite = serde_json::from_slice(&fs::read(suite_dir.join("suites/dev.json"))?)?;
+    let heldout_suite: QuerySuite = serde_json::from_slice(&fs::read(suite_dir.join("suites/heldout.json"))?)?;
+    let dev_repo = suite_dir.join("retrieval_fixture").canonicalize()
+        .context("resolve frozen dev retrieval fixture")?;
+    let heldout_repo = heldout_repo.canonicalize()
+        .context("resolve clean held-out repository archive")?;
+    let dev_db = base.path().join("dev-retrieval.sqlite3");
+    let dev_index = code::index_repository(&dev_db, &dev_repo, false, true, &cancellation)?;
+    if !dev_index.complete { bail!("dev retrieval fixture index was incomplete"); }
+    let heldout_db = base.path().join("heldout-retrieval.sqlite3");
+    let heldout_index = code::index_repository(&heldout_db, &heldout_repo, false, true, &cancellation)?;
+    if !heldout_index.complete { bail!("held-out repository index was incomplete"); }
+    let dev_quality = retrieval_suite_quality(&dev_db, &dev_repo, &dev_suite.queries)?;
+    let heldout_quality = retrieval_suite_quality(&heldout_db, &heldout_repo, &heldout_suite.queries)?;
     let rg = ripgrep_baseline(&repo, &manifest.queries)?;
     let memory_scaling = memory_scaling(base.path())?;
     let incremental = incremental_samples(&primary_db, &repo, 30)?;
@@ -228,6 +261,13 @@ pub fn run(
             "ripgrep_identical_query_set":rg
         },
         "retrieval_quality":quality,
+        "frozen_query_suites":{
+            "dev":{"corpus":"benchmark/retrieval_fixture","query_suite":"benchmark/suites/dev.json","evaluation":dev_quality},
+            "held_out":{"corpus_root":heldout_repo,"query_suite":"benchmark/suites/heldout.json",
+                "frozen_corpus_commit":"950e8f4bec475051e365b5f51e4953fb12972f0b",
+                "indexed_files":heldout_index.eligible_files,"indexed_bytes":heldout_index.eligible_bytes,"evaluation":heldout_quality},
+            "frozen_before_measurement":true,"ranking_tuned_after_heldout":false,"contaminated":false
+        },
         "memory_scaling":memory_scaling,
         "resources":{
             "peak_process_rss_bytes":code::peak_rss_bytes(),
@@ -734,6 +774,69 @@ fn retrieval_quality(db_path: &Path, repo: &Path, queries: &[BenchmarkQuery]) ->
     Ok(
         json!({"query_count":queries.len(),"recall_at_5":recall_sum/denom,"mrr":rr_sum/denom,"queries":per_query,"memory_cases":memory_cases}),
     )
+}
+
+fn retrieval_suite_quality(db_path: &Path, repo: &Path, queries: &[BenchmarkQuery]) -> Result<Value> {
+    let mut rows = Vec::with_capacity(queries.len());
+    let mut recall_scores = [Vec::new(), Vec::new(), Vec::new()];
+    let mut reciprocal_scores = Vec::new();
+    let mut expected_miss_rows = Vec::new();
+    let mut negative_rows = Vec::new();
+    for query in queries {
+        let results = code::search_code(db_path, repo, &query.query, 10)?;
+        let mut relevant_paths = query.relevant_paths.clone();
+        relevant_paths.extend(query.relevant.iter().map(|truth| truth.path.clone()));
+        relevant_paths.sort();
+        relevant_paths.dedup();
+        let expected_miss = query.expected == "expected-miss"
+            || query.expected_behavior.contains("unsupported");
+        let positive = !relevant_paths.is_empty() && !expected_miss;
+        let result_paths = results.iter().map(|result| result.path.clone()).collect::<Vec<_>>();
+        let ranks = result_paths.iter().enumerate()
+            .filter_map(|(index, path)| relevant_paths.contains(path).then_some(index + 1))
+            .collect::<Vec<_>>();
+        let reciprocal = ranks.first().map_or(0.0, |rank| 1.0 / *rank as f64);
+        let recalls = [1usize, 5, 10].map(|limit| {
+            if relevant_paths.is_empty() { 0.0 }
+            else { result_paths.iter().take(limit).filter(|path| relevant_paths.contains(path)).count() as f64 / relevant_paths.len() as f64 }
+        });
+        if positive {
+            for (index, score) in recalls.iter().enumerate() { recall_scores[index].push(*score); }
+            reciprocal_scores.push(reciprocal);
+        }
+        let no_result = results.is_empty();
+        if expected_miss {
+            expected_miss_rows.push(json!({"id":query.id,"query":query.query,"returned_no_results":no_result,
+                "returned_target_path_count":ranks.len(),"passed":no_result}));
+        } else if relevant_paths.is_empty() {
+            negative_rows.push(json!({"id":query.id,"query":query.query,"returned_no_results":no_result,
+                "false_positive":!no_result}));
+        }
+        rows.push(json!({"id":query.id,"category":query.kind,"query":query.query,"expected":query.expected,
+            "expected_behavior":query.expected_behavior,"ground_truth":query.relevant,"relevant_paths":relevant_paths,
+            "top10":results.iter().map(|result|json!({"path":result.path,"score":result.score,"freshness":result.freshness})).collect::<Vec<_>>(),
+            "recall_at_1":recalls[0],"recall_at_5":recalls[1],"recall_at_10":recalls[2],"reciprocal_rank":reciprocal,
+            "first_relevant_rank":ranks.first()}));
+    }
+    let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len().max(1) as f64;
+    let metric_distribution = |values: &[f64]| {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let percentile = |p: f64| if sorted.is_empty() { 0.0 } else {
+            sorted[(((sorted.len() - 1) as f64 * p).ceil() as usize).min(sorted.len() - 1)]
+        };
+        json!({"p50":percentile(0.50),"p95":percentile(0.95),"p99":percentile(0.99),"n":sorted.len(),"samples_sorted":sorted})
+    };
+    Ok(json!({"query_count":queries.len(),"positive_query_count":reciprocal_scores.len(),
+        "recall_at_1":mean(&recall_scores[0]),"recall_at_5":mean(&recall_scores[1]),
+        "recall_at_10":mean(&recall_scores[2]),"mrr":mean(&reciprocal_scores),
+        "query_level_distributions":{"recall_at_1":metric_distribution(&recall_scores[0]),
+            "recall_at_5":metric_distribution(&recall_scores[1]),"recall_at_10":metric_distribution(&recall_scores[2]),
+            "mrr":metric_distribution(&reciprocal_scores)},
+        "expected_miss_count":expected_miss_rows.len(),"expected_miss_pass_count":expected_miss_rows.iter().filter(|row|row["passed"]==true).count(),
+        "expected_misses":expected_miss_rows,"negative_query_count":negative_rows.len(),
+        "negative_false_positive_count":negative_rows.iter().filter(|row|row["false_positive"]==true).count(),
+        "negative_queries":negative_rows,"queries":rows}))
 }
 
 fn memory_quality_cases(db_path: &Path) -> Result<Value> {

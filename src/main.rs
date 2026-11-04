@@ -130,6 +130,8 @@ enum Commands {
     Bench {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        #[arg(long, default_value = ".")]
+        heldout_repo: PathBuf,
         #[arg(long, default_value = "benchmark/manifest.json")]
         manifest: PathBuf,
         #[arg(long, default_value_t = 20)]
@@ -287,6 +289,7 @@ fn main() -> Result<()> {
         }
         Commands::Bench {
             repo,
+            heldout_repo,
             manifest,
             samples,
             index_samples,
@@ -295,6 +298,7 @@ fn main() -> Result<()> {
             let result = benchmark::run(
                 &db_path,
                 &repo,
+                &heldout_repo,
                 &manifest,
                 samples,
                 index_samples,
