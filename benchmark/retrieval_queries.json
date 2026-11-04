@@ -1,0 +1,631 @@
+{
+  "schema_version": 1,
+  "queries": [
+    {
+      "id": "rust-exact_path",
+      "language": "rust",
+      "kind": "exact-path",
+      "query": "rust/src/lib.rs",
+      "relevant_paths": [
+        "rust/src/lib.rs"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-full_symbol",
+      "language": "rust",
+      "kind": "full-symbol",
+      "query": "refreshToken",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-snake_case",
+      "language": "rust",
+      "kind": "snake-case",
+      "query": "token_refresh",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-camel_case_fragment",
+      "language": "rust",
+      "kind": "in-token-fragment",
+      "query": "refreshTok",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported-identifier-boundary-prefix"
+    },
+    {
+      "id": "rust-pascal_case",
+      "language": "rust",
+      "kind": "pascal-case",
+      "query": "TokenRefresher",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-acronym_digit_boundary",
+      "language": "rust",
+      "kind": "acronym-digit",
+      "query": "buildHTTP2Client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-normalized_identifier",
+      "language": "rust",
+      "kind": "normalized-identifier",
+      "query": "http2 client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-complete_word",
+      "language": "rust",
+      "kind": "whole-word",
+      "query": "retry policy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-natural_language",
+      "language": "rust",
+      "kind": "natural-language",
+      "query": "graceful retries transient gateway timeout",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-comment_docstring",
+      "language": "rust",
+      "kind": "comment-docstring",
+      "query": "reopen stream temporary upstream interruption bounded backoff",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-cross_file_symbol",
+      "language": "rust",
+      "kind": "cross-file-symbol",
+      "query": "sharedRetryPolicy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "rust-negative",
+      "language": "rust",
+      "kind": "negative",
+      "query": "zzNoSuchTokenMarker",
+      "relevant_paths": [],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-exact_path",
+      "language": "python",
+      "kind": "exact-path",
+      "query": "python/src/client.py",
+      "relevant_paths": [
+        "python/src/client.py"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-full_symbol",
+      "language": "python",
+      "kind": "full-symbol",
+      "query": "refreshToken",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-snake_case",
+      "language": "python",
+      "kind": "snake-case",
+      "query": "token_refresh",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-camel_case_fragment",
+      "language": "python",
+      "kind": "in-token-fragment",
+      "query": "refreshTok",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported-identifier-boundary-prefix"
+    },
+    {
+      "id": "python-pascal_case",
+      "language": "python",
+      "kind": "pascal-case",
+      "query": "TokenRefresher",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-acronym_digit_boundary",
+      "language": "python",
+      "kind": "acronym-digit",
+      "query": "buildHTTP2Client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-normalized_identifier",
+      "language": "python",
+      "kind": "normalized-identifier",
+      "query": "http2 client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-complete_word",
+      "language": "python",
+      "kind": "whole-word",
+      "query": "retry policy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-natural_language",
+      "language": "python",
+      "kind": "natural-language",
+      "query": "graceful retries transient gateway timeout",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-comment_docstring",
+      "language": "python",
+      "kind": "comment-docstring",
+      "query": "reopen stream temporary upstream interruption bounded backoff",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-cross_file_symbol",
+      "language": "python",
+      "kind": "cross-file-symbol",
+      "query": "sharedRetryPolicy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "python-negative",
+      "language": "python",
+      "kind": "negative",
+      "query": "zzNoSuchTokenMarker",
+      "relevant_paths": [],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-exact_path",
+      "language": "typescript",
+      "kind": "exact-path",
+      "query": "typescript/src/client.ts",
+      "relevant_paths": [
+        "typescript/src/client.ts"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-full_symbol",
+      "language": "typescript",
+      "kind": "full-symbol",
+      "query": "refreshToken",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-snake_case",
+      "language": "typescript",
+      "kind": "snake-case",
+      "query": "token_refresh",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-camel_case_fragment",
+      "language": "typescript",
+      "kind": "in-token-fragment",
+      "query": "refreshTok",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported-identifier-boundary-prefix"
+    },
+    {
+      "id": "typescript-pascal_case",
+      "language": "typescript",
+      "kind": "pascal-case",
+      "query": "TokenRefresher",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-acronym_digit_boundary",
+      "language": "typescript",
+      "kind": "acronym-digit",
+      "query": "buildHTTP2Client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-normalized_identifier",
+      "language": "typescript",
+      "kind": "normalized-identifier",
+      "query": "http2 client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-complete_word",
+      "language": "typescript",
+      "kind": "whole-word",
+      "query": "retry policy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-natural_language",
+      "language": "typescript",
+      "kind": "natural-language",
+      "query": "graceful retries transient gateway timeout",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-comment_docstring",
+      "language": "typescript",
+      "kind": "comment-docstring",
+      "query": "reopen stream temporary upstream interruption bounded backoff",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-cross_file_symbol",
+      "language": "typescript",
+      "kind": "cross-file-symbol",
+      "query": "sharedRetryPolicy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "typescript-negative",
+      "language": "typescript",
+      "kind": "negative",
+      "query": "zzNoSuchTokenMarker",
+      "relevant_paths": [],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-exact_path",
+      "language": "tsx",
+      "kind": "exact-path",
+      "query": "tsx/src/widget.tsx",
+      "relevant_paths": [
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-full_symbol",
+      "language": "tsx",
+      "kind": "full-symbol",
+      "query": "refreshToken",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-snake_case",
+      "language": "tsx",
+      "kind": "snake-case",
+      "query": "token_refresh",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-camel_case_fragment",
+      "language": "tsx",
+      "kind": "in-token-fragment",
+      "query": "refreshTok",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported-identifier-boundary-prefix"
+    },
+    {
+      "id": "tsx-pascal_case",
+      "language": "tsx",
+      "kind": "pascal-case",
+      "query": "TokenRefresher",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-acronym_digit_boundary",
+      "language": "tsx",
+      "kind": "acronym-digit",
+      "query": "buildHTTP2Client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-normalized_identifier",
+      "language": "tsx",
+      "kind": "normalized-identifier",
+      "query": "http2 client",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-complete_word",
+      "language": "tsx",
+      "kind": "whole-word",
+      "query": "retry policy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-natural_language",
+      "language": "tsx",
+      "kind": "natural-language",
+      "query": "graceful retries transient gateway timeout",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-comment_docstring",
+      "language": "tsx",
+      "kind": "comment-docstring",
+      "query": "reopen stream temporary upstream interruption bounded backoff",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-cross_file_symbol",
+      "language": "tsx",
+      "kind": "cross-file-symbol",
+      "query": "sharedRetryPolicy",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "tsx-negative",
+      "language": "tsx",
+      "kind": "negative",
+      "query": "zzNoSuchTokenMarker",
+      "relevant_paths": [],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "cross-language-natural-language",
+      "language": "all",
+      "kind": "natural-language",
+      "query": "restore dropped connection after transient gateway timeout",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "supported"
+    },
+    {
+      "id": "ambiguous-retry",
+      "language": "all",
+      "kind": "ambiguous",
+      "query": "retry",
+      "relevant_paths": [],
+      "expected_behavior": "ambiguous-negative"
+    },
+    {
+      "id": "rust-arbitrary-mid-token-fragment",
+      "language": "rust",
+      "kind": "arbitrary-mid-token-fragment",
+      "query": "reshTok",
+      "relevant_paths": [
+        "rust/src/lib.rs",
+        "python/src/client.py",
+        "typescript/src/client.ts",
+        "tsx/src/widget.tsx"
+      ],
+      "expected_behavior": "unsupported-arbitrary-mid-token"
+    }
+  ]
+}

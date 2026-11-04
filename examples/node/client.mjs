@@ -1,4 +1,4 @@
-// Runs unchanged under Node.js and Bun. No hosted SDK or network connection is used.
+// Uses Node.js built-in child-process and readline APIs. Bun compatibility was not checked here.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 

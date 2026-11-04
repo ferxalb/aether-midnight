@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -48,9 +51,21 @@ pub fn run(
         bail!("benchmark manifest has no retrieval queries");
     }
     let base = TempDir::new().context("create isolated benchmark database directory")?;
+    static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
+    let run_id = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        NEXT_RUN.fetch_add(1, Ordering::Relaxed)
+    );
     let primary_db = base.path().join("midnight.sqlite3");
     let run_count = index_samples.max(1);
     let mut full_index_ms = Vec::with_capacity(run_count);
+    let mut wal_checkpoint_ms = Vec::with_capacity(run_count);
+    let mut full_index_samples = Vec::with_capacity(run_count);
     let mut index_reports = Vec::with_capacity(run_count);
     let cancellation = std::sync::atomic::AtomicBool::new(false);
     for sample in 0..run_count {
@@ -66,8 +81,19 @@ pub fn run(
             bail!("complete-index benchmark unexpectedly produced a partial index");
         }
         full_index_ms.push(elapsed);
-        index_reports.push(report);
+        let checkpoint_started = Instant::now();
         code::wal_checkpoint(&db_path)?;
+        let checkpoint_elapsed = checkpoint_started.elapsed().as_secs_f64() * 1000.0;
+        wal_checkpoint_ms.push(checkpoint_elapsed);
+        full_index_samples.push(json!({
+            "sample_number":sample+1,
+            "cache_state":"OS file cache unknown; the harness does not evict it",
+            "sample_id":report.sample_id,
+            "full_index_ready_ms":elapsed,
+            "wal_checkpoint_ms":checkpoint_elapsed,
+            "report":report.clone()
+        }));
+        index_reports.push(report);
     }
     let primary_report = &index_reports[0];
     let primary_status = code::index_status(&primary_db, &repo)?;
@@ -142,14 +168,39 @@ pub fn run(
     let source_bytes = primary_status.eligible_bytes.max(1);
     let index_bytes = code::database_bytes(&primary_db);
     let sqlite = code::sqlite_version(&primary_db)?;
+    let mut per_stage = serde_json::Map::new();
+    if let Some(first) = index_reports.first() {
+        for key in first.timings_ms.keys() {
+            if key == "phase_accounted_total" || key == "full_index_ready" {
+                continue;
+            }
+            let values = index_reports
+                .iter()
+                .filter_map(|report| report.timings_ms.get(key).copied())
+                .collect::<Vec<_>>();
+            per_stage.insert(key.clone(), distribution(&values));
+        }
+    }
+    let database_path_bytes = std::fs::metadata(&primary_db).map_or(0, |m| m.len());
+    let wal_path_bytes =
+        std::fs::metadata(format!("{}-wal", primary_db.display())).map_or(0, |m| m.len());
+    let shm_path_bytes =
+        std::fs::metadata(format!("{}-shm", primary_db.display())).map_or(0, |m| m.len());
+    let integrity_check: String =
+        crate::db::open_db(&primary_db)?
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity_check != "ok" {
+        bail!("SQLite integrity_check failed: {integrity_check}");
+    }
     let output = json!({
         "schema_version":1,
+        "run_id":run_id,
         "measurement_conditions":{
             "scope":"locally generated deterministic reference fixture",
             "network":"not used",
             "database_cache":"fresh database for full index; warm database for search; fresh process with empty index for first useful context",
             "filesystem_cache":"not evicted; first cold-search sample is OS-cache-unknown and later samples may be warm",
-            "timers":"process launch through grounded JSON result for first useful context; operation start through query-visible result for warm and incremental calls",
+            "timers":"process launch through grounded JSON result for first useful context; full-index-ready excludes the separately reported WAL checkpoint; worker stage work is summed across workers and may overlap; operation start through query-visible result for warm and incremental calls",
             "build_excluded":true
         },
         "environment":environment(&repo,&sqlite),
@@ -163,6 +214,9 @@ pub fn run(
             "first_useful_context_fresh_process_empty_index":distribution(&first_useful_ms),
             "full_index_fresh_database":distribution(&full_index_ms),
             "full_index_phases_first_sample_ms":primary_report.timings_ms,
+            "full_index_stage_distributions_ms":per_stage,
+            "full_index_samples":full_index_samples,
+            "wal_checkpoint":distribution(&wal_checkpoint_ms),
             "warm_search":distribution(&search_ms),
             "incremental_update_query_visible":distribution(&incremental),
             "large_repository_partial_context_during_index":partial_context,
@@ -171,16 +225,234 @@ pub fn run(
         "retrieval_quality":quality,
         "resources":{
             "peak_process_rss_bytes":code::peak_rss_bytes(),
-            "rss_after_stress_cycles_bytes":stress.get("rss_samples_bytes").cloned().unwrap_or(json!([])),
-            "stress":stress,
             "allocator_live_heap_bytes":Value::Null,
             "memory_mapped_pages_bytes":Value::Null,
+            "rss_measurement_scope":"benchmark process only; peak high-water mark",
+            "index_database_bytes":database_path_bytes,
+            "index_wal_bytes":wal_path_bytes,
+            "index_shm_bytes":shm_path_bytes,
+            "maximum_in_flight_bytes":index_reports.iter().map(|r|r.max_in_flight_bytes).max().unwrap_or(0),
+            "maximum_pipeline_buffered_bytes":index_reports.iter().map(|r|r.max_pipeline_buffered_bytes).max().unwrap_or(0),
+            "maximum_queued_artifacts":index_reports.iter().map(|r|r.max_queued_artifacts).max().unwrap_or(0),
+            "maximum_pipeline_artifacts":index_reports.iter().map(|r|r.max_pipeline_artifacts).max().unwrap_or(0),
+            "rss_after_stress_cycles_bytes":stress.get("rss_samples_bytes").cloned().unwrap_or(json!([])),
+            "stress":stress,
             "unavailable_measurements":"allocator live heap and mmap pages are not instrumented on this build"
         },
         "index_status":primary_status,
+        "sqlite_integrity_check":integrity_check,
         "database_file_bytes":index_bytes
     });
     Ok(output)
+}
+
+pub fn evaluate_fts5(repo: &Path, manifest_path: &Path, samples: usize) -> Result<Value> {
+    let repo = repo
+        .canonicalize()
+        .with_context(|| format!("resolve tokenizer-evaluation corpus {}", repo.display()))?;
+    let manifest: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    let mut files = fs::read_dir(repo.join("src"))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect::<Vec<_>>();
+    files.sort();
+    let source_bytes = files
+        .iter()
+        .map(|path| fs::metadata(path).map(|metadata| metadata.len()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .sum::<u64>();
+    if files.len() as u64 != manifest.fixture.eligible_files
+        || source_bytes != manifest.fixture.eligible_bytes
+    {
+        bail!(
+            "tokenizer evaluation fixture mismatch: expected {}/{} bytes, found {}/{}",
+            manifest.fixture.eligible_files,
+            manifest.fixture.eligible_bytes,
+            files.len(),
+            source_bytes
+        );
+    }
+    let temporary = TempDir::new().context("create tokenizer evaluation databases")?;
+    let tokenizer_configs = [
+        ("trigram", "trigram case_sensitive 0"),
+        ("unicode61", "unicode61 remove_diacritics 2"),
+    ];
+    let mut configurations = serde_json::Map::new();
+    let mut runtime_version = String::new();
+    for (name, definition) in tokenizer_configs {
+        let database = temporary.path().join(format!("{name}.sqlite3"));
+        let build_started = Instant::now();
+        let connection = build_tokenizer_database(&database, &repo, &files, definition)?;
+        runtime_version = connection.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+        let index_bytes = sqlite_file_bytes(&database);
+        let evaluated =
+            evaluate_tokenizer_queries(&connection, name, &manifest.queries, samples.max(1))?;
+        configurations.insert(
+            name.to_string(),
+            json!({
+                "sqlite_version":runtime_version,
+                "build_ms":build_ms,
+                "index_bytes":index_bytes,
+                "index_to_source_ratio":index_bytes as f64/source_bytes.max(1) as f64,
+                "eligible_files":files.len(),
+                "eligible_bytes":source_bytes,
+                "warm_search_ms":evaluated["warm_search_ms"],
+                "recall_at_5":evaluated["recall_at_5"],
+                "mrr":evaluated["mrr"],
+                "queries":evaluated["queries"]
+            }),
+        );
+        drop(connection);
+    }
+    Ok(json!({
+        "schema_version":1,
+        "sqlite_version":runtime_version,
+        "runtime":"rusqlite bundled SQLite",
+        "fixture_seed":manifest.fixture.seed,
+        "eligible_files":files.len(),
+        "eligible_bytes":source_bytes,
+        "insertion":"same source read, document table insert, FTS insert, 512-file transaction batches, WAL/NORMAL synchronous and checkpoint for each tokenizer",
+        "queries":"same content-query subset of benchmark/manifest.json for each tokenizer; path query excluded from content search",
+        "samples_per_query":samples.max(1),
+        "tokenizers":configurations
+    }))
+}
+
+fn build_tokenizer_database(
+    database: &Path,
+    repo: &Path,
+    files: &[std::path::PathBuf],
+    tokenizer: &str,
+) -> Result<Connection> {
+    let mut connection = Connection::open(database)?;
+    connection.execute_batch(&format!(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         PRAGMA temp_store=FILE;
+         CREATE TABLE documents(id INTEGER PRIMARY KEY,path TEXT NOT NULL);
+         CREATE VIRTUAL TABLE content_fts USING fts5(
+             content,content='',contentless_delete=1,tokenize='{tokenizer}'
+         );"
+    ))?;
+    for (batch_number, batch) in files.chunks(512).enumerate() {
+        let mut rows = Vec::with_capacity(batch.len());
+        for (offset, path) in batch.iter().enumerate() {
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("read tokenizer corpus file {}", path.display()))?;
+            let document_id = (batch_number * 512 + offset + 1) as i64;
+            let relative = path
+                .strip_prefix(repo)
+                .context("tokenizer corpus file escaped the root")?
+                .to_string_lossy()
+                .replace('\\', "/");
+            rows.push((document_id, relative, text));
+        }
+        let transaction = connection.transaction()?;
+        {
+            let mut document_insert =
+                transaction.prepare_cached("INSERT INTO documents(id,path) VALUES(?1,?2)")?;
+            let mut fts_insert = transaction
+                .prepare_cached("INSERT INTO content_fts(rowid,content) VALUES(?1,?2)")?;
+            for (document_id, path, content) in rows {
+                document_insert.execute(params![document_id, path])?;
+                fts_insert.execute(params![document_id, content])?;
+            }
+        }
+        transaction.commit()?;
+    }
+    Ok(connection)
+}
+
+fn evaluate_tokenizer_queries(
+    connection: &Connection,
+    tokenizer: &str,
+    queries: &[BenchmarkQuery],
+    samples: usize,
+) -> Result<Value> {
+    let mut details = Vec::new();
+    let mut total_recall = 0.0;
+    let mut total_reciprocal = 0.0;
+    let mut all_samples = Vec::new();
+    for query in queries.iter().filter(|query| query.kind != "path") {
+        let expression = tokenizer_match_query(&query.query, tokenizer);
+        let mut elapsed_samples = Vec::new();
+        let top_paths = if let Some(expression) = expression {
+            let sql = "SELECT documents.path FROM content_fts \
+                       JOIN documents ON documents.id=content_fts.rowid \
+                       WHERE content_fts MATCH ?1 \
+                       ORDER BY bm25(content_fts),documents.path LIMIT 5";
+            let mut statement = connection.prepare_cached(sql)?;
+            let rows = statement.query_map([&expression], |row| row.get::<_, String>(0))?;
+            let mut paths = Vec::new();
+            for row in rows {
+                paths.push(row?);
+            }
+            for _ in 0..samples {
+                let started = Instant::now();
+                statement
+                    .query_map([&expression], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                elapsed_samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            paths
+        } else {
+            Vec::new()
+        };
+        all_samples.extend(elapsed_samples.iter().copied());
+        let relevant = query
+            .relevant_paths
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let ranks = top_paths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| relevant.contains(path).then_some(index + 1))
+            .collect::<Vec<_>>();
+        let recall = ranks.len() as f64 / relevant.len().max(1) as f64;
+        let reciprocal = ranks.first().map_or(0.0, |rank| 1.0 / *rank as f64);
+        total_recall += recall;
+        total_reciprocal += reciprocal;
+        details.push(json!({
+            "id":query.id,
+            "query":query.query,
+            "top5":top_paths,
+            "recall_at_5":recall,
+            "reciprocal_rank":reciprocal,
+            "search_samples_ms":elapsed_samples
+        }));
+    }
+    let count = details.len().max(1) as f64;
+    Ok(json!({
+        "recall_at_5":total_recall/count,
+        "mrr":total_reciprocal/count,
+        "warm_search_ms":distribution(&all_samples),
+        "queries":details
+    }))
+}
+
+fn tokenizer_match_query(query: &str, tokenizer: &str) -> Option<String> {
+    let terms = query
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|term| term.chars().any(char::is_alphanumeric))
+        .filter(|term| tokenizer != "trigram case_sensitive 0" || term.chars().count() >= 3)
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" OR "))
+}
+
+fn sqlite_file_bytes(path: &Path) -> u64 {
+    [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ]
+    .iter()
+    .filter_map(|path| fs::metadata(path).ok())
+    .map(|metadata| metadata.len())
+    .sum()
 }
 
 fn partial_context_during_index(base: &Path, repo: &Path, query: &str) -> Result<Value> {
@@ -467,7 +739,8 @@ fn stress_cycles_run(base: &Path, cycles: usize) -> Result<Value> {
 
 fn environment(repo: &Path, sqlite: &str) -> Value {
     let cpu = command_stdout("sysctl", &["-n", "machdep.cpu.brand_string"])
-        .or_else(|| command_stdout("sysctl", &["-n", "hw.model"]));
+        .or_else(|| command_stdout("sysctl", &["-n", "hw.model"]))
+        .or_else(linux_cpu_model);
     let cores = command_stdout("sysctl", &["-n", "hw.logicalcpu"])
         .and_then(|s| s.trim().parse::<u32>().ok())
         .or_else(|| {
@@ -475,16 +748,41 @@ fn environment(repo: &Path, sqlite: &str) -> Value {
                 .ok()
                 .map(|n| n.get() as u32)
         });
-    let memory =
-        command_stdout("sysctl", &["-n", "hw.memsize"]).and_then(|s| s.trim().parse::<u64>().ok());
+    let memory = command_stdout("sysctl", &["-n", "hw.memsize"])
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .or_else(linux_memory_bytes);
+    let memory_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
     let storage = command_stdout("df", &["-h", repo.to_string_lossy().as_ref()])
         .and_then(|s| s.lines().last().map(str::to_string));
-    json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu":cpu,"logical_cores":cores,"ram_bytes":memory,
+    json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu":cpu,"logical_cores_available_to_process":cores,"ram_bytes":memory,"memory_limit_bytes":memory_limit,
         "storage_mount":storage,"rustc":command_stdout("rustc",&["--version"]),"cargo_profile":if cfg!(debug_assertions){"debug"}else{"release"},
         "sqlite_version":sqlite,"rusqlite_crate":"0.41.1","tree_sitter_crate":"0.27.1",
         "tree_sitter_grammar_crates":{"rust":"0.24.2","python":"0.25.0","typescript":"0.23.2"},
         "ripgrep":command_version("rg",&["--version"]),"node":command_version("node",&["--version"]),
         "bun":command_version("bun",&["--version"]),"go":command_version("go",&["version"]),"corpus_root":repo})
+}
+
+fn linux_cpu_model() -> Option<String> {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("model name")
+                .and_then(|value| value.split_once(':'))
+                .map(|(_, value)| value.trim().to_string())
+        })
+}
+
+fn linux_memory_bytes() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let value = line.strip_prefix("MemTotal:")?.split_whitespace().next()?;
+            value.parse::<u64>().ok().map(|kilobytes| kilobytes * 1024)
+        })
 }
 
 fn distribution(values: &[f64]) -> Value {

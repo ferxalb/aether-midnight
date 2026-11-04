@@ -33,7 +33,7 @@ enum Commands {
         #[arg(long)]
         verify_hashes: bool,
     },
-    /// Search exact paths/symbols and deterministic lexical content.
+    /// Search paths, symbols, whole-token content, and identifier-boundary fragments; arbitrary in-token substrings are unsupported.
     Search {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -138,6 +138,15 @@ enum Commands {
         index_samples: usize,
         #[arg(long, default_value_t = 10)]
         stress_cycles: usize,
+    },
+    #[command(hide = true)]
+    FtsEval {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, default_value = "benchmark/manifest.json")]
+        manifest: PathBuf,
+        #[arg(long, default_value_t = 30)]
+        samples: usize,
     },
     /// Serve the local MCP tool interface over newline-delimited stdio JSON-RPC.
     Mcp,
@@ -292,6 +301,13 @@ fn main() -> Result<()> {
                 stress_cycles,
             )?;
             print_json(&result)?;
+        }
+        Commands::FtsEval {
+            repo,
+            manifest,
+            samples,
+        } => {
+            print_json(&benchmark::evaluate_fts5(&repo, &manifest, samples)?)?;
         }
         Commands::Mcp => mcp::run_stdio(&db_path, cancellation)?,
     }

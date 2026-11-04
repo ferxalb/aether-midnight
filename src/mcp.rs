@@ -151,7 +151,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "search_code",
-            "Search exact paths, extracted symbols, then lexical substrings. Returns current-source evidence and packs snippets within a deterministic estimated-token budget.",
+            "Search exact paths, extracted symbols, whole lexical tokens, and identifier-boundary fragments. Arbitrary substrings inside a token are unsupported. Returns current-source evidence and packs snippets within a deterministic estimated-token budget.",
             json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192}},"required":["repo_path","query"]}),
         ),
         tool(

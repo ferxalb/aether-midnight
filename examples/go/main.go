@@ -1,4 +1,4 @@
-// Minimal Go MCP stdio client; it calls the same Rust process as the Node/Bun example.
+// Minimal Go MCP stdio client; it calls the same Rust process as the Node.js example.
 package main
 
 import (

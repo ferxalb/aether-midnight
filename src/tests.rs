@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tempfile::TempDir;
 
@@ -363,6 +364,27 @@ fn tree_sitter_extracts_supported_python_and_typescript_symbols() {
 }
 
 #[test]
+fn indexed_identifier_subwords_match_camel_case_fragments() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("identifier-fragments.sqlite3");
+    let repo = new_repo(&temp, "identifier-fragments");
+    fs::write(
+        repo.join("src/client.ts"),
+        "export function refreshToken() { return 'ok'; }\nexport function buildHTTP2Client() { return {}; }\n// retryToken refreshToken glossary\n",
+    )
+    .unwrap();
+    let report = run_index(&database, &repo);
+    assert!(report.complete);
+    let results = code::search_code(&database, &repo, "refreshTok", 5).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].path, "src/client.ts");
+    assert_eq!(results[0].freshness, "fresh");
+    let normalized = code::search_code(&database, &repo, "http2 client", 5).unwrap();
+    assert_eq!(normalized.len(), 1);
+    assert_eq!(normalized[0].path, "src/client.ts");
+}
+
+#[test]
 fn structural_parse_errors_keep_every_index_surface_marked_incomplete() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("parse-error.sqlite3");
@@ -558,6 +580,80 @@ fn cancellation_stays_partial_and_reconciliation_recovers() {
         )
         .unwrap();
     assert_eq!(files, fts);
+}
+
+#[test]
+fn cancellation_during_pipeline_stages_stays_partial_and_recovers() {
+    for stage in [
+        code::IndexStage::Discovery,
+        code::IndexStage::FileRead,
+        code::IndexStage::Parsing,
+        code::IndexStage::QueueBackpressure,
+        code::IndexStage::SqliteBatchWrite,
+    ] {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("db.sqlite3");
+        let repo = new_repo(&temp, "repo");
+        match stage {
+            code::IndexStage::QueueBackpressure => {
+                for index in 0..32 {
+                    fs::write(
+                        repo.join(format!("src/{index:03}.txt")),
+                        "lowercase queue payload ".repeat(1024),
+                    )
+                    .unwrap();
+                }
+            }
+            code::IndexStage::SqliteBatchWrite => {
+                for index in 0..512 {
+                    fs::write(
+                        repo.join(format!("src/{index:03}.rs")),
+                        format!("pub fn batch_marker_{index}() {{}}\n"),
+                    )
+                    .unwrap();
+                }
+            }
+            code::IndexStage::FileRead => {
+                fs::write(
+                    repo.join("src/a.rs"),
+                    format!(
+                        "// {}\npub fn cancellation_marker() {{}}\n",
+                        "x".repeat(256 * 1024)
+                    ),
+                )
+                .unwrap();
+            }
+            _ => {
+                fs::write(repo.join("src/a.rs"), "pub fn cancellation_marker() {}\n").unwrap();
+            }
+        }
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let fired = Arc::new(AtomicBool::new(false));
+        let cancellation_for_hook = cancellation.clone();
+        let fired_for_hook = fired.clone();
+        let hook: code::IndexStageHook = Arc::new(move |observed| {
+            if stage == code::IndexStage::QueueBackpressure
+                && observed == code::IndexStage::FileRead
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if observed == stage && !fired_for_hook.swap(true, Ordering::SeqCst) {
+                cancellation_for_hook.store(true, Ordering::SeqCst);
+            }
+        });
+        let cancelled =
+            code::index_repository_with_stage_hook(&database, &repo, &cancellation, hook).unwrap();
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "stage hook did not fire: {stage:?}"
+        );
+        assert!(cancelled.cancelled && !cancelled.complete, "{stage:?}");
+        assert!(!code::index_status(&database, &repo).unwrap().complete);
+        assert!(
+            run_index(&database, &repo).complete,
+            "recovery after {stage:?}"
+        );
+    }
 }
 
 #[test]

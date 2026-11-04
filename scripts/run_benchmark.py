@@ -40,7 +40,8 @@ def main() -> int:
                 print(result.stdout, file=sys.stderr, end="")
             return result.returncode
         comparison = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "evaluate_fts5.py"), "--repo", str(corpus)],
+            [str(binary), "fts-eval", "--repo", str(corpus), "--manifest", str(ROOT / "benchmark" / "manifest.json"),
+             "--samples", os.environ.get("MIDNIGHT_FTS_SAMPLES", "30")],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -51,8 +52,21 @@ def main() -> int:
             if comparison.stdout:
                 print(comparison.stdout, file=sys.stderr, end="")
             return comparison.returncode
+        retrieval = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "evaluate_retrieval.py")],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if retrieval.returncode:
+            if retrieval.stderr:
+                print(retrieval.stderr, file=sys.stderr, end="")
+            if retrieval.stdout:
+                print(retrieval.stdout, file=sys.stderr, end="")
+            return retrieval.returncode
         report = json.loads(result.stdout)
         report["fts5_tokenizer_evaluation"] = json.loads(comparison.stdout)
+        report["expanded_retrieval_evaluation"] = json.loads(retrieval.stdout)
         sys.stdout.write(json.dumps(report, indent=2) + "\n")
         return 0
 

@@ -8,14 +8,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::db::{RepoScope, hash_bytes, now_utc, open_db, repo_scope};
 use crate::text_index::{SqliteFtsIndex, TextIndex};
 use crate::{INDEX_FORMAT_VERSION, MAX_FILE_BYTES};
 
-const BATCH_FILES: usize = 512;
-const BATCH_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_BATCH_FILES: usize = 512;
+const DEFAULT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OPEN_RANGE_LINES: u32 = 200;
 const MAX_SNIPPET_LINES: usize = 8;
 const MAX_SNIPPET_BYTES: usize = 4096;
@@ -25,6 +27,8 @@ const MAX_SEARCH_QUERY_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_AETHERIGNORE_BYTES: u64 = MAX_FILE_BYTES;
 const PARSER_TIME_BUDGET: Duration = Duration::from_millis(250);
+const MAX_INDEX_WORKERS: usize = 12;
+const MAX_PIPELINE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Symbol {
@@ -52,6 +56,17 @@ pub struct IndexReport {
     pub unchanged: u64,
     pub skipped: BTreeMap<String, u64>,
     pub timings_ms: BTreeMap<String, f64>,
+    pub sample_id: String,
+    pub worker_count: usize,
+    pub batch_file_limit: usize,
+    pub batch_byte_limit: usize,
+    pub files_discovered: u64,
+    pub bytes_read: u64,
+    pub source_file_open_count: u64,
+    pub max_in_flight_bytes: u64,
+    pub max_pipeline_buffered_bytes: u64,
+    pub max_queued_artifacts: u64,
+    pub max_pipeline_artifacts: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,7 +139,6 @@ pub struct RepoMap {
     pub top_directories: BTreeMap<String, u64>,
 }
 
-#[derive(Clone)]
 struct PendingFile {
     rel_path: String,
     hash: String,
@@ -132,6 +146,7 @@ struct PendingFile {
     size: u64,
     modified_ns: i64,
     text: String,
+    identifier_terms: String,
     symbols: Vec<Symbol>,
     parse_error: bool,
     is_new: bool,
@@ -148,10 +163,123 @@ struct SeenFile {
 #[derive(Default)]
 struct Timers {
     discovery: f64,
+    metadata: f64,
+    read: f64,
     hashing: f64,
+    identifier_extraction: f64,
     parsing: f64,
     index_writing: f64,
+    fts_payload_assembly: f64,
+    fts_execution: f64,
+    metadata_writes: f64,
+    symbol_writes: f64,
     commit: f64,
+    reconciliation: f64,
+    worker_wait: f64,
+}
+
+#[derive(Default)]
+struct WorkerWork {
+    read_ms: f64,
+    hash_ms: f64,
+    identifier_extraction_ms: f64,
+    parse_ms: f64,
+    bytes_read: u64,
+    source_file_open_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexStage {
+    Discovery,
+    FileRead,
+    Parsing,
+    QueueBackpressure,
+    SqliteBatchWrite,
+}
+
+pub(crate) type IndexStageHook = Arc<dyn Fn(IndexStage) + Send + Sync>;
+
+struct IndexJob {
+    sequence: usize,
+    root: PathBuf,
+    rel_path: String,
+    size: u64,
+    modified_ns: i64,
+    previous_hash: Option<String>,
+    previous_parse_error: bool,
+    is_new: bool,
+    language: Option<String>,
+    verify_hashes: bool,
+    reserved_bytes: usize,
+}
+
+enum PreparedKind {
+    Unchanged { parse_error: bool },
+    Changed(PendingFile),
+    Skipped(&'static str),
+    Cancelled,
+}
+
+struct PreparedFile {
+    sequence: usize,
+    rel_path: String,
+    size: u64,
+    modified_ns: i64,
+    reserved_bytes: usize,
+    work: WorkerWork,
+    kind: PreparedKind,
+}
+
+struct WriterState {
+    batch_file_limit: usize,
+    batch_byte_limit: usize,
+    pending: Vec<PendingFile>,
+    pending_seen: Vec<SeenFile>,
+    pending_source_bytes: usize,
+    pending_reserved_bytes: usize,
+    eligible_files: u64,
+    eligible_bytes: u64,
+    changed: u64,
+    unchanged: u64,
+    files_discovered: u64,
+    bytes_read: u64,
+    source_file_open_count: u64,
+    max_in_flight_bytes: u64,
+    max_pipeline_buffered_bytes: u64,
+    max_queued_artifacts: u64,
+    max_pipeline_artifacts: u64,
+    skipped: BTreeMap<String, u64>,
+    structural_complete: bool,
+    cancelled: bool,
+    stage_hook: Option<IndexStageHook>,
+}
+
+impl Default for WriterState {
+    fn default() -> Self {
+        Self {
+            batch_file_limit: DEFAULT_BATCH_FILES,
+            batch_byte_limit: DEFAULT_BATCH_BYTES,
+            pending: Vec::with_capacity(DEFAULT_BATCH_FILES),
+            pending_seen: Vec::with_capacity(256),
+            pending_source_bytes: 0,
+            pending_reserved_bytes: 0,
+            eligible_files: 0,
+            eligible_bytes: 0,
+            changed: 0,
+            unchanged: 0,
+            files_discovered: 0,
+            bytes_read: 0,
+            source_file_open_count: 0,
+            max_in_flight_bytes: 0,
+            max_pipeline_buffered_bytes: 0,
+            max_queued_artifacts: 0,
+            max_pipeline_artifacts: 0,
+            skipped: BTreeMap::new(),
+            structural_complete: true,
+            cancelled: false,
+            stage_hook: None,
+        }
+    }
 }
 
 pub fn index_repository(
@@ -168,6 +296,25 @@ pub fn index_repository(
         include_generated,
         verify_hashes,
         cancellation,
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn index_repository_with_stage_hook(
+    db_path: &Path,
+    root: &Path,
+    cancellation: &AtomicBool,
+    stage_hook: IndexStageHook,
+) -> Result<IndexReport> {
+    let scope = repo_scope(root)?;
+    index_scoped(
+        db_path,
+        &scope,
+        false,
+        false,
+        cancellation,
+        Some(stage_hook),
     )
 }
 
@@ -177,8 +324,16 @@ fn index_scoped(
     include_generated: bool,
     verify_hashes: bool,
     cancellation: &AtomicBool,
+    stage_hook: Option<IndexStageHook>,
 ) -> Result<IndexReport> {
+    static NEXT_SAMPLE: AtomicU64 = AtomicU64::new(1);
+
     let started = Instant::now();
+    let sample_id = format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT_SAMPLE.fetch_add(1, Ordering::Relaxed)
+    );
     let _index_lock = acquire_index_lock(db_path, scope)?;
     let mut conn = open_db(db_path)?;
     let previous_generation: i64 = conn
@@ -211,9 +366,6 @@ fn index_scoped(
     )?;
 
     let root = &scope.root;
-    let mut skipped = BTreeMap::new();
-    let excluded_generated = std::sync::Arc::new(AtomicU64::new(0));
-    let excluded_depth = std::sync::Arc::new(AtomicU64::new(0));
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -223,8 +375,10 @@ fn index_scoped(
         .parents(false)
         .current_dir(root)
         .follow_links(false)
-        .max_depth(Some(128));
+        .max_depth(Some(128))
+        .sort_by_file_path(|left, right| left.cmp(right));
     let aetherignore = root.join(".aetherignore");
+    let mut skipped = BTreeMap::new();
     if fs::symlink_metadata(&aetherignore).is_ok_and(|meta| {
         meta.is_file() && !meta.file_type().is_symlink() && meta.len() > MAX_AETHERIGNORE_BYTES
     }) {
@@ -237,9 +391,11 @@ fn index_scoped(
     } else {
         None
     };
+    let excluded_generated = Arc::new(AtomicU64::new(0));
+    let excluded_vcs = Arc::new(AtomicU64::new(0));
+    let excluded_depth = Arc::new(AtomicU64::new(0));
     let excluded_generated_for_walk = excluded_generated.clone();
-    let excluded_vcs_for_walk = std::sync::Arc::new(AtomicU64::new(0));
-    let excluded_vcs_count = excluded_vcs_for_walk.clone();
+    let excluded_vcs_for_walk = excluded_vcs.clone();
     let excluded_depth_for_walk = excluded_depth.clone();
     let root_for_filter = root.to_path_buf();
     builder.filter_entry(move |entry| {
@@ -254,7 +410,7 @@ fn index_scoped(
             return false;
         };
         if is_vcs_metadata_path(relative) {
-            excluded_vcs_count.fetch_add(1, Ordering::Relaxed);
+            excluded_vcs_for_walk.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         if include_generated {
@@ -267,323 +423,435 @@ fn index_scoped(
             true
         }
     });
-    let mut timers = Timers::default();
-    let mut eligible_files = 0u64;
-    let mut eligible_bytes = 0u64;
-    let mut changed = 0u64;
-    let mut unchanged = 0u64;
-    let mut pending = Vec::<PendingFile>::with_capacity(BATCH_FILES);
-    let mut pending_bytes = 0usize;
-    let mut pending_seen = Vec::<SeenFile>::with_capacity(256);
-    let mut parser_cache = ParserCache::default();
-    let mut structural_complete = true;
-    let mut walker = builder.build();
-    let mut last_partial_publish = Instant::now();
 
-    loop {
-        let discovery_start = Instant::now();
-        let entry = walker.next();
-        timers.discovery += discovery_start.elapsed().as_secs_f64() * 1000.0;
-        let Some(entry) = entry else { break };
-        if cancellation.load(Ordering::Relaxed) {
-            if !pending.is_empty() || !pending_seen.is_empty() {
-                flush_batch(
+    let worker_count = configured_worker_count();
+    let (batch_file_limit, batch_byte_limit) = configured_batch_limits();
+    let queue_capacity = worker_count.saturating_mul(2).max(2);
+    let worker_cancel = Arc::new(AtomicBool::new(false));
+    let (job_tx, job_rx) = mpsc::sync_channel::<IndexJob>(queue_capacity);
+    let (result_tx, result_rx) = mpsc::sync_channel::<PreparedFile>(queue_capacity);
+    let shared_job_rx = Arc::new(Mutex::new(job_rx));
+    let mut timers = Timers::default();
+    let mut writer = WriterState {
+        batch_file_limit,
+        batch_byte_limit,
+        pending: Vec::with_capacity(batch_file_limit),
+        skipped,
+        stage_hook: stage_hook.clone(),
+        ..WriterState::default()
+    };
+    let mut last_partial_publish = Instant::now();
+    let mut outstanding_items = 0usize;
+    let mut outstanding_bytes = 0usize;
+    let mut next_sequence = 0usize;
+    let mut next_to_write = 0usize;
+    let mut completed = BTreeMap::<usize, PreparedFile>::new();
+    let mut walk_finished = false;
+
+    thread::scope(|thread_scope| -> Result<()> {
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let jobs = shared_job_rx.clone();
+            let results = result_tx.clone();
+            let cancelled = worker_cancel.clone();
+            let worker_stage_hook = stage_hook.clone();
+            workers.push(thread_scope.spawn(move || {
+                let mut parser_cache = ParserCache::default();
+                loop {
+                    let job = {
+                        let receiver = jobs.lock().map_err(|_| "index job receiver poisoned")?;
+                        receiver.recv()
+                    };
+                    let Ok(job) = job else { break };
+                    let prepared =
+                        prepare_file(job, &cancelled, &mut parser_cache, &worker_stage_hook);
+                    if results.send(prepared).is_err() {
+                        break;
+                    }
+                }
+                Ok::<(), &'static str>(())
+            }));
+        }
+        drop(result_tx);
+
+        let coordinator_result = (|| -> Result<()> {
+            let mut walker = builder.build();
+            loop {
+                if cancellation.load(Ordering::Relaxed) {
+                    writer.cancelled = true;
+                    worker_cancel.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                drain_ready_prepared(
+                    &result_rx,
+                    &mut completed,
+                    &mut next_to_write,
+                    &mut outstanding_items,
+                    &mut outstanding_bytes,
+                    &mut writer,
                     &mut conn,
-                    &scope.repo_id,
-                    &scope.worktree_id,
+                    scope,
                     generation,
-                    &mut pending,
-                    &mut pending_seen,
+                    &mut timers,
+                )?;
+
+                if !walk_finished {
+                    let discovery_start = Instant::now();
+                    let entry = walker.next();
+                    timers.discovery += discovery_start.elapsed().as_secs_f64() * 1000.0;
+                    let Some(entry) = entry else {
+                        walk_finished = true;
+                        continue;
+                    };
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(_) => {
+                            bump(&mut writer.skipped, "walk_error");
+                            continue;
+                        }
+                    };
+                    notify_index_stage(&stage_hook, IndexStage::Discovery);
+                    if cancellation.load(Ordering::Relaxed) {
+                        writer.cancelled = true;
+                        worker_cancel.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let path = entry.path();
+                    if path == root || entry.file_type().is_some_and(|t| t.is_dir()) {
+                        continue;
+                    }
+                    if entry.file_type().is_some_and(|t| t.is_symlink()) {
+                        bump(&mut writer.skipped, "symlink");
+                        continue;
+                    }
+                    let relative_path = match path.strip_prefix(root) {
+                        Ok(path) => path,
+                        Err(_) => {
+                            bump(&mut writer.skipped, "outside_root");
+                            continue;
+                        }
+                    };
+                    if is_secret_path(relative_path) {
+                        bump(&mut writer.skipped, "credential_or_key");
+                        continue;
+                    }
+                    if !include_generated && default_generated_path(relative_path) {
+                        bump(&mut writer.skipped, "generated_or_vendor_default");
+                        continue;
+                    }
+                    if !entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_file())
+                    {
+                        continue;
+                    }
+
+                    let metadata_start = Instant::now();
+                    let metadata = match fs::symlink_metadata(path) {
+                        Ok(metadata)
+                            if metadata.is_file() && !metadata.file_type().is_symlink() =>
+                        {
+                            metadata
+                        }
+                        _ => {
+                            bump(&mut writer.skipped, "symlink_or_stat_error");
+                            timers.metadata += metadata_start.elapsed().as_secs_f64() * 1000.0;
+                            continue;
+                        }
+                    };
+                    let size = metadata.len();
+                    if size > MAX_FILE_BYTES {
+                        bump(&mut writer.skipped, "oversized");
+                        timers.metadata += metadata_start.elapsed().as_secs_f64() * 1000.0;
+                        continue;
+                    }
+                    let relative = relative_path.to_string_lossy().replace('\\', "/");
+                    let modified_ns = modified_ns(&metadata);
+                    let existing: Option<(String, i64, i64, bool)> = conn
+                        .query_row(
+                            "SELECT content_hash,size_bytes,modified_ns,parse_error FROM code_files
+                             WHERE repo_id=?1 AND worktree_id=?2 AND rel_path=?3",
+                            params![scope.repo_id, scope.worktree_id, relative],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        )
+                        .optional()?;
+                    writer.files_discovered += 1;
+
+                    if !verify_hashes
+                        && existing
+                            .as_ref()
+                            .is_some_and(|(_, previous_size, previous_mtime, _)| {
+                                *previous_size == size as i64 && *previous_mtime == modified_ns
+                            })
+                    {
+                        let parse_error = existing
+                            .as_ref()
+                            .is_some_and(|(_, _, _, parse_error)| *parse_error);
+                        record_seen_file(&mut writer, relative, size, modified_ns, parse_error);
+                        if parse_error {
+                            bump(&mut writer.skipped, "tree_sitter_parse_error");
+                            writer.structural_complete = false;
+                        }
+                        timers.metadata += metadata_start.elapsed().as_secs_f64() * 1000.0;
+                        if writer.pending_seen.len() >= 256 {
+                            flush_writer_batch(
+                                &mut conn,
+                                scope,
+                                generation,
+                                &mut writer,
+                                &mut timers,
+                            )?;
+                        }
+                        continue;
+                    }
+                    if !matches!(path.canonicalize(), Ok(actual) if actual.starts_with(root)) {
+                        bump(&mut writer.skipped, "outside_root_or_raced_symlink");
+                        timers.metadata += metadata_start.elapsed().as_secs_f64() * 1000.0;
+                        continue;
+                    }
+                    timers.metadata += metadata_start.elapsed().as_secs_f64() * 1000.0;
+
+                    let reservation = (size as usize)
+                        .saturating_mul(3)
+                        .min(MAX_FILE_BYTES as usize * 3);
+                    while outstanding_items >= queue_capacity
+                        || outstanding_bytes.saturating_add(reservation) > MAX_PIPELINE_BYTES
+                        || outstanding_bytes
+                            .saturating_add(writer.pending_reserved_bytes)
+                            .saturating_add(reservation)
+                            > MAX_PIPELINE_BYTES + batch_byte_limit
+                    {
+                        notify_index_stage(&stage_hook, IndexStage::QueueBackpressure);
+                        if cancellation.load(Ordering::Relaxed) {
+                            writer.cancelled = true;
+                            worker_cancel.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        if writer.pending_source_bytes > 0
+                            && outstanding_items == 0
+                            && completed.is_empty()
+                        {
+                            flush_writer_batch(
+                                &mut conn,
+                                scope,
+                                generation,
+                                &mut writer,
+                                &mut timers,
+                            )?;
+                            continue;
+                        }
+                        receive_one_prepared(
+                            &result_rx,
+                            &mut completed,
+                            &mut next_to_write,
+                            &mut outstanding_items,
+                            &mut outstanding_bytes,
+                            &mut writer,
+                            &mut conn,
+                            scope,
+                            generation,
+                            &mut timers,
+                        )?;
+                    }
+                    if writer.cancelled {
+                        break;
+                    }
+                    if cancellation.load(Ordering::Relaxed) {
+                        writer.cancelled = true;
+                        worker_cancel.store(true, Ordering::Relaxed);
+                        break;
+                    }
+
+                    let language = language_for(&relative);
+                    let job = IndexJob {
+                        sequence: next_sequence,
+                        root: root.to_path_buf(),
+                        rel_path: relative,
+                        size,
+                        modified_ns,
+                        previous_hash: existing.as_ref().map(|row| row.0.clone()),
+                        previous_parse_error: existing.as_ref().is_some_and(|row| row.3),
+                        is_new: existing.is_none(),
+                        language,
+                        verify_hashes,
+                        reserved_bytes: reservation,
+                    };
+                    let send_started = Instant::now();
+                    job_tx
+                        .send(job)
+                        .map_err(|_| anyhow::anyhow!("index worker pool stopped unexpectedly"))?;
+                    timers.worker_wait += send_started.elapsed().as_secs_f64() * 1000.0;
+                    next_sequence += 1;
+                    outstanding_items += 1;
+                    outstanding_bytes = outstanding_bytes.saturating_add(reservation);
+                    writer.max_in_flight_bytes =
+                        writer.max_in_flight_bytes.max(outstanding_bytes as u64);
+                    writer.max_pipeline_buffered_bytes = writer
+                        .max_pipeline_buffered_bytes
+                        .max((outstanding_bytes + writer.pending_reserved_bytes) as u64);
+                    writer.max_queued_artifacts =
+                        writer.max_queued_artifacts.max(outstanding_items as u64);
+                    writer.max_pipeline_artifacts = writer
+                        .max_pipeline_artifacts
+                        .max((outstanding_items + writer.pending.len()) as u64);
+                }
+
+                if last_partial_publish.elapsed().as_secs_f64() >= 0.15 {
+                    flush_writer_batch(&mut conn, scope, generation, &mut writer, &mut timers)?;
+                    publish_progress(
+                        &conn,
+                        scope,
+                        writer.eligible_files,
+                        writer.eligible_bytes,
+                        &writer.skipped,
+                    )?;
+                    last_partial_publish = Instant::now();
+                }
+
+                if walk_finished && outstanding_items == 0 {
+                    break;
+                }
+                if walk_finished || outstanding_items >= queue_capacity {
+                    receive_one_prepared(
+                        &result_rx,
+                        &mut completed,
+                        &mut next_to_write,
+                        &mut outstanding_items,
+                        &mut outstanding_bytes,
+                        &mut writer,
+                        &mut conn,
+                        scope,
+                        generation,
+                        &mut timers,
+                    )?;
+                }
+            }
+
+            if cancellation.load(Ordering::Relaxed) {
+                writer.cancelled = true;
+                worker_cancel.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        })();
+
+        if coordinator_result.is_err() || writer.cancelled {
+            worker_cancel.store(true, Ordering::Relaxed);
+        }
+        drop(job_tx);
+
+        if coordinator_result.is_ok() && !writer.cancelled {
+            while outstanding_items > 0 {
+                receive_one_prepared(
+                    &result_rx,
+                    &mut completed,
+                    &mut next_to_write,
+                    &mut outstanding_items,
+                    &mut outstanding_bytes,
+                    &mut writer,
+                    &mut conn,
+                    scope,
+                    generation,
                     &mut timers,
                 )?;
             }
-            let excluded_count = excluded_generated.load(Ordering::Relaxed);
-            if excluded_count > 0 {
-                *skipped
-                    .entry("generated_or_vendor_default".to_string())
-                    .or_default() += excluded_count;
+        } else {
+            for (_, prepared) in std::mem::take(&mut completed) {
+                outstanding_items = outstanding_items.saturating_sub(1);
+                outstanding_bytes = outstanding_bytes.saturating_sub(prepared.reserved_bytes);
             }
-            let depth_count = excluded_depth.load(Ordering::Relaxed);
-            if depth_count > 0 {
-                *skipped.entry("depth_limit_128".to_string()).or_default() += depth_count;
+            while outstanding_items > 0 {
+                let wait_started = Instant::now();
+                match result_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(prepared) => {
+                        outstanding_items = outstanding_items.saturating_sub(1);
+                        outstanding_bytes =
+                            outstanding_bytes.saturating_sub(prepared.reserved_bytes);
+                        timers.worker_wait += wait_started.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        timers.worker_wait += wait_started.elapsed().as_secs_f64() * 1000.0;
+                        if cancellation.load(Ordering::Relaxed) {
+                            worker_cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        anyhow::bail!("all index workers stopped before draining queued files")
+                    }
+                }
             }
-            if ignore_error.is_some() {
-                bump(&mut skipped, "aetherignore_parse_error");
-            }
-            let skipped_json = serde_json::to_string(&skipped)?;
-            conn.execute(
-                "UPDATE repositories SET eligible_files=?3,eligible_bytes=?4,skipped_json=?5,is_complete=0,structural_complete=0
-                 WHERE repo_id=?1 AND worktree_id=?2",
-                params![scope.repo_id, scope.worktree_id, eligible_files as i64, eligible_bytes as i64, skipped_json],
-            )?;
-            return Ok(report(
-                scope,
-                generation,
-                false,
-                false,
-                true,
-                false,
-                eligible_files,
-                eligible_bytes,
-                changed,
-                unchanged,
-                skipped,
-                timers,
-                started.elapsed().as_secs_f64() * 1000.0,
-            ));
         }
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                bump(&mut skipped, "walk_error");
-                continue;
-            }
-        };
-        let path = entry.path();
-        if path == root || entry.file_type().is_some_and(|t| t.is_dir()) {
-            continue;
+
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("index worker panicked"))?
+                .map_err(|message| anyhow::anyhow!(message))?;
         }
-        if entry.file_type().is_some_and(|t| t.is_symlink()) {
-            bump(&mut skipped, "symlink");
-            continue;
-        }
-        let rel = match path.strip_prefix(root) {
-            Ok(p) => p,
-            Err(_) => {
-                bump(&mut skipped, "outside_root");
-                continue;
-            }
-        };
-        if is_secret_path(rel) {
-            bump(&mut skipped, "credential_or_key");
-            continue;
-        }
-        if !include_generated && default_generated_path(rel) {
-            bump(&mut skipped, "generated_or_vendor_default");
-            continue;
-        }
-        let file_type = match entry.file_type() {
-            Some(t) if t.is_file() => t,
-            _ => continue,
-        };
-        let _ = file_type;
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(m) if m.is_file() && !m.file_type().is_symlink() => m,
-            _ => {
-                bump(&mut skipped, "symlink_or_stat_error");
-                continue;
-            }
-        };
-        let size = metadata.len();
-        if size > MAX_FILE_BYTES {
-            bump(&mut skipped, "oversized");
-            continue;
-        }
-        let relative = rel.to_string_lossy().replace('\\', "/");
-        let modified_ns = modified_ns(&metadata);
-        let existing: Option<(String, i64, i64, bool)> = conn
-            .query_row(
-                "SELECT content_hash,size_bytes,modified_ns,parse_error FROM code_files
-                 WHERE repo_id=?1 AND worktree_id=?2 AND rel_path=?3",
-                params![scope.repo_id, scope.worktree_id, relative],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if !verify_hashes
-            && existing
-                .as_ref()
-                .is_some_and(|(_, prev_size, prev_mtime, _)| {
-                    *prev_size == size as i64 && *prev_mtime == modified_ns
-                })
-        {
-            let parse_error = existing
-                .as_ref()
-                .is_some_and(|(_, _, _, parse_error)| *parse_error);
-            if parse_error {
-                structural_complete = false;
-                bump(&mut skipped, "tree_sitter_parse_error");
-            }
-            pending_seen.push(SeenFile {
-                rel_path: relative.clone(),
-                size,
-                modified_ns,
-                parse_error,
-            });
-            eligible_files += 1;
-            eligible_bytes += size;
-            unchanged += 1;
-            if pending_seen.len() >= 256 {
-                flush_batch(
-                    &mut conn,
-                    &scope.repo_id,
-                    &scope.worktree_id,
-                    generation,
-                    &mut pending,
-                    &mut pending_seen,
-                    &mut timers,
-                )?;
-            }
-            if last_partial_publish.elapsed().as_secs_f64() >= 0.15 {
-                flush_batch(
-                    &mut conn,
-                    &scope.repo_id,
-                    &scope.worktree_id,
-                    generation,
-                    &mut pending,
-                    &mut pending_seen,
-                    &mut timers,
-                )?;
-                publish_progress(&conn, scope, eligible_files, eligible_bytes, &skipped)?;
-                last_partial_publish = Instant::now();
-            }
-            continue;
-        }
-        let _actual_path = match path.canonicalize() {
-            Ok(p) if p.starts_with(root) => p,
-            _ => {
-                bump(&mut skipped, "outside_root_or_raced_symlink");
-                continue;
-            }
-        };
-        let read_start = Instant::now();
-        let bytes = match read_limited_from_root(root, rel, MAX_FILE_BYTES as usize + 1) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                bump(&mut skipped, "read_error_or_raced_symlink");
-                continue;
-            }
-        };
-        if bytes.len() > MAX_FILE_BYTES as usize {
-            timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
-            bump(&mut skipped, "oversized_after_read");
-            continue;
-        }
-        if bytes.contains(&0) {
-            timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
-            bump(&mut skipped, "binary_nul");
-            continue;
-        }
-        if has_binary_controls(&bytes) {
-            timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
-            bump(&mut skipped, "binary_control_bytes");
-            continue;
-        }
-        let text = match String::from_utf8(bytes) {
-            Ok(t) => t,
-            Err(_) => {
-                timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
-                bump(&mut skipped, "non_utf8");
-                continue;
-            }
-        };
-        let hash = hash_bytes(text.as_bytes());
-        timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
-        if !verify_hashes
-            && existing
-                .as_ref()
-                .is_some_and(|(previous, _, _, _)| previous == &hash)
-        {
-            let parse_error = existing
-                .as_ref()
-                .is_some_and(|(_, _, _, parse_error)| *parse_error);
-            if parse_error {
-                structural_complete = false;
-                bump(&mut skipped, "tree_sitter_parse_error");
-            }
-            pending_seen.push(SeenFile {
-                rel_path: relative.clone(),
-                size,
-                modified_ns,
-                parse_error,
-            });
-            eligible_files += 1;
-            eligible_bytes += size;
-            unchanged += 1;
-            if pending_seen.len() >= 256 {
-                flush_batch(
-                    &mut conn,
-                    &scope.repo_id,
-                    &scope.worktree_id,
-                    generation,
-                    &mut pending,
-                    &mut pending_seen,
-                    &mut timers,
-                )?;
-            }
-            continue;
-        }
-        let language = language_for(&relative);
-        let parse_start = Instant::now();
-        let extracted = parser_cache.extract(language.as_deref(), &text);
-        timers.parsing += parse_start.elapsed().as_secs_f64() * 1000.0;
-        let (symbols, parse_error) = extracted.unwrap_or_default();
-        if parse_error {
-            structural_complete = false;
-            bump(&mut skipped, "tree_sitter_parse_error");
-        }
-        let text_size = text.len();
-        pending.push(PendingFile {
-            rel_path: relative,
-            hash,
-            language: language.unwrap_or_else(|| "text".to_string()),
-            size: size as u64,
-            modified_ns,
-            text,
-            symbols,
-            parse_error,
-            is_new: existing.is_none(),
-        });
-        pending_bytes += text_size;
-        eligible_files += 1;
-        eligible_bytes += size;
-        changed += 1;
-        if pending.len() >= BATCH_FILES || pending_bytes >= BATCH_BYTES || pending_seen.len() >= 256
-        {
-            flush_batch(
-                &mut conn,
-                &scope.repo_id,
-                &scope.worktree_id,
-                generation,
-                &mut pending,
-                &mut pending_seen,
-                &mut timers,
-            )?;
-            pending_bytes = 0;
-            last_partial_publish = Instant::now();
-        }
-    }
+        coordinator_result
+    })?;
+
     let excluded_count = excluded_generated.load(Ordering::Relaxed);
     if excluded_count > 0 {
-        *skipped
+        *writer
+            .skipped
             .entry("generated_or_vendor_default".to_string())
             .or_default() += excluded_count;
     }
     let depth_count = excluded_depth.load(Ordering::Relaxed);
     if depth_count > 0 {
-        *skipped.entry("depth_limit_128".to_string()).or_default() += depth_count;
+        *writer
+            .skipped
+            .entry("depth_limit_128".to_string())
+            .or_default() += depth_count;
     }
-    let vcs_count = excluded_vcs_for_walk.load(Ordering::Relaxed);
+    let vcs_count = excluded_vcs.load(Ordering::Relaxed);
     if vcs_count > 0 {
-        *skipped
+        *writer
+            .skipped
             .entry("version_control_metadata".to_string())
             .or_default() += vcs_count;
     }
     if ignore_error.is_some() {
-        bump(&mut skipped, "aetherignore_parse_error");
-    }
-    if !pending.is_empty() || !pending_seen.is_empty() {
-        flush_batch(
-            &mut conn,
-            &scope.repo_id,
-            &scope.worktree_id,
-            generation,
-            &mut pending,
-            &mut pending_seen,
-            &mut timers,
-        )?;
+        bump(&mut writer.skipped, "aetherignore_parse_error");
     }
 
-    let commit_start = Instant::now();
+    flush_writer_batch(&mut conn, scope, generation, &mut writer, &mut timers)?;
+    let was_cancelled = writer.cancelled || cancellation.load(Ordering::Relaxed);
+    if was_cancelled {
+        let skipped_json = serde_json::to_string(&writer.skipped)?;
+        conn.execute(
+            "UPDATE repositories SET eligible_files=?3,eligible_bytes=?4,skipped_json=?5,
+             is_complete=0,structural_complete=0
+             WHERE repo_id=?1 AND worktree_id=?2",
+            params![
+                scope.repo_id,
+                scope.worktree_id,
+                writer.eligible_files as i64,
+                writer.eligible_bytes as i64,
+                skipped_json
+            ],
+        )?;
+        let total = started.elapsed().as_secs_f64() * 1000.0;
+        return Ok(report(
+            scope,
+            generation,
+            false,
+            false,
+            true,
+            false,
+            writer,
+            timers,
+            total,
+            sample_id,
+            worker_count,
+            batch_file_limit,
+            batch_byte_limit,
+        ));
+    }
+
+    let reconciliation_start = Instant::now();
+    let commit_before_reconciliation = timers.commit;
     let stale_exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND indexed_generation<>?3 LIMIT 1)",
         params![scope.repo_id, scope.worktree_id, generation as i64],
@@ -596,9 +864,11 @@ fn index_scoped(
             "DELETE FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND indexed_generation<>?3",
             params![scope.repo_id, scope.worktree_id, generation as i64],
         )?;
+        let commit_start = Instant::now();
         tx.commit()?;
+        timers.commit += commit_start.elapsed().as_secs_f64() * 1000.0;
     }
-    let skipped_json = serde_json::to_string(&skipped)?;
+    let skipped_json = serde_json::to_string(&writer.skipped)?;
     conn.execute(
         "UPDATE repositories SET eligible_files=?3,eligible_bytes=?4,skipped_json=?5,is_complete=1,
          structural_complete=?6,last_index_finished=?7
@@ -606,30 +876,358 @@ fn index_scoped(
         params![
             scope.repo_id,
             scope.worktree_id,
-            eligible_files as i64,
-            eligible_bytes as i64,
+            writer.eligible_files as i64,
+            writer.eligible_bytes as i64,
             skipped_json,
-            structural_complete,
+            writer.structural_complete,
             now_utc()
         ],
     )?;
-    timers.commit += commit_start.elapsed().as_secs_f64() * 1000.0;
+    timers.reconciliation += (reconciliation_start.elapsed().as_secs_f64() * 1000.0)
+        - (timers.commit - commit_before_reconciliation);
     let total = started.elapsed().as_secs_f64() * 1000.0;
     Ok(report(
         scope,
         generation,
-        structural_complete,
+        writer.structural_complete,
         true,
         false,
-        structural_complete,
-        eligible_files,
-        eligible_bytes,
-        changed,
-        unchanged,
-        skipped,
+        writer.structural_complete,
+        writer,
         timers,
         total,
+        sample_id,
+        worker_count,
+        batch_file_limit,
+        batch_byte_limit,
     ))
+}
+
+fn prepare_file(
+    job: IndexJob,
+    cancellation: &AtomicBool,
+    parser_cache: &mut ParserCache,
+    stage_hook: &Option<IndexStageHook>,
+) -> PreparedFile {
+    let mut work = WorkerWork::default();
+    let sequence = job.sequence;
+    let rel_path = job.rel_path.clone();
+    let size = job.size;
+    let modified_ns = job.modified_ns;
+    let reserved_bytes = job.reserved_bytes;
+    macro_rules! prepared {
+        ($kind:expr) => {
+            PreparedFile {
+                sequence,
+                rel_path: rel_path.clone(),
+                size,
+                modified_ns,
+                reserved_bytes,
+                work: std::mem::take(&mut work),
+                kind: $kind,
+            }
+        };
+    }
+    if cancellation.load(Ordering::Relaxed) {
+        return prepared!(PreparedKind::Cancelled);
+    }
+    work.source_file_open_count = 1;
+    let read_started = Instant::now();
+    let read_result = read_limited_from_root(
+        &job.root,
+        Path::new(&job.rel_path),
+        MAX_FILE_BYTES as usize + 1,
+        Some(cancellation),
+        stage_hook,
+    );
+    work.read_ms = read_started.elapsed().as_secs_f64() * 1000.0;
+    let bytes = match read_result {
+        Ok(bytes) => bytes,
+        Err(_) if cancellation.load(Ordering::Relaxed) => {
+            return prepared!(PreparedKind::Cancelled);
+        }
+        Err(_) => return prepared!(PreparedKind::Skipped("read_error_or_raced_symlink")),
+    };
+    if cancellation.load(Ordering::Relaxed) {
+        return prepared!(PreparedKind::Cancelled);
+    }
+    work.bytes_read = bytes.len() as u64;
+    if bytes.len() > MAX_FILE_BYTES as usize {
+        return prepared!(PreparedKind::Skipped("oversized_after_read"));
+    }
+    if bytes.contains(&0) {
+        return prepared!(PreparedKind::Skipped("binary_nul"));
+    }
+    if has_binary_controls(&bytes) {
+        return prepared!(PreparedKind::Skipped("binary_control_bytes"));
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => return prepared!(PreparedKind::Skipped("non_utf8")),
+    };
+    let hash_started = Instant::now();
+    let hash = hash_bytes(text.as_bytes());
+    work.hash_ms = hash_started.elapsed().as_secs_f64() * 1000.0;
+    if !job.verify_hashes
+        && job
+            .previous_hash
+            .as_ref()
+            .is_some_and(|previous| previous == &hash)
+    {
+        return prepared!(PreparedKind::Unchanged {
+            parse_error: job.previous_parse_error,
+        });
+    }
+
+    let identifier_started = Instant::now();
+    let identifier_terms = identifier_search_terms(&text);
+    work.identifier_extraction_ms = identifier_started.elapsed().as_secs_f64() * 1000.0;
+    if cancellation.load(Ordering::Relaxed) {
+        return prepared!(PreparedKind::Cancelled);
+    }
+    let parse_started = Instant::now();
+    let extracted = parser_cache.extract(job.language.as_deref(), &text, cancellation);
+    work.parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
+    notify_index_stage(stage_hook, IndexStage::Parsing);
+    if cancellation.load(Ordering::Relaxed) {
+        return prepared!(PreparedKind::Cancelled);
+    }
+    let (symbols, parse_error) = extracted.unwrap_or_default();
+    let pending = PendingFile {
+        rel_path: job.rel_path,
+        hash,
+        language: job.language.unwrap_or_else(|| "text".to_string()),
+        size: job.size,
+        modified_ns: job.modified_ns,
+        text,
+        identifier_terms,
+        symbols,
+        parse_error,
+        is_new: job.is_new,
+    };
+    prepared!(PreparedKind::Changed(pending))
+}
+
+fn notify_index_stage(hook: &Option<IndexStageHook>, stage: IndexStage) {
+    if let Some(hook) = hook {
+        hook(stage);
+    }
+}
+
+fn record_seen_file(
+    writer: &mut WriterState,
+    rel_path: String,
+    size: u64,
+    modified_ns: i64,
+    parse_error: bool,
+) {
+    writer.pending_seen.push(SeenFile {
+        rel_path,
+        size,
+        modified_ns,
+        parse_error,
+    });
+    writer.eligible_files += 1;
+    writer.eligible_bytes += size;
+    writer.unchanged += 1;
+}
+
+#[allow(clippy::too_many_arguments)] // Queue accounting and writer state must stay synchronized.
+fn receive_one_prepared(
+    receiver: &mpsc::Receiver<PreparedFile>,
+    completed: &mut BTreeMap<usize, PreparedFile>,
+    next_to_write: &mut usize,
+    outstanding_items: &mut usize,
+    outstanding_bytes: &mut usize,
+    writer: &mut WriterState,
+    conn: &mut Connection,
+    scope: &RepoScope,
+    generation: u64,
+    timers: &mut Timers,
+) -> Result<()> {
+    let wait_started = Instant::now();
+    let prepared = match receiver.recv_timeout(Duration::from_millis(50)) {
+        Ok(prepared) => prepared,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            timers.worker_wait += wait_started.elapsed().as_secs_f64() * 1000.0;
+            return Ok(());
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("all index workers stopped before completing queued files")
+        }
+    };
+    timers.worker_wait += wait_started.elapsed().as_secs_f64() * 1000.0;
+    completed.insert(prepared.sequence, prepared);
+    apply_ordered_prepared(
+        completed,
+        next_to_write,
+        outstanding_items,
+        outstanding_bytes,
+        writer,
+        conn,
+        scope,
+        generation,
+        timers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Drains into the single writer in deterministic order.
+fn drain_ready_prepared(
+    receiver: &mpsc::Receiver<PreparedFile>,
+    completed: &mut BTreeMap<usize, PreparedFile>,
+    next_to_write: &mut usize,
+    outstanding_items: &mut usize,
+    outstanding_bytes: &mut usize,
+    writer: &mut WriterState,
+    conn: &mut Connection,
+    scope: &RepoScope,
+    generation: u64,
+    timers: &mut Timers,
+) -> Result<()> {
+    while let Ok(prepared) = receiver.try_recv() {
+        completed.insert(prepared.sequence, prepared);
+    }
+    apply_ordered_prepared(
+        completed,
+        next_to_write,
+        outstanding_items,
+        outstanding_bytes,
+        writer,
+        conn,
+        scope,
+        generation,
+        timers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // The writer state and connection are intentionally explicit.
+fn apply_ordered_prepared(
+    completed: &mut BTreeMap<usize, PreparedFile>,
+    next_to_write: &mut usize,
+    outstanding_items: &mut usize,
+    outstanding_bytes: &mut usize,
+    writer: &mut WriterState,
+    conn: &mut Connection,
+    scope: &RepoScope,
+    generation: u64,
+    timers: &mut Timers,
+) -> Result<()> {
+    while let Some(prepared) = completed.remove(next_to_write) {
+        *outstanding_items = outstanding_items.saturating_sub(1);
+        *outstanding_bytes = outstanding_bytes.saturating_sub(prepared.reserved_bytes);
+        timers.read += prepared.work.read_ms;
+        timers.hashing += prepared.work.hash_ms;
+        timers.identifier_extraction += prepared.work.identifier_extraction_ms;
+        timers.parsing += prepared.work.parse_ms;
+        writer.bytes_read += prepared.work.bytes_read;
+        writer.source_file_open_count += prepared.work.source_file_open_count;
+        match prepared.kind {
+            PreparedKind::Unchanged { parse_error } => {
+                record_seen_file(
+                    writer,
+                    prepared.rel_path,
+                    prepared.size,
+                    prepared.modified_ns,
+                    parse_error,
+                );
+                if parse_error {
+                    writer.structural_complete = false;
+                    bump(&mut writer.skipped, "tree_sitter_parse_error");
+                }
+            }
+            PreparedKind::Changed(file) => {
+                writer.eligible_files += 1;
+                writer.eligible_bytes += file.size;
+                writer.changed += 1;
+                if file.parse_error {
+                    writer.structural_complete = false;
+                    bump(&mut writer.skipped, "tree_sitter_parse_error");
+                }
+                writer.pending_source_bytes =
+                    writer.pending_source_bytes.saturating_add(file.text.len());
+                writer.pending_reserved_bytes = writer
+                    .pending_reserved_bytes
+                    .saturating_add(file.text.len())
+                    .saturating_add(file.identifier_terms.len())
+                    .saturating_add(file.symbols.len().saturating_mul(128));
+                writer.pending.push(file);
+            }
+            PreparedKind::Skipped(reason) => bump(&mut writer.skipped, reason),
+            PreparedKind::Cancelled => writer.cancelled = true,
+        }
+        *next_to_write += 1;
+        writer.max_in_flight_bytes = writer.max_in_flight_bytes.max(*outstanding_bytes as u64);
+        writer.max_pipeline_buffered_bytes = writer
+            .max_pipeline_buffered_bytes
+            .max((*outstanding_bytes + writer.pending_reserved_bytes) as u64);
+        writer.max_queued_artifacts = writer.max_queued_artifacts.max(*outstanding_items as u64);
+        writer.max_pipeline_artifacts = writer
+            .max_pipeline_artifacts
+            .max((*outstanding_items + writer.pending.len()) as u64);
+        if writer.pending.len() >= writer.batch_file_limit
+            || writer.pending_source_bytes >= writer.batch_byte_limit
+            || writer.pending_seen.len() >= 256
+        {
+            flush_writer_batch(conn, scope, generation, writer, timers)?;
+        }
+    }
+    Ok(())
+}
+
+fn flush_writer_batch(
+    conn: &mut Connection,
+    scope: &RepoScope,
+    generation: u64,
+    writer: &mut WriterState,
+    timers: &mut Timers,
+) -> Result<()> {
+    if writer.pending.is_empty() && writer.pending_seen.is_empty() {
+        return Ok(());
+    }
+    flush_batch(
+        conn,
+        &scope.repo_id,
+        &scope.worktree_id,
+        generation,
+        &mut writer.pending,
+        &mut writer.pending_seen,
+        timers,
+        &writer.stage_hook,
+    )?;
+    writer.pending_source_bytes = 0;
+    writer.pending_reserved_bytes = 0;
+    Ok(())
+}
+
+fn configured_worker_count() -> usize {
+    std::env::var("MIDNIGHT_INDEX_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+        })
+        .clamp(1, MAX_INDEX_WORKERS)
+}
+
+fn configured_batch_limits() -> (usize, usize) {
+    let parse = |name: &str, default: usize, maximum: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value.min(maximum))
+            .unwrap_or(default)
+    };
+    (
+        parse("MIDNIGHT_BENCH_BATCH_FILES", DEFAULT_BATCH_FILES, 2048),
+        parse(
+            "MIDNIGHT_BENCH_BATCH_BYTES",
+            DEFAULT_BATCH_BYTES,
+            DEFAULT_BATCH_BYTES,
+        ),
+    )
 }
 
 fn acquire_index_lock(db_path: &Path, scope: &RepoScope) -> Result<File> {
@@ -667,20 +1265,38 @@ fn report(
     catalog_complete: bool,
     cancelled: bool,
     structural_complete: bool,
-    eligible_files: u64,
-    eligible_bytes: u64,
-    changed: u64,
-    unchanged: u64,
-    skipped: BTreeMap<String, u64>,
+    writer: WriterState,
     timers: Timers,
     total_ms: f64,
+    sample_id: String,
+    worker_count: usize,
+    batch_file_limit: usize,
+    batch_byte_limit: usize,
 ) -> IndexReport {
+    let measured_main = timers.discovery
+        + timers.metadata
+        + timers.worker_wait
+        + timers.index_writing
+        + timers.commit
+        + timers.reconciliation;
+    let overhead = total_ms - measured_main;
     let mut timings_ms = BTreeMap::new();
     timings_ms.insert("discovery".into(), timers.discovery);
-    timings_ms.insert("hashing_and_read".into(), timers.hashing);
+    timings_ms.insert("metadata_lookup".into(), timers.metadata);
+    timings_ms.insert("read".into(), timers.read);
+    timings_ms.insert("hashing".into(), timers.hashing);
+    timings_ms.insert("identifier_extraction".into(), timers.identifier_extraction);
     timings_ms.insert("parsing".into(), timers.parsing);
     timings_ms.insert("index_writing".into(), timers.index_writing);
-    timings_ms.insert("commit_and_reconcile".into(), timers.commit);
+    timings_ms.insert("fts_payload_assembly".into(), timers.fts_payload_assembly);
+    timings_ms.insert("fts_statement_execution".into(), timers.fts_execution);
+    timings_ms.insert("symbol_writes".into(), timers.symbol_writes);
+    timings_ms.insert("metadata_writes".into(), timers.metadata_writes);
+    timings_ms.insert("transaction_commit".into(), timers.commit);
+    timings_ms.insert("reconciliation".into(), timers.reconciliation);
+    timings_ms.insert("worker_wait_and_backpressure".into(), timers.worker_wait);
+    timings_ms.insert("residual_overhead".into(), overhead);
+    timings_ms.insert("phase_accounted_total".into(), measured_main + overhead);
     timings_ms.insert("full_index_ready".into(), total_ms);
     IndexReport {
         repo_id: scope.repo_id.clone(),
@@ -691,12 +1307,23 @@ fn report(
         catalog_complete,
         structural_complete,
         cancelled,
-        eligible_files,
-        eligible_bytes,
-        indexed_or_updated: changed,
-        unchanged,
-        skipped,
+        eligible_files: writer.eligible_files,
+        eligible_bytes: writer.eligible_bytes,
+        indexed_or_updated: writer.changed,
+        unchanged: writer.unchanged,
+        skipped: writer.skipped,
         timings_ms,
+        sample_id,
+        worker_count,
+        batch_file_limit,
+        batch_byte_limit,
+        files_discovered: writer.files_discovered,
+        bytes_read: writer.bytes_read,
+        source_file_open_count: writer.source_file_open_count,
+        max_in_flight_bytes: writer.max_in_flight_bytes,
+        max_pipeline_buffered_bytes: writer.max_pipeline_buffered_bytes,
+        max_queued_artifacts: writer.max_queued_artifacts,
+        max_pipeline_artifacts: writer.max_pipeline_artifacts,
     }
 }
 
@@ -721,6 +1348,7 @@ fn publish_progress(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the single-writer transaction inputs explicit.
 fn flush_batch(
     conn: &mut Connection,
     repo_id: &str,
@@ -729,12 +1357,14 @@ fn flush_batch(
     pending: &mut Vec<PendingFile>,
     pending_seen: &mut Vec<SeenFile>,
     timers: &mut Timers,
+    stage_hook: &Option<IndexStageHook>,
 ) -> Result<()> {
     if pending.is_empty() && pending_seen.is_empty() {
         return Ok(());
     }
     let write_start = Instant::now();
     let tx = conn.transaction()?;
+    let metadata_start = Instant::now();
     {
         let mut stmt = tx.prepare(
             "UPDATE code_files SET size_bytes=?4,modified_ns=?5,indexed_generation=?6,parse_error=?7
@@ -752,7 +1382,10 @@ fn flush_batch(
             ])?;
         }
     }
+    timers.metadata_writes += metadata_start.elapsed().as_secs_f64() * 1000.0;
+    let mut notified_batch_write = false;
     for file in pending.drain(..) {
+        let metadata_start = Instant::now();
         let file_id = tx
             .query_row(
                 "INSERT INTO code_files(repo_id,worktree_id,rel_path,content_hash,language,size_bytes,modified_ns,indexed_generation,parse_error)
@@ -764,10 +1397,27 @@ fn flush_batch(
                 params![repo_id, worktree_id, file.rel_path, file.hash, file.language, file.size as i64, file.modified_ns, generation as i64, file.parse_error],
                 |row| row.get::<_, i64>(0),
             )?;
+        timers.metadata_writes += metadata_start.elapsed().as_secs_f64() * 1000.0;
+        let payload_started = Instant::now();
+        let mut searchable = file.text.clone();
+        if !file.identifier_terms.is_empty() {
+            searchable.push('\n');
+            searchable.push_str(&file.identifier_terms);
+        }
+        timers.fts_payload_assembly += payload_started.elapsed().as_secs_f64() * 1000.0;
+        let fts_started = Instant::now();
         if file.is_new {
-            SqliteFtsIndex.insert(&tx, file_id, &file.text)?;
+            SqliteFtsIndex.insert(&tx, file_id, &searchable)?;
         } else {
-            SqliteFtsIndex.replace(&tx, file_id, &file.text)?;
+            SqliteFtsIndex.replace(&tx, file_id, &searchable)?;
+        }
+        timers.fts_execution += fts_started.elapsed().as_secs_f64() * 1000.0;
+        if !notified_batch_write {
+            notify_index_stage(stage_hook, IndexStage::SqliteBatchWrite);
+            notified_batch_write = true;
+        }
+        let symbol_started = Instant::now();
+        if !file.is_new {
             tx.prepare_cached("DELETE FROM code_symbols WHERE file_id=?1")?
                 .execute([file_id])?;
         }
@@ -788,6 +1438,7 @@ fn flush_batch(
                 ])?;
             }
         }
+        timers.symbol_writes += symbol_started.elapsed().as_secs_f64() * 1000.0;
     }
     timers.index_writing += write_start.elapsed().as_secs_f64() * 1000.0;
     let commit_start = Instant::now();
@@ -1113,9 +1764,163 @@ fn code_match_query(query: &str) -> Option<String> {
     let terms = query
         .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
         .filter(|term| term.chars().any(char::is_alphanumeric))
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .map(|term| {
+            if !identifier_decomposition_enabled() {
+                return format!("\"{}\"", term.replace('"', "\"\""));
+            }
+            let parts = split_identifier_parts(term);
+            if parts.len() < 2 {
+                return format!("\"{}\"", term.replace('"', "\"\""));
+            }
+            let pieces = parts
+                .iter()
+                .enumerate()
+                .map(|(index, part)| {
+                    let escaped = part.replace('"', "\"\"");
+                    if index + 1 == parts.len() {
+                        format!("\"{escaped}\"*")
+                    } else {
+                        format!("\"{escaped}\"")
+                    }
+                })
+                .collect::<Vec<_>>();
+            format!("({})", pieces.join(" AND "))
+        })
         .collect::<Vec<_>>();
     (!terms.is_empty()).then(|| terms.join(" OR "))
+}
+
+fn identifier_search_terms(text: &str) -> String {
+    if !identifier_decomposition_enabled() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    let mut in_word = false;
+    for index in 0..=bytes.len() {
+        let byte = bytes.get(index).copied().unwrap_or(b' ');
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            if !in_word {
+                start = index;
+                in_word = true;
+            }
+        } else if in_word {
+            append_ascii_identifier_parts(&mut out, &text[start..index]);
+            in_word = false;
+        }
+    }
+    out
+}
+
+fn identifier_decomposition_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MIDNIGHT_IDENTIFIER_DECOMPOSITION")
+            .map(|value| !matches!(value.as_str(), "0" | "false" | "off"))
+            .unwrap_or(true)
+    })
+}
+
+fn append_ascii_identifier_parts(out: &mut String, word: &str) {
+    if !word.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return;
+    }
+    let bytes = word.as_bytes();
+    let mut start = 0usize;
+    for index in 1..bytes.len() {
+        let previous = bytes[index - 1];
+        let current = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        let digit_boundary = previous.is_ascii_digit() != current.is_ascii_digit();
+        let lower_to_upper = previous.is_ascii_lowercase() && current.is_ascii_uppercase();
+        let acronym_boundary = previous.is_ascii_uppercase()
+            && current.is_ascii_uppercase()
+            && next.is_some_and(|byte| byte.is_ascii_lowercase());
+        if current == b'_' || digit_boundary || lower_to_upper || acronym_boundary {
+            if start < index {
+                out.push_str(&word[start..index]);
+                out.push(' ');
+            }
+            start = if current == b'_' { index + 1 } else { index };
+        }
+    }
+    if start < bytes.len() {
+        out.push_str(&word[start..]);
+        out.push(' ');
+    }
+}
+
+fn split_identifier_parts(word: &str) -> Vec<&str> {
+    if word.is_ascii() {
+        return split_ascii_identifier_parts(word);
+    }
+    let chars = word.char_indices().collect::<Vec<_>>();
+    let mut parts = Vec::new();
+    let mut start = None;
+    for (index, (byte, ch)) in chars.iter().enumerate() {
+        if !ch.is_alphanumeric() {
+            if let Some(part_start) = start.take() {
+                parts.push(&word[part_start..*byte]);
+            }
+            continue;
+        }
+        if let Some(part_start) = start {
+            let previous = chars[index - 1].1;
+            let next = chars.get(index + 1).map(|(_, ch)| *ch);
+            let digit_boundary = previous.is_ascii_digit() != ch.is_ascii_digit();
+            let lower_to_upper = previous.is_lowercase() && ch.is_uppercase();
+            let acronym_boundary = previous.is_uppercase()
+                && ch.is_uppercase()
+                && next.is_some_and(char::is_lowercase);
+            if digit_boundary || lower_to_upper || acronym_boundary {
+                parts.push(&word[part_start..*byte]);
+                start = Some(*byte);
+            }
+        } else {
+            start = Some(*byte);
+        }
+    }
+    if let Some(part_start) = start {
+        parts.push(&word[part_start..]);
+    }
+    parts
+}
+
+fn split_ascii_identifier_parts(word: &str) -> Vec<&str> {
+    let bytes = word.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    for index in 0..bytes.len() {
+        let current = bytes[index];
+        if current == b'_' {
+            if start < index {
+                parts.push(&word[start..index]);
+            }
+            start = index + 1;
+            continue;
+        }
+        if index == 0 {
+            continue;
+        }
+        let previous = bytes[index - 1];
+        let next = bytes.get(index + 1).copied();
+        let digit_boundary = previous.is_ascii_digit() != current.is_ascii_digit();
+        let lower_to_upper = previous.is_ascii_lowercase() && current.is_ascii_uppercase();
+        let acronym_boundary = previous.is_ascii_uppercase()
+            && current.is_ascii_uppercase()
+            && next.is_some_and(|byte| byte.is_ascii_lowercase());
+        if digit_boundary || lower_to_upper || acronym_boundary {
+            if start < index {
+                parts.push(&word[start..index]);
+            }
+            start = index;
+        }
+    }
+    if start < bytes.len() {
+        parts.push(&word[start..]);
+    }
+    parts
 }
 
 fn make_results(
@@ -1493,7 +2298,7 @@ fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
         bail!("source is a symlink, not a file, or exceeds the 1 MiB read limit");
     }
     let relative = canonical.strip_prefix(root)?;
-    let bytes = read_limited_from_root(root, relative, MAX_FILE_BYTES as usize + 1)?;
+    let bytes = read_limited_from_root(root, relative, MAX_FILE_BYTES as usize + 1, None, &None)?;
     if bytes.len() > MAX_FILE_BYTES as usize || bytes.contains(&0) || has_binary_controls(&bytes) {
         bail!("source is binary or oversized");
     }
@@ -1656,7 +2461,13 @@ fn modified_ns(metadata: &fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn read_limited_from_root(root: &Path, relative: &Path, limit: usize) -> Result<Vec<u8>> {
+fn read_limited_from_root(
+    root: &Path,
+    relative: &Path,
+    limit: usize,
+    cancellation: Option<&AtomicBool>,
+    stage_hook: &Option<IndexStageHook>,
+) -> Result<Vec<u8>> {
     #[cfg(unix)]
     {
         use std::ffi::CString;
@@ -1708,18 +2519,42 @@ fn read_limited_from_root(root: &Path, relative: &Path, limit: usize) -> Result<
                 .context("open source file without following symlinks");
         }
         let file = unsafe { File::from_raw_fd(descriptor) };
-        read_bounded(file, limit)
+        read_bounded(file, limit, cancellation, stage_hook)
     }
     #[cfg(not(unix))]
     {
-        let _ = (root, relative, limit);
+        let _ = (root, relative, limit, cancellation, stage_hook);
         bail!("safe repository-relative file access requires Unix openat support on this build")
     }
 }
 
-fn read_bounded(file: File, limit: usize) -> Result<Vec<u8>> {
+fn read_bounded(
+    mut file: File,
+    limit: usize,
+    cancellation: Option<&AtomicBool>,
+    stage_hook: &Option<IndexStageHook>,
+) -> Result<Vec<u8>> {
     let mut data = Vec::with_capacity(limit.min(64 * 1024));
-    file.take(limit as u64).read_to_end(&mut data)?;
+    let mut chunk = [0_u8; 64 * 1024];
+    let mut notified = false;
+    while data.len() < limit {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            bail!("file read cancelled");
+        }
+        let available = (limit - data.len()).min(chunk.len());
+        let count = file.read(&mut chunk[..available])?;
+        if count == 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..count]);
+        if !notified {
+            notify_index_stage(stage_hook, IndexStage::FileRead);
+            notified = true;
+        }
+    }
+    if !notified {
+        notify_index_stage(stage_hook, IndexStage::FileRead);
+    }
     Ok(data)
 }
 
@@ -1855,8 +2690,13 @@ struct ParserCache {
 }
 
 impl ParserCache {
-    fn extract(&mut self, language: Option<&str>, text: &str) -> Option<(Vec<Symbol>, bool)> {
-        self.extract_with_budget(language, text, PARSER_TIME_BUDGET)
+    fn extract(
+        &mut self,
+        language: Option<&str>,
+        text: &str,
+        cancellation: &AtomicBool,
+    ) -> Option<(Vec<Symbol>, bool)> {
+        self.extract_with_budget(language, text, PARSER_TIME_BUDGET, cancellation)
     }
 
     fn extract_with_budget(
@@ -1864,6 +2704,7 @@ impl ParserCache {
         language: Option<&str>,
         text: &str,
         budget: Duration,
+        cancellation: &AtomicBool,
     ) -> Option<(Vec<Symbol>, bool)> {
         let parser_slot = match language? {
             "rust" => &mut self.rust,
@@ -1889,7 +2730,7 @@ impl ParserCache {
         let parser = parser_slot.as_mut()?;
         let started = Instant::now();
         let mut progress = |_state: &tree_sitter::ParseState| {
-            if started.elapsed() >= budget {
+            if cancellation.load(Ordering::Relaxed) || started.elapsed() >= budget {
                 std::ops::ControlFlow::Break(())
             } else {
                 std::ops::ControlFlow::Continue(())
@@ -2013,7 +2854,12 @@ mod parser_budget_tests {
     fn parser_budget_marks_result_structurally_incomplete() {
         let mut cache = ParserCache::default();
         let (_, incomplete) = cache
-            .extract_with_budget(Some("rust"), "pub fn bounded() {}", Duration::ZERO)
+            .extract_with_budget(
+                Some("rust"),
+                "pub fn bounded() {}",
+                Duration::ZERO,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
             .unwrap();
         assert!(incomplete);
     }

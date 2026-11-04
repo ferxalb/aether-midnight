@@ -1,0 +1,587 @@
+{
+  "database_file_bytes": 18710528,
+  "environment": {
+    "arch": "x86_64",
+    "bun": null,
+    "cargo_profile": "release",
+    "corpus_root": "/tmp/aether-midnight-bench-v2by1c83/corpus",
+    "cpu": null,
+    "go": null,
+    "logical_cores": 2,
+    "node": "v24.22.1",
+    "os": "linux",
+    "ram_bytes": null,
+    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.45 is available (JIT is available)",
+    "rusqlite_crate": "0.41.1",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "sqlite_version": "3.54.1",
+    "storage_mount": "overlay         7.9G  2.2G  5.3G  29% /",
+    "tree_sitter_crate": "0.27.1",
+    "tree_sitter_grammar_crates": {
+      "python": "0.25.0",
+      "rust": "0.24.2",
+      "typescript": "0.23.2"
+    }
+  },
+  "fixture": {
+    "eligible_bytes": 104857600,
+    "eligible_files": 10000,
+    "generator": "scripts/generate_fixture.py",
+    "index_bytes": 18710528,
+    "index_to_source_ratio": 0.1784375,
+    "seed": 20261103,
+    "skip_reasons": {},
+    "skipped_files": 0
+  },
+  "index_status": {
+    "branch": null,
+    "catalog_complete": true,
+    "complete": true,
+    "eligible_bytes": 104857600,
+    "eligible_files": 10000,
+    "generation": 1,
+    "index_format_version": 2,
+    "indexed_bytes": 104857600,
+    "indexed_files": 10000,
+    "last_index_finished": "2026-11-04T05:26:49.483964708Z",
+    "last_index_started": "2026-11-04T05:26:47.039540608Z",
+    "repo_id": "7845b60c98845994754393355cd9a48839441d6384b767d8e1f261f724ab75fe",
+    "revision": null,
+    "root": "/tmp/aether-midnight-bench-v2by1c83/corpus",
+    "skipped": {},
+    "structural_complete": true,
+    "worktree_id": "7845b60c98845994754393355cd9a48839441d6384b767d8e1f261f724ab75fe"
+  },
+  "measurement_conditions": {
+    "build_excluded": true,
+    "database_cache": "fresh database for full index; warm database for search; fresh process with empty index for first useful context",
+    "filesystem_cache": "not evicted; first cold-search sample is OS-cache-unknown and later samples may be warm",
+    "network": "not used",
+    "scope": "locally generated deterministic reference fixture",
+    "timers": "process launch through grounded JSON result for first useful context; operation start through query-visible result for warm and incremental calls"
+  },
+  "resources": {
+    "allocator_live_heap_bytes": null,
+    "memory_mapped_pages_bytes": null,
+    "peak_process_rss_bytes": 34541568,
+    "rss_after_stress_cycles_bytes": [
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624,
+      34074624
+    ],
+    "stress": {
+      "cancelled_index_remains_partial": true,
+      "cycle_ms": {
+        "max_ms": 6.134324,
+        "min_ms": 3.283608,
+        "p50_ms": 3.672914,
+        "p95_ms": 6.134324,
+        "sample_count": 20,
+        "samples_ms": [
+          3.283608,
+          3.313372,
+          3.348505,
+          3.3981100000000004,
+          3.4098879999999996,
+          3.450319,
+          3.4902990000000003,
+          3.649669,
+          3.6567190000000003,
+          3.6572,
+          3.672914,
+          3.6806740000000002,
+          3.75083,
+          3.806845,
+          3.8679970000000004,
+          4.039795,
+          4.091113,
+          4.201659,
+          4.263401,
+          6.134324
+        ]
+      },
+      "cycles": 20,
+      "peak_process_rss_bytes": 34541568,
+      "rss_first_bytes": 34074624,
+      "rss_last_bytes": 34074624,
+      "rss_samples_bytes": [
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624,
+        34074624
+      ]
+    },
+    "unavailable_measurements": "allocator live heap and mmap pages are not instrumented on this build"
+  },
+  "retrieval_quality": {
+    "memory_cases": {
+      "all_pass": true,
+      "forget_immediate": true,
+      "provenance_link": true,
+      "scope_isolation": true,
+      "temporal_active": true,
+      "temporal_expired": true
+    },
+    "mrr": 1.0,
+    "queries": [
+      {
+        "id": "exact-symbol",
+        "kind": "exact-symbol",
+        "query": "benchmark_target_00000",
+        "recall_at_5": 1.0,
+        "reciprocal_rank": 1.0,
+        "relevant_paths": [
+          "src/00000.rs"
+        ],
+        "top5": [
+          {
+            "freshness": "fresh",
+            "path": "src/00000.rs",
+            "score": 130.0
+          }
+        ]
+      },
+      {
+        "id": "path",
+        "kind": "path",
+        "query": "src/00007.rs",
+        "recall_at_5": 1.0,
+        "reciprocal_rank": 1.0,
+        "relevant_paths": [
+          "src/00007.rs"
+        ],
+        "top5": [
+          {
+            "freshness": "fresh",
+            "path": "src/00007.rs",
+            "score": 100.0
+          }
+        ]
+      },
+      {
+        "id": "lexical",
+        "kind": "lexical",
+        "query": "delta cache invalidation token",
+        "recall_at_5": 1.0,
+        "reciprocal_rank": 1.0,
+        "relevant_paths": [
+          "src/00002.rs"
+        ],
+        "top5": [
+          {
+            "freshness": "fresh",
+            "path": "src/00002.rs",
+            "score": 50.0
+          }
+        ]
+      },
+      {
+        "id": "cross-file-symbol",
+        "kind": "cross-file",
+        "query": "common_retry_budget",
+        "recall_at_5": 1.0,
+        "reciprocal_rank": 1.0,
+        "relevant_paths": [
+          "src/00004.rs",
+          "src/00005.rs"
+        ],
+        "top5": [
+          {
+            "freshness": "fresh",
+            "path": "src/00004.rs",
+            "score": 130.0
+          },
+          {
+            "freshness": "fresh",
+            "path": "src/00005.rs",
+            "score": 130.0
+          }
+        ]
+      },
+      {
+        "id": "natural-language",
+        "kind": "natural-language",
+        "query": "stale revision consistency",
+        "recall_at_5": 1.0,
+        "reciprocal_rank": 1.0,
+        "relevant_paths": [
+          "src/00003.rs"
+        ],
+        "top5": [
+          {
+            "freshness": "fresh",
+            "path": "src/00003.rs",
+            "score": 50.0
+          }
+        ]
+      }
+    ],
+    "query_count": 5,
+    "recall_at_5": 1.0
+  },
+  "schema_version": 1,
+  "timings": {
+    "first_useful_context_fresh_process_empty_index": {
+      "max_ms": 48.903259,
+      "min_ms": 40.249134,
+      "p50_ms": 42.401548,
+      "p95_ms": 46.802786999999995,
+      "sample_count": 30,
+      "samples_ms": [
+        40.249134,
+        40.487612999999996,
+        40.754275,
+        41.1366,
+        41.160706,
+        41.346206,
+        41.426432,
+        41.441234,
+        41.731426,
+        41.747479,
+        41.90045,
+        41.906684,
+        41.956223,
+        42.09917299999999,
+        42.368984,
+        42.401548,
+        42.434463,
+        42.45216,
+        42.477989,
+        42.554244,
+        42.574884,
+        42.776458000000005,
+        42.796358,
+        43.13017,
+        43.188247,
+        43.337942999999996,
+        43.557303,
+        43.570803,
+        46.802786999999995,
+        48.903259
+      ]
+    },
+    "full_index_fresh_database": {
+      "max_ms": 2459.165526,
+      "min_ms": 2271.471658,
+      "p50_ms": 2355.034051,
+      "p95_ms": 2459.165526,
+      "sample_count": 3,
+      "samples_ms": [
+        2271.471658,
+        2355.034051,
+        2459.165526
+      ]
+    },
+    "full_index_phases_first_sample_ms": {
+      "commit_and_reconcile": 204.41654699999998,
+      "discovery": 11.317832000000019,
+      "full_index_ready": 2449.1148599999997,
+      "hashing_and_read": 223.30630499999984,
+      "index_writing": 887.7328019999999,
+      "parsing": 975.4592490000072
+    },
+    "incremental_update_query_visible": {
+      "max_ms": 170.956527,
+      "min_ms": 142.333029,
+      "p50_ms": 148.542234,
+      "p95_ms": 170.956527,
+      "sample_count": 10,
+      "samples_ms": [
+        142.333029,
+        144.468032,
+        146.987503,
+        147.625985,
+        148.043073,
+        148.542234,
+        149.825114,
+        152.54287399999998,
+        164.378046,
+        170.956527
+      ]
+    },
+    "large_repository_partial_context_during_index": {
+      "full_index_process_elapsed_ms": 2570.2296589999996,
+      "index_process_completed_successfully": true,
+      "index_process_running_when_search_returned": true,
+      "partial_catalog_observed_before_search": true,
+      "result_explicitly_partial": true,
+      "result_freshness": "fresh_unindexed",
+      "sample_count": 1,
+      "search_ms": 46.623568,
+      "useful_result_returned": true
+    },
+    "ripgrep_identical_query_set": {
+      "executable": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.45 is available (JIT is available)",
+      "queries": [
+        {
+          "elapsed_ms": 42.215583,
+          "id": "exact-symbol",
+          "matching_files": 1,
+          "query": "benchmark_target_00000"
+        },
+        {
+          "elapsed_ms": 45.323771,
+          "id": "path",
+          "matching_files": 1,
+          "query": "src/00007.rs"
+        },
+        {
+          "elapsed_ms": 42.330987,
+          "id": "lexical",
+          "matching_files": 1,
+          "query": "delta cache invalidation token"
+        },
+        {
+          "elapsed_ms": 42.360953,
+          "id": "cross-file-symbol",
+          "matching_files": 2,
+          "query": "common_retry_budget"
+        },
+        {
+          "elapsed_ms": 43.689913,
+          "id": "natural-language",
+          "matching_files": 1,
+          "query": "stale revision consistency"
+        }
+      ],
+      "timing": {
+        "max_ms": 45.323771,
+        "min_ms": 42.215583,
+        "p50_ms": 42.360953,
+        "p95_ms": 45.323771,
+        "sample_count": 5,
+        "samples_ms": [
+          42.215583,
+          42.330987,
+          42.360953,
+          43.689913,
+          45.323771
+        ]
+      }
+    },
+    "warm_search": {
+      "max_ms": 10.304859,
+      "min_ms": 0.440313,
+      "p50_ms": 8.910441,
+      "p95_ms": 10.222514,
+      "sample_count": 30,
+      "samples_ms": [
+        0.440313,
+        0.45290199999999997,
+        0.470438,
+        0.484529,
+        0.510278,
+        0.534334,
+        8.673743,
+        8.712752,
+        8.721815000000001,
+        8.791501,
+        8.799384,
+        8.819162,
+        8.851882,
+        8.898372,
+        8.90404,
+        8.910441,
+        8.911131,
+        8.990801,
+        9.058623,
+        9.071883,
+        9.128687999999999,
+        9.21566,
+        9.238154,
+        9.354438,
+        9.43529,
+        9.570904,
+        9.822263,
+        9.855142,
+        10.222514,
+        10.304859
+      ]
+    }
+  },
+  "fts5_tokenizer_evaluation": {
+    "schema_version": 1,
+    "scope": "fixed local 10,000-file/100-MiB Midnight fixture",
+    "sqlite_version": "3.53.1",
+    "method": "contentless FTS5 tables; 512-file batches; code queries from benchmark/manifest.json; path query measured in a separate indexed path table",
+    "search_samples_per_content_query_per_tokenizer": 30,
+    "path_lookup": {
+      "query": "src/00007.rs",
+      "p50_ms": 0.0010919999908765021,
+      "p95_ms": 0.0030850000030113733,
+      "sample_count": 30,
+      "result": "src/00007.rs"
+    },
+    "tokenizers": {
+      "trigram": {
+        "tokenizer": "trigram",
+        "sqlite_version": "3.53.1",
+        "build_ms": 3780.395989999988,
+        "index_bytes": 112640000,
+        "index_to_source_ratio": 1.07421875,
+        "eligible_files": 10000,
+        "eligible_bytes": 104857600,
+        "content_query_count": 4,
+        "recall_at_5": 1.0,
+        "mrr": 1.0,
+        "warm_search_ms": {
+          "p50_ms": 0.3282540000100198,
+          "p95_ms": 0.4909390000022995,
+          "sample_count": 120
+        },
+        "queries": [
+          {
+            "id": "exact-symbol",
+            "query": "benchmark_target_00000",
+            "top5": [
+              "src/00000.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.34581999997840285,
+            "search_p95_ms": 0.4617849999988266,
+            "sample_count": 30
+          },
+          {
+            "id": "lexical",
+            "query": "delta cache invalidation token",
+            "top5": [
+              "src/00002.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.32552999999779786,
+            "search_p95_ms": 0.4909390000022995,
+            "sample_count": 30
+          },
+          {
+            "id": "cross-file-symbol",
+            "query": "common_retry_budget",
+            "top5": [
+              "src/00004.rs",
+              "src/00005.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.2851090000035583,
+            "search_p95_ms": 0.628986999998915,
+            "sample_count": 30
+          },
+          {
+            "id": "natural-language",
+            "query": "stale revision consistency",
+            "top5": [
+              "src/00003.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.3065510000226368,
+            "search_p95_ms": 0.5064430000061293,
+            "sample_count": 30
+          }
+        ]
+      },
+      "unicode61": {
+        "tokenizer": "unicode61",
+        "sqlite_version": "3.53.1",
+        "build_ms": 724.3621140000016,
+        "index_bytes": 15368192,
+        "index_to_source_ratio": 0.1465625,
+        "eligible_files": 10000,
+        "eligible_bytes": 104857600,
+        "content_query_count": 4,
+        "recall_at_5": 1.0,
+        "mrr": 1.0,
+        "warm_search_ms": {
+          "p50_ms": 0.0541219999945497,
+          "p95_ms": 0.10576899998682165,
+          "sample_count": 120
+        },
+        "queries": [
+          {
+            "id": "exact-symbol",
+            "query": "benchmark_target_00000",
+            "top5": [
+              "src/00000.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.052698999979838845,
+            "search_p95_ms": 0.06915399998774774,
+            "sample_count": 30
+          },
+          {
+            "id": "lexical",
+            "query": "delta cache invalidation token",
+            "top5": [
+              "src/00002.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.07144700001049387,
+            "search_p95_ms": 0.1420739999957732,
+            "sample_count": 30
+          },
+          {
+            "id": "cross-file-symbol",
+            "query": "common_retry_budget",
+            "top5": [
+              "src/00004.rs",
+              "src/00005.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.05430199999523211,
+            "search_p95_ms": 0.07115699997939373,
+            "sample_count": 30
+          },
+          {
+            "id": "natural-language",
+            "query": "stale revision consistency",
+            "top5": [
+              "src/00003.rs"
+            ],
+            "recall_at_5": 1.0,
+            "reciprocal_rank": 1.0,
+            "search_p50_ms": 0.05216899998572444,
+            "search_p95_ms": 0.05489199998010008,
+            "sample_count": 30
+          }
+        ]
+      }
+    }
+  }
+}
