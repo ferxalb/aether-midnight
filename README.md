@@ -1,8 +1,8 @@
-# AETHER Midnight v1
+# AETHER Midnight
 
 AETHER Midnight is a local Rust engine for deterministic code retrieval and explicitly stored agent memory. It uses SQLite for persistence and lexical indexes, Tree-sitter for selected structural indexes, and one process boundary shared by the CLI and MCP tools. It needs no service, key, model, or network connection.
 
-V1 is intentionally small. It supports repository/worktree-scoped code search, source-grounded ranges and symbols, plus separately namespaced source and derived memories. It does not provide embeddings, automatic conversation capture, cloud sync, a UI, or an LLM.
+v0.1 is intentionally small. It supports repository/worktree-scoped code search, source-grounded ranges and symbols, plus separately namespaced source and derived memories. It does not provide embeddings, automatic conversation capture, cloud sync, a UI, or an LLM.
 
 ## Build and use
 
@@ -13,7 +13,7 @@ cargo build --release --locked
 ./target/release/aether-midnight index-status --repo /path/to/repository
 ```
 
-The default SQLite database is under the OS local application-data directory in `aether-midnight/midnight.sqlite3`. `--db /path/to/midnight.sqlite3` selects another database. On Unix, Midnight creates and restricts the database file to owner read/write (`0600`). SQLite stores source text and memory content locally in that database; data is not encrypted by Midnight.
+The default SQLite database is under the OS local application-data directory in `aether-midnight/midnight.sqlite3`. `--db /path/to/midnight.sqlite3` selects another database. On Unix, Midnight creates and restricts the database file to owner read/write (`0600`). The database stores code-token postings and metadata plus explicit memory content; whole code files are read from the repository at retrieval time. Data is not encrypted by Midnight.
 
 An empty or incomplete index can still return a direct-read result marked `fresh_unindexed`; that fallback does not persist an index. Run `index` for repeatable lexical and symbol search. Incremental scans reconcile the full eligible file catalog. `--verify-hashes` disables the size/mtime fast path and re-reads each eligible file.
 

@@ -8,12 +8,39 @@ use std::sync::atomic::AtomicBool;
 use crate::{VERSION, code, memory};
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
+const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 
 pub fn run_stdio(db_path: &Path, cancellation: Arc<AtomicBool>) -> Result<()> {
     let stdin = std::io::stdin();
+    let mut input = stdin.lock();
     let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line.context("read MCP stdio input")?;
+    loop {
+        let Some((bytes, too_long)) = read_bounded_line(&mut input, MAX_MCP_MESSAGE_BYTES)? else {
+            break;
+        };
+        if too_long {
+            write_json(
+                &mut stdout,
+                &json!({
+                    "jsonrpc":"2.0","id":null,
+                    "error":{"code":-32600,"message":"MCP message exceeds the 1 MiB limit"}
+                }),
+            )?;
+            continue;
+        }
+        let line = match String::from_utf8(bytes) {
+            Ok(line) => line,
+            Err(error) => {
+                write_json(
+                    &mut stdout,
+                    &json!({
+                        "jsonrpc":"2.0","id":null,
+                        "error":{"code":-32700,"message":format!("parse error: {error}")}
+                    }),
+                )?;
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -66,18 +93,44 @@ pub fn run_stdio(db_path: &Path, cancellation: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
-fn initialize(id: Value, params: &Value) -> Value {
-    let requested = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if requested != PROTOCOL_VERSION {
-        return error_response(
-            id,
-            -32602,
-            &format!("unsupported protocol version; pin {PROTOCOL_VERSION}"),
-        );
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<(Vec<u8>, bool)>> {
+    let mut line = Vec::with_capacity(4096.min(max_bytes));
+    let mut too_long = false;
+    loop {
+        let (consumed, has_newline, eof) = {
+            let available = reader.fill_buf().context("read MCP stdio input")?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let consumed = newline.map_or(available.len(), |position| position + 1);
+                if !too_long {
+                    let content_bytes = consumed - usize::from(newline.is_some());
+                    let keep = content_bytes.min(max_bytes.saturating_sub(line.len()) + 1);
+                    line.extend_from_slice(&available[..keep]);
+                    if keep < content_bytes || line.len() > max_bytes {
+                        too_long = true;
+                    } else if newline.is_some() {
+                        line.push(b'\n');
+                    }
+                }
+                (consumed, newline.is_some(), false)
+            }
+        };
+        if eof {
+            return Ok((!line.is_empty() || too_long).then_some((line, too_long)));
+        }
+        reader.consume(consumed);
+        if has_newline {
+            return Ok(Some((line, too_long)));
+        }
     }
+}
+
+fn initialize(id: Value, _params: &Value) -> Value {
     ok_response(
         id,
         json!({
@@ -283,4 +336,30 @@ fn write_json(output: &mut impl Write, value: &Value) -> Result<()> {
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PROTOCOL_VERSION, initialize, read_bounded_line};
+    use serde_json::json;
+    use std::io::Cursor;
+
+    #[test]
+    fn initialize_responds_with_the_only_supported_protocol_version() {
+        let response = initialize(json!(1), &json!({"protocolVersion":"2099-01-01"}));
+        assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert!(response.get("error").is_none());
+    }
+
+    #[test]
+    fn oversized_stdio_lines_are_bounded_and_drained() {
+        let mut input = Cursor::new(b"123456789\nnext\n".to_vec());
+        let (line, too_long) = read_bounded_line(&mut input, 4).unwrap().unwrap();
+        assert_eq!(line, b"12345");
+        assert!(too_long);
+        let (line, too_long) = read_bounded_line(&mut input, 4).unwrap().unwrap();
+        assert_eq!(line, b"next\n");
+        assert!(!too_long);
+        assert!(read_bounded_line(&mut input, 4).unwrap().is_none());
+    }
 }

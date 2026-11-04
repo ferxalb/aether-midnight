@@ -142,6 +142,9 @@ pub fn recall(
     if query.trim().is_empty() {
         bail!("recall query cannot be empty");
     }
+    if query.len() > 4096 {
+        bail!("memory recall query exceeds 4096 bytes");
+    }
     let match_query = memory_match_query(query);
     let conn = open_db(db_path)?;
     let at = at
@@ -222,14 +225,20 @@ pub fn forget(db_path: &Path, scope: &str, id: i64) -> Result<bool> {
 
 pub fn compact(db_path: &Path) -> Result<()> {
     let conn = open_db(db_path)?;
-    conn.execute_batch("INSERT INTO code_trigram(code_trigram) VALUES('optimize'); INSERT INTO memory_fts(memory_fts) VALUES('optimize'); PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+    conn.execute(
+        "UPDATE memories SET content='',source_uri=NULL WHERE deleted_at IS NOT NULL",
+        [],
+    )?;
+    conn.execute_batch("INSERT INTO code_fts(code_fts) VALUES('optimize'); INSERT INTO memory_fts(memory_fts) VALUES('optimize'); PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
     Ok(())
 }
 
 fn validate_scope(scope: &str) -> Result<()> {
-    let scope = scope.trim();
-    if scope.is_empty() || scope.len() > 256 || scope.contains('\0') {
+    if scope.trim().is_empty() || scope.len() > 256 || scope.contains('\0') {
         bail!("memory scope must be a non-empty key of at most 256 bytes");
+    }
+    if scope != scope.trim() {
+        bail!("memory scope cannot have leading or trailing whitespace");
     }
     if !scope.contains(':') {
         bail!("scope must be namespaced, for example user:alice or project:my-app");

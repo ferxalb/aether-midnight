@@ -26,7 +26,7 @@ For a raw source, `source_uri` is optional. Derived memories must cite a raw `so
 
 ## MCP
 
-Run `aether-midnight mcp` with JSON-RPC messages over stdio. The implementation pins protocol version `2025-11-25`, advertises tools, and accepts `initialize`, `ping`, `tools/list`, and `tools/call`. It does not use a third-party MCP SDK. This is a small v1 tool-server surface, not a claim of support for unrelated MCP transports or protocol capabilities.
+Run `aether-midnight mcp` with JSON-RPC messages over stdio. The implementation pins [MCP protocol version 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25), advertises tools, and accepts `initialize`, `ping`, `tools/list`, and `tools/call`. It does not use a third-party MCP SDK. This is the 2025-11-25 handshake subset; the later stateless protocol revision and other transports are not implemented.
 
 Available tools are `index_repository`, `search_code`, `open_range`, `list_symbols`, `repo_map`, `index_status`, `remember`, `recall`, `list_memories`, and `forget`. Every code tool receives `repo_path`; every memory tool receives `scope`.
 
@@ -48,7 +48,7 @@ Optional variables: `AETHER_MIDNIGHT_DB` selects the SQLite file and `AETHER_QUE
 ```sh
 export AETHER_MIDNIGHT_BIN="$PWD/target/release/aether-midnight"
 export AETHER_REPO="$PWD"
-go run ./examples/go
+(cd examples/go && go run .)
 ```
 
 `examples/go` contains a small Go module and JSON-RPC stdio client. It uses the same optional environment variables as the Node example. Both clients require the Rust executable to be built or installed separately.

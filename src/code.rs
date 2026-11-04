@@ -8,19 +8,23 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::db::{RepoScope, hash_bytes, now_utc, open_db, repo_scope};
-use crate::text_index::{SqliteTrigramIndex, TextIndex};
+use crate::text_index::{SqliteFtsIndex, TextIndex};
 use crate::{INDEX_FORMAT_VERSION, MAX_FILE_BYTES};
 
-const BATCH_FILES: usize = 64;
-const BATCH_BYTES: usize = 8 * 1024 * 1024;
+const BATCH_FILES: usize = 512;
+const BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OPEN_RANGE_LINES: u32 = 200;
 const MAX_SNIPPET_LINES: usize = 8;
 const MAX_SNIPPET_BYTES: usize = 4096;
 const DEFAULT_TOKEN_BUDGET: usize = 2048;
 const MAX_TOKEN_BUDGET: usize = 8192;
+const MAX_SEARCH_QUERY_BYTES: usize = 4096;
+const MAX_RELATIVE_PATH_BYTES: usize = 4096;
+const MAX_AETHERIGNORE_BYTES: u64 = MAX_FILE_BYTES;
+const PARSER_TIME_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Symbol {
@@ -130,6 +134,7 @@ struct PendingFile {
     text: String,
     symbols: Vec<Symbol>,
     parse_error: bool,
+    is_new: bool,
 }
 
 #[derive(Clone)]
@@ -220,13 +225,12 @@ fn index_scoped(
         .follow_links(false)
         .max_depth(Some(128));
     let aetherignore = root.join(".aetherignore");
-    let ignore_error = if aetherignore.is_file()
-        && fs::symlink_metadata(&aetherignore)
-            .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
-        && aetherignore
-            .canonicalize()
-            .is_ok_and(|p| p.starts_with(root))
-    {
+    if fs::symlink_metadata(&aetherignore).is_ok_and(|meta| {
+        meta.is_file() && !meta.file_type().is_symlink() && meta.len() > MAX_AETHERIGNORE_BYTES
+    }) {
+        bump(&mut skipped, "aetherignore_oversized");
+    }
+    let ignore_error = if valid_aetherignore(&aetherignore, root) {
         builder
             .add_ignore(&aetherignore)
             .map(|error| error.to_string())
@@ -434,7 +438,7 @@ fn index_scoped(
             }
             continue;
         }
-        let actual_path = match path.canonicalize() {
+        let _actual_path = match path.canonicalize() {
             Ok(p) if p.starts_with(root) => p,
             _ => {
                 bump(&mut skipped, "outside_root_or_raced_symlink");
@@ -442,7 +446,7 @@ fn index_scoped(
             }
         };
         let read_start = Instant::now();
-        let bytes = match read_limited_no_follow(&actual_path, MAX_FILE_BYTES as usize + 1) {
+        let bytes = match read_limited_from_root(root, rel, MAX_FILE_BYTES as usize + 1) {
             Ok(bytes) => bytes,
             Err(_) => {
                 bump(&mut skipped, "read_error_or_raced_symlink");
@@ -457,6 +461,11 @@ fn index_scoped(
         if bytes.contains(&0) {
             timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
             bump(&mut skipped, "binary_nul");
+            continue;
+        }
+        if has_binary_controls(&bytes) {
+            timers.hashing += read_start.elapsed().as_secs_f64() * 1000.0;
+            bump(&mut skipped, "binary_control_bytes");
             continue;
         }
         let text = match String::from_utf8(bytes) {
@@ -522,6 +531,7 @@ fn index_scoped(
             text,
             symbols,
             parse_error,
+            is_new: existing.is_none(),
         });
         pending_bytes += text_size;
         eligible_files += 1;
@@ -554,7 +564,9 @@ fn index_scoped(
     }
     let vcs_count = excluded_vcs_for_walk.load(Ordering::Relaxed);
     if vcs_count > 0 {
-        *skipped.entry("version_control_metadata".to_string()).or_default() += vcs_count;
+        *skipped
+            .entry("version_control_metadata".to_string())
+            .or_default() += vcs_count;
     }
     if ignore_error.is_some() {
         bump(&mut skipped, "aetherignore_parse_error");
@@ -572,22 +584,18 @@ fn index_scoped(
     }
 
     let commit_start = Instant::now();
-    let stale: Vec<i64> = {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND indexed_generation<>?3",
-        )?;
-        let rows = stmt.query_map(
-            params![scope.repo_id, scope.worktree_id, generation as i64],
-            |row| row.get(0),
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    if !stale.is_empty() {
+    let stale_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND indexed_generation<>?3 LIMIT 1)",
+        params![scope.repo_id, scope.worktree_id, generation as i64],
+        |row| row.get(0),
+    )?;
+    if stale_exists {
         let tx = conn.transaction()?;
-        for id in stale {
-            SqliteTrigramIndex.remove(&tx, id)?;
-            tx.execute("DELETE FROM code_files WHERE id=?1", [id])?;
-        }
+        SqliteFtsIndex.remove_stale(&tx, &scope.repo_id, &scope.worktree_id, generation)?;
+        tx.execute(
+            "DELETE FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND indexed_generation<>?3",
+            params![scope.repo_id, scope.worktree_id, generation as i64],
+        )?;
         tx.commit()?;
     }
     let skipped_json = serde_json::to_string(&skipped)?;
@@ -756,8 +764,13 @@ fn flush_batch(
                 params![repo_id, worktree_id, file.rel_path, file.hash, file.language, file.size as i64, file.modified_ns, generation as i64, file.parse_error],
                 |row| row.get::<_, i64>(0),
             )?;
-        SqliteTrigramIndex.replace(&tx, file_id, &file.text)?;
-        tx.execute("DELETE FROM code_symbols WHERE file_id=?1", [file_id])?;
+        if file.is_new {
+            SqliteFtsIndex.insert(&tx, file_id, &file.text)?;
+        } else {
+            SqliteFtsIndex.replace(&tx, file_id, &file.text)?;
+            tx.prepare_cached("DELETE FROM code_symbols WHERE file_id=?1")?
+                .execute([file_id])?;
+        }
         {
             let mut symbol_stmt = tx.prepare(
                 "INSERT INTO code_symbols(file_id,name,kind,line_start,line_end,byte_start,byte_end)
@@ -888,6 +901,9 @@ pub fn search_code_with_budget(
     if query.trim().is_empty() {
         bail!("code search query cannot be empty");
     }
+    if query.len() > MAX_SEARCH_QUERY_BYTES {
+        bail!("code search query exceeds 4096 bytes");
+    }
     let scope = repo_scope(root)?;
     let limit = limit.clamp(1, 20);
     let conn = open_db(db_path)?;
@@ -903,9 +919,11 @@ pub fn search_code_with_budget(
         .unwrap_or((0, false));
     let candidates = indexed_candidates(&conn, &scope, query, limit)?;
     let mut results = make_results(&scope, query, candidates, complete, limit)?;
-    if results.is_empty() && !complete {
-        results = cold_search(&scope, query, limit, generation)?;
+    let used_direct_fallback = results.is_empty() && !complete;
+    if used_direct_fallback {
+        results = cold_search(&conn, &scope, query, generation)?;
     }
+    let fallback_has_result = used_direct_fallback && !results.is_empty();
     let budget = token_budget.clamp(64, MAX_TOKEN_BUDGET);
     let was_at_limit = results.len() >= limit;
     let (results, estimated_tokens, context_truncated) = pack_context(results, budget);
@@ -913,7 +931,7 @@ pub fn search_code_with_budget(
         results,
         token_budget: budget,
         estimated_tokens,
-        truncated: was_at_limit || context_truncated,
+        truncated: !complete || fallback_has_result || was_at_limit || context_truncated,
         token_estimator:
             "midnight-heuristic-v1 (identifier chunks, punctuation, and fixed metadata allowance)"
                 .into(),
@@ -937,6 +955,69 @@ fn indexed_candidates(
     limit: usize,
 ) -> Result<Vec<Candidate>> {
     let mut map = BTreeMap::<i64, Candidate>::new();
+    let path_query = query.contains('/') || query.contains('\\');
+    if path_query {
+        let mut stmt = conn.prepare(
+            "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
+             WHERE repo_id=?1 AND worktree_id=?2 AND rel_path=?3 LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![scope.repo_id, scope.worktree_id, query, limit as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (id, path, hash, generation_value) = row?;
+            map.insert(
+                id,
+                Candidate {
+                    path,
+                    hash,
+                    generation: generation_value as u64,
+                    exact_path: 100.0,
+                    ..Default::default()
+                },
+            );
+        }
+        if map.is_empty() {
+            let mut stmt = conn.prepare(
+                "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
+                 WHERE repo_id=?1 AND worktree_id=?2 AND instr(lower(rel_path),lower(?3))>0
+                 ORDER BY rel_path LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![scope.repo_id, scope.worktree_id, query, limit as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (id, path, hash, generation_value) = row?;
+                map.insert(
+                    id,
+                    Candidate {
+                        path,
+                        hash,
+                        generation: generation_value as u64,
+                        exact_path: 60.0,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        return Ok(map.into_values().collect());
+    }
     {
         let mut stmt = conn.prepare(
             "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
@@ -999,8 +1080,8 @@ fn indexed_candidates(
             candidate.exact_symbol = 80.0;
         }
     }
-    if let Some(match_query) = trigram_query(query) {
-        let index = SqliteTrigramIndex;
+    if let Some(match_query) = code_match_query(query) {
+        let index = SqliteFtsIndex;
         for hit in index.search(
             conn,
             &scope.repo_id,
@@ -1028,10 +1109,10 @@ fn indexed_candidates(
     Ok(candidates)
 }
 
-fn trigram_query(query: &str) -> Option<String> {
+fn code_match_query(query: &str) -> Option<String> {
     let terms = query
         .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .filter(|term| term.chars().count() >= 3)
+        .filter(|term| term.chars().any(char::is_alphanumeric))
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
     (!terms.is_empty()).then(|| terms.join(" OR "))
@@ -1067,7 +1148,7 @@ fn make_results(
         let mut breakdown = BTreeMap::new();
         breakdown.insert("exact_path".into(), candidate.exact_path);
         breakdown.insert("exact_symbol".into(), candidate.exact_symbol);
-        breakdown.insert("lexical_trigram".into(), candidate.lexical);
+        breakdown.insert("lexical_fts".into(), candidate.lexical);
         if candidate.exact_path > 0.0 {
             reasons.push("path".to_string());
         }
@@ -1097,9 +1178,9 @@ fn make_results(
 }
 
 fn cold_search(
+    conn: &Connection,
     scope: &RepoScope,
     query: &str,
-    limit: usize,
     generation: u64,
 ) -> Result<Vec<CodeResult>> {
     let mut builder = WalkBuilder::new(&scope.root);
@@ -1113,13 +1194,7 @@ fn cold_search(
         .follow_links(false)
         .max_depth(Some(128));
     let aetherignore = scope.root.join(".aetherignore");
-    if aetherignore.is_file()
-        && fs::symlink_metadata(&aetherignore)
-            .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
-        && aetherignore
-            .canonicalize()
-            .is_ok_and(|p| p.starts_with(&scope.root))
-    {
+    if valid_aetherignore(&aetherignore, &scope.root) {
         builder.add_ignore(aetherignore);
     }
     let root_for_filter = scope.root.clone();
@@ -1133,40 +1208,50 @@ fn cold_search(
             .ok()
             .is_some_and(|rel| !is_vcs_metadata_path(rel) && !default_generated_path(rel))
     });
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS midnight_cold_paths(
+             path TEXT PRIMARY KEY
+         ) WITHOUT ROWID;
+         DELETE FROM midnight_cold_paths;",
+    )?;
+    {
+        let mut insert =
+            conn.prepare_cached("INSERT OR IGNORE INTO midnight_cold_paths(path) VALUES(?1)")?;
+        for entry in builder.build() {
+            let Ok(entry) = entry else { continue };
+            if entry.depth() == 0
+                || entry
+                    .file_type()
+                    .is_some_and(|t| t.is_dir() || t.is_symlink())
+            {
+                continue;
+            }
+            let path = entry.path();
+            let Some(rel) = path.strip_prefix(&scope.root).ok() else {
+                continue;
+            };
+            if is_secret_path(rel) || is_vcs_metadata_path(rel) || default_generated_path(rel) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(path) else {
+                continue;
+            };
+            if meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= MAX_FILE_BYTES {
+                insert.execute([rel.to_string_lossy().replace('\\', "/")])?;
+            }
+        }
+    }
     let mut results = Vec::new();
     let terms = query
         .split_whitespace()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
-    for entry in builder.build() {
-        let Ok(entry) = entry else { continue };
-        if entry.depth() == 0
-            || entry
-                .file_type()
-                .is_some_and(|t| t.is_dir() || t.is_symlink())
-        {
-            continue;
-        }
-        let path = entry.path();
-        let Some(rel) = path.strip_prefix(&scope.root).ok() else {
-            continue;
-        };
-        if is_secret_path(rel) || is_vcs_metadata_path(rel) || default_generated_path(rel) {
-            continue;
-        }
-        let Ok(meta) = fs::symlink_metadata(path) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
-            continue;
-        }
-        let Ok(canonical) = path.canonicalize() else {
-            continue;
-        };
-        if !canonical.starts_with(&scope.root) {
-            continue;
-        }
-        let Ok(text) = current_text(&scope.root, &canonical) else {
+    let mut paths = conn.prepare("SELECT path FROM midnight_cold_paths ORDER BY path")?;
+    let path_rows = paths.query_map([], |row| row.get::<_, String>(0))?;
+    for path_row in path_rows {
+        let rel_path = path_row?;
+        let rel = Path::new(&rel_path);
+        let Ok(text) = current_text(&scope.root, &scope.root.join(rel)) else {
             continue;
         };
         let lower_path = rel.to_string_lossy().to_ascii_lowercase();
@@ -1189,7 +1274,7 @@ fn cold_search(
         breakdown.insert("cold_path".into(), if path_hit { 60.0 } else { 0.0 });
         breakdown.insert("cold_lexical".into(), if text_hit { 25.0 } else { 0.0 });
         results.push(CodeResult {
-            path: rel.to_string_lossy().replace('\\', "/"),
+            path: rel_path,
             line_start: Some(line_start),
             line_end: Some(line_end),
             match_reason: if path_hit {
@@ -1207,7 +1292,7 @@ fn cold_search(
             score: if path_hit { 60.0 } else { 25.0 },
             score_breakdown: breakdown,
         });
-        if results.len() >= limit {
+        if !results.is_empty() {
             break;
         }
     }
@@ -1227,14 +1312,14 @@ pub fn open_range(
     let scope = repo_scope(root)?;
     let rel = safe_relative_path(path)?;
     let absolute = scope.root.join(&rel);
-    let indexed: Option<(String, i64, i64, i64)> = {
+    let indexed: Option<(String, i64, i64, i64, i64)> = {
         let conn = open_db(db_path)?;
         conn.query_row(
-            "SELECT f.content_hash,f.indexed_generation,r.generation,r.is_complete
+            "SELECT f.content_hash,f.indexed_generation,r.generation,r.is_complete,r.structural_complete
              FROM code_files f JOIN repositories r ON r.repo_id=f.repo_id AND r.worktree_id=f.worktree_id
              WHERE f.repo_id=?1 AND f.worktree_id=?2 AND f.rel_path=?3",
             params![scope.repo_id,scope.worktree_id,rel],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
         ).optional()?
     };
     let (text, hash) = current_text(&scope.root, &absolute)
@@ -1247,7 +1332,7 @@ pub fn open_range(
     };
     let (generation, complete) = indexed
         .as_ref()
-        .map(|r| (r.2 as u64, r.3 != 0))
+        .map(|r| (r.2 as u64, r.3 != 0 && r.4 != 0))
         .unwrap_or((0, false));
     let count = text.lines().count().max(1) as u32;
     if start > count {
@@ -1273,11 +1358,14 @@ pub fn list_symbols(
     name: Option<&str>,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>> {
+    if name.is_some_and(|name| name.len() > MAX_SEARCH_QUERY_BYTES) {
+        bail!("symbol search query exceeds 4096 bytes");
+    }
     let scope = repo_scope(root)?;
     let conn = open_db(db_path)?;
     let pattern = name.unwrap_or("");
     let mut stmt = conn.prepare(
-        "SELECT f.rel_path,s.name,s.kind,s.line_start,s.line_end,s.byte_start,s.byte_end,f.indexed_generation,r.generation,r.is_complete,f.content_hash
+        "SELECT f.rel_path,s.name,s.kind,s.line_start,s.line_end,s.byte_start,s.byte_end,f.indexed_generation,r.generation,(r.is_complete AND r.structural_complete),f.content_hash
          FROM code_symbols s JOIN code_files f ON f.id=s.file_id
          JOIN repositories r ON r.repo_id=f.repo_id AND r.worktree_id=f.worktree_id
          WHERE f.repo_id=?1 AND f.worktree_id=?2 AND (?3='' OR instr(lower(s.name),lower(?3))>0)
@@ -1345,7 +1433,7 @@ pub fn repo_map(db_path: &Path, root: &Path) -> Result<RepoMap> {
     let conn = open_db(db_path)?;
     let status: Option<(u64, bool)> = conn
         .query_row(
-            "SELECT generation,is_complete FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
+            "SELECT generation,(is_complete AND structural_complete) FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
             params![scope.repo_id, scope.worktree_id],
             |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? != 0)),
         )
@@ -1404,8 +1492,9 @@ fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_FILE_BYTES {
         bail!("source is a symlink, not a file, or exceeds the 1 MiB read limit");
     }
-    let bytes = read_limited_no_follow(&canonical, MAX_FILE_BYTES as usize + 1)?;
-    if bytes.len() > MAX_FILE_BYTES as usize || bytes.contains(&0) {
+    let relative = canonical.strip_prefix(root)?;
+    let bytes = read_limited_from_root(root, relative, MAX_FILE_BYTES as usize + 1)?;
+    if bytes.len() > MAX_FILE_BYTES as usize || bytes.contains(&0) || has_binary_controls(&bytes) {
         bail!("source is binary or oversized");
     }
     let text = String::from_utf8(bytes).context("source is not UTF-8")?;
@@ -1414,6 +1503,9 @@ fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
 }
 
 fn safe_relative_path(input: &str) -> Result<String> {
+    if input.len() > MAX_RELATIVE_PATH_BYTES {
+        bail!("repository-relative path exceeds 4096 bytes");
+    }
     let path = Path::new(input);
     if path.is_absolute()
         || path
@@ -1564,21 +1656,88 @@ fn modified_ns(metadata: &fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn read_limited_no_follow(path: &Path, limit: usize) -> Result<Vec<u8>> {
-    let mut options = OpenOptions::new();
-    options.read(true);
+fn read_limited_from_root(root: &Path, relative: &Path, limit: usize) -> Result<Vec<u8>> {
     #[cfg(unix)]
     {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+
+        let parts = relative
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => Ok(name.to_os_string()),
+                _ => bail!("source path must stay beneath repository root"),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if parts.is_empty() || parts.len() > 128 {
+            bail!("source path has an invalid or excessive directory depth");
+        }
+        let (filename, directories) = parts.split_last().expect("non-empty path checked");
+        let mut directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root)
+            .context("open repository root without following symlinks")?;
+        for component in directories {
+            let name = CString::new(component.as_bytes())?;
+            let descriptor = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("open repository subdirectory without following symlinks");
+            }
+            directory = unsafe { File::from_raw_fd(descriptor) };
+        }
+        let name = CString::new(filename.as_bytes())?;
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("open source file without following symlinks");
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        read_bounded(file, limit)
     }
-    let file: File = options.open(path)?;
+    #[cfg(not(unix))]
+    {
+        let _ = (root, relative, limit);
+        bail!("safe repository-relative file access requires Unix openat support on this build")
+    }
+}
+
+fn read_bounded(file: File, limit: usize) -> Result<Vec<u8>> {
     let mut data = Vec::with_capacity(limit.min(64 * 1024));
     file.take(limit as u64).read_to_end(&mut data)?;
     Ok(data)
 }
 
+fn has_binary_controls(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .any(|byte| (*byte < 0x20 && !matches!(*byte, b'\n' | b'\r' | b'\t')) || *byte == 0x7f)
+}
+
 fn is_secret_path(path: &Path) -> bool {
+    if path.components().any(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        [".aws", ".ssh", ".gnupg", ".docker", ".kube"]
+            .iter()
+            .any(|name| component.eq_ignore_ascii_case(name))
+    }) {
+        return true;
+    }
     let lower = path
         .file_name()
         .unwrap_or_default()
@@ -1593,11 +1752,14 @@ fn is_secret_path(path: &Path) -> bool {
         || lower.starts_with(".env.")
         || lower == ".netrc"
         || lower == ".npmrc"
+        || [".pypirc", ".pgpass", ".htpasswd"].contains(&lower.as_str())
         || lower.contains("credentials")
         || lower.contains("secret")
         || ["pem", "key", "p12", "pfx", "keystore", "mobileprovision"].contains(&ext.as_str())
         || lower.starts_with("id_rsa")
         || lower.starts_with("id_ed25519")
+        || lower.starts_with("id_ecdsa")
+        || lower.starts_with("id_dsa")
         || lower == "authorized_keys"
         || lower == "known_hosts"
 }
@@ -1609,6 +1771,14 @@ fn is_vcs_metadata_path(path: &Path) -> bool {
             .iter()
             .any(|name| component.eq_ignore_ascii_case(name))
     })
+}
+
+fn valid_aetherignore(path: &Path, root: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| {
+        meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= MAX_AETHERIGNORE_BYTES
+    }) && path
+        .canonicalize()
+        .is_ok_and(|canonical| canonical.starts_with(root))
 }
 
 fn default_generated_path(path: &Path) -> bool {
@@ -1686,6 +1856,15 @@ struct ParserCache {
 
 impl ParserCache {
     fn extract(&mut self, language: Option<&str>, text: &str) -> Option<(Vec<Symbol>, bool)> {
+        self.extract_with_budget(language, text, PARSER_TIME_BUDGET)
+    }
+
+    fn extract_with_budget(
+        &mut self,
+        language: Option<&str>,
+        text: &str,
+        budget: Duration,
+    ) -> Option<(Vec<Symbol>, bool)> {
         let parser_slot = match language? {
             "rust" => &mut self.rust,
             "python" => &mut self.python,
@@ -1708,10 +1887,22 @@ impl ParserCache {
             *parser_slot = Some(parser);
         }
         let parser = parser_slot.as_mut()?;
-        let Some(tree) = parser.parse(text, None) else {
+        let started = Instant::now();
+        let mut progress = |_state: &tree_sitter::ParseState| {
+            if started.elapsed() >= budget {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress);
+        let bytes = text.as_bytes();
+        let mut input =
+            |offset: usize, _position: tree_sitter::Point| bytes.get(offset..).unwrap_or_default();
+        let Some(tree) = parser.parse_with_options(&mut input, None, Some(options)) else {
             return Some((Vec::new(), true));
         };
-        let parse_error = tree.root_node().has_error();
+        let parse_error = started.elapsed() >= budget || tree.root_node().has_error();
         let mut symbols = Vec::new();
         collect_symbols(tree.root_node(), text.as_bytes(), &mut symbols);
         Some((symbols, parse_error))
@@ -1811,4 +2002,19 @@ pub fn wal_checkpoint(db_path: &Path) -> Result<()> {
 pub fn sqlite_version(db_path: &Path) -> Result<String> {
     let conn = open_db(db_path)?;
     Ok(conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))?)
+}
+
+#[cfg(test)]
+mod parser_budget_tests {
+    use super::ParserCache;
+    use std::time::Duration;
+
+    #[test]
+    fn parser_budget_marks_result_structurally_incomplete() {
+        let mut cache = ParserCache::default();
+        let (_, incomplete) = cache
+            .extract_with_budget(Some("rust"), "pub fn bounded() {}", Duration::ZERO)
+            .unwrap();
+        assert!(incomplete);
+    }
 }

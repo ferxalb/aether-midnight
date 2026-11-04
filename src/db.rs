@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
+const SCHEMA_VERSION: i64 = 2;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RepoScope {
     pub root: PathBuf,
@@ -39,7 +41,7 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
-    connection.pragma_update(None, "temp_store", "MEMORY")?;
+    connection.pragma_update(None, "temp_store", "FILE")?;
     migrate(&connection)?;
     set_private_db_permissions(path)?;
     Ok(connection)
@@ -74,102 +76,142 @@ fn set_private_db_permissions(path: &Path) -> Result<()> {
 
 fn migrate(connection: &Connection) -> Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version > 1 {
-        bail!("database schema {version} is newer than this binary supports (1)");
+    if version > SCHEMA_VERSION {
+        bail!("database schema {version} is newer than this binary supports ({SCHEMA_VERSION})");
     }
-    if version == 0 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE metadata (
-                 key TEXT PRIMARY KEY,
-                 value TEXT NOT NULL
-             );
-             CREATE TABLE repositories (
-                 repo_id TEXT NOT NULL,
-                 worktree_id TEXT NOT NULL,
-                 root TEXT NOT NULL,
-                 branch TEXT,
-                 revision TEXT,
-                 generation INTEGER NOT NULL DEFAULT 0,
-                 is_complete INTEGER NOT NULL DEFAULT 0 CHECK(is_complete IN (0,1)),
-                 structural_complete INTEGER NOT NULL DEFAULT 0 CHECK(structural_complete IN (0,1)),
-                 last_index_started TEXT,
-                 last_index_finished TEXT,
-                 eligible_files INTEGER NOT NULL DEFAULT 0,
-                 eligible_bytes INTEGER NOT NULL DEFAULT 0,
-                 skipped_json TEXT NOT NULL DEFAULT '{}',
-                 PRIMARY KEY(repo_id, worktree_id)
-             );
-             CREATE TABLE code_files (
-                 id INTEGER PRIMARY KEY,
-                 repo_id TEXT NOT NULL,
-                 worktree_id TEXT NOT NULL,
-                 rel_path TEXT NOT NULL,
-                 content_hash TEXT NOT NULL,
-                 language TEXT NOT NULL,
-                 size_bytes INTEGER NOT NULL,
-                 modified_ns INTEGER NOT NULL,
-                 indexed_generation INTEGER NOT NULL,
-                 parse_error INTEGER NOT NULL DEFAULT 0 CHECK(parse_error IN (0,1)),
-                 UNIQUE(repo_id, worktree_id, rel_path),
-                 FOREIGN KEY(repo_id, worktree_id)
-                   REFERENCES repositories(repo_id, worktree_id) ON DELETE CASCADE
-             );
-             CREATE INDEX code_files_scope_path
-                 ON code_files(repo_id, worktree_id, rel_path);
-             CREATE INDEX code_files_generation
-                 ON code_files(repo_id, worktree_id, indexed_generation);
-             CREATE VIRTUAL TABLE code_trigram USING fts5(
-                 content,
-                 tokenize='trigram case_sensitive 0'
-             );
-             CREATE TABLE code_symbols (
-                 id INTEGER PRIMARY KEY,
-                 file_id INTEGER NOT NULL REFERENCES code_files(id) ON DELETE CASCADE,
-                 name TEXT NOT NULL,
-                 kind TEXT NOT NULL,
-                 line_start INTEGER NOT NULL,
-                 line_end INTEGER NOT NULL,
-                 byte_start INTEGER NOT NULL,
-                 byte_end INTEGER NOT NULL
-             );
-             CREATE INDEX code_symbols_name ON code_symbols(name COLLATE NOCASE);
-             CREATE INDEX code_symbols_file ON code_symbols(file_id);
-             CREATE TABLE memories (
-                 id INTEGER PRIMARY KEY,
-                 scope TEXT NOT NULL,
-                 kind TEXT NOT NULL CHECK(kind IN ('source','derived')),
-                 content TEXT NOT NULL,
-                 source_uri TEXT,
-                 source_id INTEGER,
-                 supersedes_id INTEGER,
-                 created_at TEXT NOT NULL,
-                 observed_at TEXT,
-                 valid_from TEXT,
-                 valid_to TEXT,
-                 deleted_at TEXT,
-                 FOREIGN KEY(source_id) REFERENCES memories(id),
-                 FOREIGN KEY(supersedes_id) REFERENCES memories(id)
-             );
-             CREATE INDEX memories_scope_active
-                 ON memories(scope, deleted_at, created_at);
-             CREATE INDEX memories_source ON memories(source_id);
-             CREATE VIRTUAL TABLE memory_fts USING fts5(
-                 content,
-                 tokenize='unicode61 remove_diacritics 2'
-             );
-             CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
-                 DELETE FROM memory_fts WHERE rowid = old.id;
-             END;
-             CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
-             WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
-                 DELETE FROM memory_fts WHERE rowid = new.id;
-             END;
-             INSERT INTO metadata(key,value) VALUES
-                 ('index_format_version','1'), ('schema_version','1');
-             PRAGMA user_version=1;
-             COMMIT;",
-        )?;
+    if version < SCHEMA_VERSION {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        let migration = (|| -> Result<()> {
+            let locked_version: i64 =
+                connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if locked_version > SCHEMA_VERSION {
+                bail!(
+                    "database schema {locked_version} is newer than this binary supports ({SCHEMA_VERSION})"
+                );
+            }
+            if locked_version == 0 {
+                connection.execute_batch(
+                    "CREATE TABLE metadata (
+                         key TEXT PRIMARY KEY,
+                         value TEXT NOT NULL
+                     );
+                     CREATE TABLE repositories (
+                         repo_id TEXT NOT NULL,
+                         worktree_id TEXT NOT NULL,
+                         root TEXT NOT NULL,
+                         branch TEXT,
+                         revision TEXT,
+                         generation INTEGER NOT NULL DEFAULT 0,
+                         is_complete INTEGER NOT NULL DEFAULT 0 CHECK(is_complete IN (0,1)),
+                         structural_complete INTEGER NOT NULL DEFAULT 0 CHECK(structural_complete IN (0,1)),
+                         last_index_started TEXT,
+                         last_index_finished TEXT,
+                         eligible_files INTEGER NOT NULL DEFAULT 0,
+                         eligible_bytes INTEGER NOT NULL DEFAULT 0,
+                         skipped_json TEXT NOT NULL DEFAULT '{}',
+                         PRIMARY KEY(repo_id, worktree_id)
+                     );
+                     CREATE TABLE code_files (
+                         id INTEGER PRIMARY KEY,
+                         repo_id TEXT NOT NULL,
+                         worktree_id TEXT NOT NULL,
+                         rel_path TEXT NOT NULL,
+                         content_hash TEXT NOT NULL,
+                         language TEXT NOT NULL,
+                         size_bytes INTEGER NOT NULL,
+                         modified_ns INTEGER NOT NULL,
+                         indexed_generation INTEGER NOT NULL,
+                         parse_error INTEGER NOT NULL DEFAULT 0 CHECK(parse_error IN (0,1)),
+                         UNIQUE(repo_id, worktree_id, rel_path),
+                         FOREIGN KEY(repo_id, worktree_id)
+                           REFERENCES repositories(repo_id, worktree_id) ON DELETE CASCADE
+                     );
+                     CREATE INDEX code_files_scope_path
+                         ON code_files(repo_id, worktree_id, rel_path);
+                     CREATE INDEX code_files_generation
+                         ON code_files(repo_id, worktree_id, indexed_generation);
+                     CREATE VIRTUAL TABLE code_fts USING fts5(
+                         content,
+                         content='',
+                         contentless_delete=1,
+                         tokenize='unicode61 remove_diacritics 2'
+                     );
+                     CREATE TABLE code_symbols (
+                         id INTEGER PRIMARY KEY,
+                         file_id INTEGER NOT NULL REFERENCES code_files(id) ON DELETE CASCADE,
+                         name TEXT NOT NULL,
+                         kind TEXT NOT NULL,
+                         line_start INTEGER NOT NULL,
+                         line_end INTEGER NOT NULL,
+                         byte_start INTEGER NOT NULL,
+                         byte_end INTEGER NOT NULL
+                     );
+                     CREATE INDEX code_symbols_name ON code_symbols(name COLLATE NOCASE);
+                     CREATE INDEX code_symbols_file ON code_symbols(file_id);
+                     CREATE TABLE memories (
+                         id INTEGER PRIMARY KEY,
+                         scope TEXT NOT NULL,
+                         kind TEXT NOT NULL CHECK(kind IN ('source','derived')),
+                         content TEXT NOT NULL,
+                         source_uri TEXT,
+                         source_id INTEGER,
+                         supersedes_id INTEGER,
+                         created_at TEXT NOT NULL,
+                         observed_at TEXT,
+                         valid_from TEXT,
+                         valid_to TEXT,
+                         deleted_at TEXT,
+                         FOREIGN KEY(source_id) REFERENCES memories(id),
+                         FOREIGN KEY(supersedes_id) REFERENCES memories(id)
+                     );
+                     CREATE INDEX memories_scope_active
+                         ON memories(scope, deleted_at, created_at);
+                     CREATE INDEX memories_source ON memories(source_id);
+                     CREATE VIRTUAL TABLE memory_fts USING fts5(
+                         content,
+                         tokenize='unicode61 remove_diacritics 2'
+                     );
+                     CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
+                         DELETE FROM memory_fts WHERE rowid = old.id;
+                     END;
+                     CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
+                     WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+                         DELETE FROM memory_fts WHERE rowid = new.id;
+                     END;
+                     INSERT INTO metadata(key,value) VALUES
+                         ('index_format_version','2'), ('schema_version','2');
+                     PRAGMA user_version=2;",
+                )?;
+            } else if locked_version == 1 {
+                connection.execute_batch(
+                    "DROP TABLE code_trigram;
+                     CREATE VIRTUAL TABLE code_fts USING fts5(
+                         content,
+                         content='',
+                         contentless_delete=1,
+                         tokenize='unicode61 remove_diacritics 2'
+                     );
+                     DELETE FROM code_files;
+                     UPDATE repositories SET is_complete=0,structural_complete=0,
+                         eligible_files=0,eligible_bytes=0,skipped_json='{}';
+                     UPDATE metadata SET value='2' WHERE key IN ('index_format_version','schema_version');
+                     PRAGMA user_version=2;",
+                )?;
+            }
+            let migrated_version: i64 =
+                connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if migrated_version != SCHEMA_VERSION {
+                bail!("no migration path from database schema {migrated_version}");
+            }
+            Ok(())
+        })();
+        match migration {
+            Ok(()) => connection.execute_batch("COMMIT;")?,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK;");
+                return Err(error);
+            }
+        }
     }
     let format: String = connection.query_row(
         "SELECT value FROM metadata WHERE key='index_format_version'",
@@ -189,21 +231,36 @@ pub fn repo_scope(path: &Path) -> Result<RepoScope> {
     if !root.is_dir() {
         bail!("repository path is not a directory: {}", root.display());
     }
-    let git = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("git")
+    let git_info = if has_git_context(&root) {
+        std::process::Command::new("git")
             .arg("-C")
             .arg(&root)
-            .args(args)
+            .args([
+                "rev-parse",
+                "--absolute-git-dir",
+                "--git-common-dir",
+                "HEAD",
+            ])
             .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .ok()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+    } else {
+        None
     };
-    let common = git(&["rev-parse", "--git-common-dir"])
-        .map(|p| {
-            let path = PathBuf::from(p);
+    let git_dir = git_info
+        .as_ref()
+        .and_then(|lines| lines.first())
+        .map(PathBuf::from);
+    let common = git_info
+        .as_ref()
+        .and_then(|lines| lines.get(1))
+        .map(|value| {
+            let path = PathBuf::from(value);
             let path = if path.is_absolute() {
                 path
             } else {
@@ -212,8 +269,20 @@ pub fn repo_scope(path: &Path) -> Result<RepoScope> {
             path.canonicalize().unwrap_or(path)
         })
         .unwrap_or_else(|| root.clone());
-    let branch = git(&["branch", "--show-current"]).filter(|s| !s.is_empty());
-    let revision = git(&["rev-parse", "HEAD"]);
+    let branch = git_dir.as_ref().and_then(|git_dir| {
+        std::fs::read_to_string(git_dir.join("HEAD"))
+            .ok()
+            .and_then(|head| {
+                head.trim()
+                    .strip_prefix("ref: refs/heads/")
+                    .map(str::to_string)
+            })
+    });
+    let revision = git_info
+        .as_ref()
+        .and_then(|lines| lines.get(2))
+        .filter(|revision| revision.len() >= 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()))
+        .cloned();
     let repo_id = hash_bytes(common.to_string_lossy().as_bytes());
     let worktree_id = hash_bytes(root.to_string_lossy().as_bytes());
     Ok(RepoScope {
@@ -223,6 +292,14 @@ pub fn repo_scope(path: &Path) -> Result<RepoScope> {
         branch,
         revision,
     })
+}
+
+fn has_git_context(root: &Path) -> bool {
+    std::env::var_os("GIT_DIR").is_some()
+        || std::env::var_os("GIT_WORK_TREE").is_some()
+        || root
+            .ancestors()
+            .any(|ancestor| ancestor.join(".git").symlink_metadata().is_ok())
 }
 
 pub fn hash_bytes(bytes: &[u8]) -> String {

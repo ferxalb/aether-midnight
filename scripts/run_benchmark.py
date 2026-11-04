@@ -2,6 +2,7 @@
 """Build, generate the temporary reference corpus, and emit benchmark JSON."""
 
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,21 @@ def main() -> int:
             if result.stdout:
                 print(result.stdout, file=sys.stderr, end="")
             return result.returncode
-        sys.stdout.write(result.stdout)
+        comparison = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "evaluate_fts5.py"), "--repo", str(corpus)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if comparison.returncode:
+            if comparison.stderr:
+                print(comparison.stderr, file=sys.stderr, end="")
+            if comparison.stdout:
+                print(comparison.stdout, file=sys.stderr, end="")
+            return comparison.returncode
+        report = json.loads(result.stdout)
+        report["fts5_tokenizer_evaluation"] = json.loads(comparison.stdout)
+        sys.stdout.write(json.dumps(report, indent=2) + "\n")
         return 0
 
 

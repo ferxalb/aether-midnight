@@ -17,8 +17,9 @@ def main() -> int:
         default=ROOT / "THIRD_PARTY_LICENSES.json",
         help="output path (refuses to replace an existing file)",
     )
+    parser.add_argument("--force", action="store_true", help="replace the output file")
     args = parser.parse_args()
-    if args.output.exists():
+    if args.output.exists() and not args.force:
         raise FileExistsError(f"refusing to overwrite existing inventory: {args.output}")
     metadata = json.loads(
         subprocess.run(

@@ -270,7 +270,7 @@ fn main() -> Result<()> {
                 "database_format":aether_midnight::INDEX_FORMAT_VERSION,
                 "sqlite_version":sqlite,
                 "fts5_enabled":fts5,
-                "fts5_trigram":true,
+                "fts5_code_tokenizer":"unicode61 remove_diacritics 2",
                 "tree_sitter_version":"0.27.1",
                 "max_file_bytes":aether_midnight::MAX_FILE_BYTES,
                 "network":"unused by core and MCP server"

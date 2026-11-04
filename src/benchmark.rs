@@ -136,6 +136,7 @@ pub fn run(
     let quality = retrieval_quality(&primary_db, &repo, &manifest.queries)?;
     let rg = ripgrep_baseline(&repo, &manifest.queries)?;
     let incremental = incremental_samples(&primary_db, &repo, samples.clamp(1, 10))?;
+    let partial_context = partial_context_during_index(base.path(), &repo, cold_query)?;
     let stress = stress_cycles_run(base.path(), stress_cycles.max(1))?;
 
     let source_bytes = primary_status.eligible_bytes.max(1);
@@ -164,6 +165,7 @@ pub fn run(
             "full_index_phases_first_sample_ms":primary_report.timings_ms,
             "warm_search":distribution(&search_ms),
             "incremental_update_query_visible":distribution(&incremental),
+            "large_repository_partial_context_during_index":partial_context,
             "ripgrep_identical_query_set":rg
         },
         "retrieval_quality":quality,
@@ -179,6 +181,81 @@ pub fn run(
         "database_file_bytes":index_bytes
     });
     Ok(output)
+}
+
+fn partial_context_during_index(base: &Path, repo: &Path, query: &str) -> Result<Value> {
+    let temp = TempDir::new_in(base)?;
+    let db_path = temp.path().join("partial.sqlite3");
+    let binary = std::env::current_exe().context("locate benchmark executable")?;
+    let mut indexer = Command::new(&binary)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("index")
+        .arg("--repo")
+        .arg(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start concurrent full-corpus index")?;
+    let index_started = Instant::now();
+    let deadline = Instant::now() + std::time::Duration::from_secs(3);
+    let mut partial_observed = false;
+    while Instant::now() < deadline {
+        if let Ok(status) = code::index_status(&db_path, repo)
+            && status.generation > 0
+            && !status.catalog_complete
+        {
+            partial_observed = true;
+            break;
+        }
+        if indexer.try_wait()?.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let search_started = Instant::now();
+    let output = Command::new(&binary)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("search")
+        .arg("--repo")
+        .arg(repo)
+        .arg("--query")
+        .arg(query)
+        .arg("--limit")
+        .arg("5")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("search while full indexing continues")?;
+    let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+    let indexing_running_at_result = indexer.try_wait()?.is_none();
+    let index_exit = indexer.wait()?;
+    let index_total_ms = index_started.elapsed().as_secs_f64() * 1000.0;
+    if !output.status.success() {
+        bail!(
+            "search during partial index failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    let result = value["results"]
+        .as_array()
+        .and_then(|results| results.first());
+    let marked_partial = result
+        .is_some_and(|result| result["index_complete"] == false && value["truncated"] == true);
+    Ok(json!({
+        "search_ms":search_ms,
+        "sample_count":1,
+        "partial_catalog_observed_before_search":partial_observed,
+        "index_process_running_when_search_returned":indexing_running_at_result,
+        "useful_result_returned":result.is_some(),
+        "result_explicitly_partial":marked_partial,
+        "result_freshness":result.and_then(|value|value["freshness"].as_str()),
+        "index_process_completed_successfully":index_exit.success(),
+        "full_index_process_elapsed_ms":index_total_ms
+    }))
 }
 
 fn retrieval_quality(db_path: &Path, repo: &Path, queries: &[BenchmarkQuery]) -> Result<Value> {
@@ -404,7 +481,9 @@ fn environment(repo: &Path, sqlite: &str) -> Value {
         .and_then(|s| s.lines().last().map(str::to_string));
     json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu":cpu,"logical_cores":cores,"ram_bytes":memory,
         "storage_mount":storage,"rustc":command_stdout("rustc",&["--version"]),"cargo_profile":if cfg!(debug_assertions){"debug"}else{"release"},
-        "sqlite_version":sqlite,"tree_sitter_crate":"0.27.1","ripgrep":command_version("rg",&["--version"]),"node":command_version("node",&["--version"]),
+        "sqlite_version":sqlite,"rusqlite_crate":"0.41.1","tree_sitter_crate":"0.27.1",
+        "tree_sitter_grammar_crates":{"rust":"0.24.2","python":"0.25.0","typescript":"0.23.2"},
+        "ripgrep":command_version("rg",&["--version"]),"node":command_version("node",&["--version"]),
         "bun":command_version("bun",&["--version"]),"go":command_version("go",&["version"]),"corpus_root":repo})
 }
 

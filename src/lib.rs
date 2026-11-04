@@ -8,7 +8,7 @@ pub mod memory;
 mod text_index;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const INDEX_FORMAT_VERSION: u32 = 1;
+pub const INDEX_FORMAT_VERSION: u32 = 2;
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 
 #[cfg(test)]

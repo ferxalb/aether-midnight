@@ -24,7 +24,6 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 tempfile = "3.27.0"
-rmcp = { version = "3.8.0", features = ["server"] }
 
 [dev-dependencies]
 

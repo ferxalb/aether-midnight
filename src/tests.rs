@@ -25,7 +25,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -50,7 +50,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(format, "1");
+    assert_eq!(format, "2");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -59,6 +59,55 @@ fn migrations_and_interrupted_transaction_recover() {
             0o600
         );
     }
+}
+
+#[test]
+fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_needed() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("legacy.sqlite3");
+    let legacy = rusqlite::Connection::open(&database).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+             INSERT INTO metadata(key,value) VALUES('index_format_version','1'),('schema_version','1');
+             CREATE TABLE repositories(
+                 repo_id TEXT,worktree_id TEXT,is_complete INTEGER,structural_complete INTEGER,
+                 eligible_files INTEGER,eligible_bytes INTEGER,skipped_json TEXT
+             );
+             INSERT INTO repositories VALUES('repo','worktree',1,1,1,32,'{}');
+             CREATE TABLE code_files(id INTEGER PRIMARY KEY);
+             INSERT INTO code_files(id) VALUES(1);
+             CREATE VIRTUAL TABLE code_trigram USING fts5(
+                 content,content='',contentless_delete=1,tokenize='trigram case_sensitive 0'
+             );
+             INSERT INTO code_trigram(rowid,content) VALUES(1,'legacy trigram content');
+             PRAGMA user_version=1;",
+        )
+        .unwrap();
+    drop(legacy);
+
+    let migrated = db::open_db(&database).unwrap();
+    let version: i64 = migrated
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
+        .query_row(
+            "SELECT
+                 (SELECT value FROM metadata WHERE key='index_format_version'),
+                 EXISTS(SELECT 1 FROM sqlite_master WHERE name='code_trigram'),
+                 EXISTS(SELECT 1 FROM sqlite_master WHERE name='code_fts'),
+                 (SELECT count(*) FROM code_files),
+                 (SELECT is_complete AND structural_complete FROM repositories WHERE repo_id='repo')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(format, "2");
+    assert!(!old_table);
+    assert!(new_table);
+    assert_eq!(files, 0);
+    assert!(!complete);
 }
 
 #[test]
@@ -141,6 +190,9 @@ fn repository_search_isolated_by_worktree_and_repo() {
     let worktree_scope = db::repo_scope(&worktree).unwrap();
     assert_eq!(main_scope.repo_id, worktree_scope.repo_id);
     assert_ne!(main_scope.worktree_id, worktree_scope.worktree_id);
+    assert_eq!(main_scope.branch.as_deref(), Some("main"));
+    assert_eq!(worktree_scope.branch.as_deref(), Some("feature"));
+    assert!(main_scope.revision.is_some());
     run_index(&database, &git_root);
     run_index(&database, &worktree);
     assert!(
@@ -164,7 +216,7 @@ fn fts_symbols_paths_and_retrieval_time_freshness_work() {
     let source = repo.join("src/lib.rs");
     fs::write(
         &source,
-        "pub fn exact_symbol_name() {\n    // three character trigram phrase\n}\n",
+        "pub fn exact_symbol_name() {\n    // three character lexical phrase\n}\n",
     )
     .unwrap();
     let report = run_index(&database, &repo);
@@ -173,8 +225,14 @@ fn fts_symbols_paths_and_retrieval_time_freshness_work() {
     assert_eq!(symbol[0].path, "src/lib.rs");
     assert_eq!(symbol[0].freshness, "fresh");
     assert_eq!(symbol[0].line_start, Some(1));
-    let lexical = code::search_code(&database, &repo, "trigram phrase", 5).unwrap();
+    let lexical = code::search_code(&database, &repo, "lexical phrase", 5).unwrap();
     assert_eq!(lexical[0].match_reason, "lexical");
+    assert!(
+        !code::search_code(&database, &repo, "fn", 5)
+            .unwrap()
+            .is_empty(),
+        "unicode61 must support short lexical terms"
+    );
     assert_eq!(
         code::list_symbols(&database, &repo, Some("exact_symbol_name"), 5)
             .unwrap()
@@ -201,6 +259,61 @@ fn fts_symbols_paths_and_retrieval_time_freshness_work() {
     assert_eq!(
         code::index_status(&database, &repo).unwrap().indexed_files,
         0
+    );
+    assert!(
+        code::search_code(&database, &repo, "new_fresh_symbol", 5)
+            .unwrap()
+            .is_empty()
+    );
+    let conn = db::open_db(&database).unwrap();
+    let fts_documents: i64 = conn
+        .query_row("SELECT count(*) FROM code_fts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(fts_documents, 0);
+}
+
+#[test]
+fn fresh_process_fallback_returns_one_useful_partial_result_early() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("empty-index.sqlite3");
+    let repo = new_repo(&temp, "fallback-repo");
+    fs::write(
+        repo.join("src/first.rs"),
+        "pub fn launch_guardrail_token() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/second.rs"),
+        "pub fn launch_guardrail_token() {}\n",
+    )
+    .unwrap();
+    let response =
+        code::search_code_with_budget(&database, &repo, "launch_guardrail_token", 5, 1024).unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(response.truncated);
+    assert_eq!(response.results[0].freshness, "fresh_unindexed");
+    assert!(!response.results[0].index_complete);
+}
+
+#[test]
+fn oversized_aetherignore_is_bounded_and_reported() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("ignore.sqlite3");
+    let repo = new_repo(&temp, "ignore-repo");
+    fs::write(repo.join(".aetherignore"), vec![b'#'; 1_048_577]).unwrap();
+    fs::write(
+        repo.join("src/visible.rs"),
+        "pub fn visible_after_ignore_limit() {}\n",
+    )
+    .unwrap();
+    let report = run_index(&database, &repo);
+    assert!(report.complete);
+    assert_eq!(report.skipped.get("aetherignore_oversized"), Some(&1));
+    assert!(
+        code::search_code(&database, &repo, "visible_after_ignore_limit", 5)
+            .unwrap()
+            .iter()
+            .any(|result| result.path == "src/visible.rs")
     );
 }
 
@@ -250,6 +363,42 @@ fn tree_sitter_extracts_supported_python_and_typescript_symbols() {
 }
 
 #[test]
+fn structural_parse_errors_keep_every_index_surface_marked_incomplete() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("parse-error.sqlite3");
+    let repo = new_repo(&temp, "malformed-repo");
+    fs::write(
+        repo.join("src/broken.rs"),
+        "pub fn broken_symbol() { let = ; }\n",
+    )
+    .unwrap();
+
+    let report = run_index(&database, &repo);
+    assert!(!report.complete);
+    assert!(report.catalog_complete);
+    assert!(!report.structural_complete);
+    assert!(!code::index_status(&database, &repo).unwrap().complete);
+    assert!(!code::repo_map(&database, &repo).unwrap().complete);
+    assert!(
+        code::search_code(&database, &repo, "broken_symbol", 5)
+            .unwrap()
+            .iter()
+            .all(|result| !result.index_complete)
+    );
+    assert!(
+        code::list_symbols(&database, &repo, Some("broken_symbol"), 5)
+            .unwrap()
+            .iter()
+            .all(|result| result["index_complete"] == false)
+    );
+    assert!(
+        !code::open_range(&database, &repo, "src/broken.rs", 1, 1)
+            .unwrap()
+            .index_complete
+    );
+}
+
+#[test]
 fn discovery_honors_ignores_security_limits_and_safe_override() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("db.sqlite3");
@@ -273,6 +422,12 @@ fn discovery_honors_ignores_security_limits_and_safe_override() {
     .unwrap();
     fs::write(repo.join("id_rsa"), "private key content\n").unwrap();
     fs::write(repo.join(".env.local"), "API_TOKEN=secret\n").unwrap();
+    fs::create_dir_all(repo.join(".docker")).unwrap();
+    fs::write(
+        repo.join(".docker/config.json"),
+        "{\"auths\":{\"example.invalid\":\"docker_secret_marker\"}}\n",
+    )
+    .unwrap();
     fs::create_dir_all(repo.join(".git")).unwrap();
     fs::write(
         repo.join(".git/config"),
@@ -280,12 +435,28 @@ fn discovery_honors_ignores_security_limits_and_safe_override() {
     )
     .unwrap();
     fs::write(repo.join("blob.bin"), b"a\0b").unwrap();
+    fs::write(
+        repo.join("control.bin"),
+        b"pub fn binary_control_marker() {}\x01\n",
+    )
+    .unwrap();
     fs::write(repo.join("large.txt"), vec![b'x'; 1_048_577]).unwrap();
     fs::write(repo.join("src/malformed.rs"), "pub fn malformed(\n").unwrap();
     let outside = temp.path().join("outside.rs");
     fs::write(&outside, "pub fn escaped_marker() {}\n").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&outside, repo.join("escape.rs")).unwrap();
+    #[cfg(unix)]
+    {
+        let outside_dir = temp.path().join("outside-dir");
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(
+            outside_dir.join("nested.rs"),
+            "pub fn escaped_directory_marker() {}\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside_dir, repo.join("escape-dir")).unwrap();
+    }
     let report = run_index(&database, &repo);
     assert!(report.catalog_complete);
     assert!(!report.structural_complete);
@@ -308,6 +479,14 @@ fn discovery_honors_ignores_security_limits_and_safe_override() {
     );
     assert!(report.skipped.get("oversized").copied().unwrap_or(0) >= 1);
     assert!(report.skipped.get("binary_nul").copied().unwrap_or(0) >= 1);
+    assert!(
+        report
+            .skipped
+            .get("binary_control_bytes")
+            .copied()
+            .unwrap_or(0)
+            >= 1
+    );
     for query in [
         "ignored_marker",
         "private_marker",
@@ -315,6 +494,8 @@ fn discovery_honors_ignores_security_limits_and_safe_override() {
         "dependency_marker",
         "escaped_marker",
         "API_TOKEN",
+        "docker_secret_marker",
+        "binary_control_marker",
     ] {
         assert!(
             code::search_code(&database, &repo, query, 5)
@@ -331,6 +512,8 @@ fn discovery_honors_ignores_security_limits_and_safe_override() {
     assert!(code::open_range(&database, &repo, "../outside.rs", 1, 1).is_err());
     #[cfg(unix)]
     assert!(code::open_range(&database, &repo, "escape.rs", 1, 1).is_err());
+    #[cfg(unix)]
+    assert!(code::open_range(&database, &repo, "escape-dir/nested.rs", 1, 1).is_err());
     let generated =
         code::index_repository(&database, &repo, true, false, &AtomicBool::new(false)).unwrap();
     assert!(generated.catalog_complete);
@@ -369,7 +552,7 @@ fn cancellation_stays_partial_and_reconciliation_recovers() {
     let conn = db::open_db(&database).unwrap();
     let (files, fts): (i64, i64) = conn
         .query_row(
-            "SELECT (SELECT count(*) FROM code_files),(SELECT count(*) FROM code_trigram)",
+            "SELECT (SELECT count(*) FROM code_files),(SELECT count(*) FROM code_fts)",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -516,4 +699,14 @@ fn memory_temporal_provenance_scope_and_forget_are_enforced() {
             .unwrap()
             .is_empty()
     );
+    memory::compact(&database).unwrap();
+    let conn = db::open_db(&database).unwrap();
+    let compacted_content: String = conn
+        .query_row(
+            "SELECT content FROM memories WHERE id=?1",
+            [replacement.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(compacted_content.is_empty());
 }
