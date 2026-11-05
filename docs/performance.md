@@ -119,6 +119,66 @@ Source and derived recall each had n=25 per size and Recall@1/5/10 and MRR of 1.
 
 Per-query memory Recall@1/5/10 and reciprocal-rank distributions, including source and derived splits, are also stored with sorted raw values and n in the result JSON. Setup time was measured once per size and is marked anecdotal.
 
+## v0.2 persistent memory path and retrieval quality
+
+The local paired run uses the same Intel macOS 26.7.1 x86_64 host, bundled SQLite 3.54.1, release profile, frozen 25-query suite, and 10,000 irrelevant-background records. The verified baseline is commit `01b98c76ff1241d8e4a8459cf9e42445c8e72d16`; the implementation is commit `2ab6393` (engine tree from `9c358e2`, with a rejected ranking threshold experiment reverted). Full raw evidence, including query samples, is in [`memory-retrieval-large-v2-baseline-01b98c7-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-baseline-01b98c7-20261104.json) and [`memory-retrieval-large-v2-after-2ab6393-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-after-2ab6393-20261104.json). Percentiles use each artifact's recorded nearest-index rule.
+
+| Persistent MCP measurement | Baseline | v0.2 | Samples / interpretation |
+| --- | ---: | ---: | --- |
+| Warm recall p50 / p95 / p99 (ms) | 14.446 / 17.953 / 18.481 | 12.398 / 17.363 / 18.515 | n=75 each; one process, 10,027 loaded rows, high-fanout queries |
+| Individual remember p50 / p95 / p99 (ms) | 1.980 / 2.611 / 3.273 | 0.162 / 0.335 / 7.212 | 10,027 requests each; p99 includes intermittent SQLite/WAL outliers |
+| List p50 / p95 / p99 (ms) | 1.611 / 1.715 / 1.779 | 0.634 / 0.684 / 0.693 | n=30 each |
+| Forget p50 / p95 / p99 (ms) | 1.872 / 2.296 / 2.835 | 0.084 / 0.118 / 0.259 | n=31 each |
+| Process CPU total | 17.485 s | 2.731 s | 10,195 MCP requests; about 84% lower on this run |
+| CPU per request | 1.715 ms | 0.268 ms | CPU time divided by request count |
+| Sampled RSS before close | 23,363,584 B | 23,937,024 B | One observation; current RSS, not peak or live heap |
+| DB + WAL + SHM before / after close | 6,811,648 / 6,811,648 B | 10,482,616 / 5,369,856 B | One snapshot each; after-close footprint is about 21% smaller, but before-close WAL state is larger |
+| Mean response bytes / estimated content tokens | 3,218 B / 236.8 | 2,181 B / 162.9 | Across 25 retrieval queries; ranking changes which bounded results are packed |
+
+Warm recall p95 remains above the proposed 5 ms 10k-record target for this deliberately high-fanout same-namespace dataset. A separate synthetic scaling run (`bench-memory`) uses four namespaces and a different query mix, so its lower latency is not substituted for this user-facing result. Current query planning on that scaling workload is `SCAN memory_fts VIRTUAL TABLE INDEX 32:rM2` followed by an integer-primary-key memory lookup; it has no temporary sort B-tree. The previous `ORDER BY bm25()` plan used a temporary B-tree. The direct-file refresh path is not included in these measurements.
+
+The v2 fixture freezes 25 queries (14 dev, 11 held out) over 27 labeled fictional records plus 10,000 irrelevant records. It covers exact facts, paraphrase, shared vocabulary, conflicts/supersession, temporal history/validity, multi-session references, source provenance, entity ambiguity, Spanish and English, namespace isolation, deletion, abstention, long supersession chains, large background, and multi-hop evidence. This is a retrieval-only evaluation: no model generated answers or received credit for reasoning. The cross-language Spanish/English paraphrase remains an explicit lexical limitation.
+
+| Split | R@1 / R@5 / R@10 | P@5 | MRR | nDCG@10 | Evidence completeness@10 | False positives | Temporal correct / invalid | Namespace leaks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dev baseline (n=14, 12 positive) | .375 / .958 / .958 | .317 | .767 | .809 | .950 | 1 / 2 negatives | 2 / 2; 0 | 0 |
+| Dev v0.2 (n=14, 12 positive) | .500 / .958 / .958 | .317 | .875 | .879 | .950 | 0 / 2 negatives | 2 / 2; 0 | 0 |
+| Held out baseline (n=11, 8 positive) | .625 / 1.000 / 1.000 | .300 | .906 | .900 | 1.000 | 2 / 3 negatives | 3 / 3; 0 | 0 |
+| Held out v0.2 (n=11, 8 positive) | .625 / 1.000 / 1.000 | .300 | .917 | .922 | 1.000 | 1 / 3 negatives | 3 / 3; 0 | 0 |
+| All baseline (n=25, 20 positive) | .475 / .975 / .975 | .310 | .823 | .846 | .969 | 3 / 5 negatives | 5 / 5; 0 | 0 |
+| All v0.2 (n=25, 20 positive) | .550 / .975 / .975 | .310 | .892 | .896 | .969 | 1 / 5 negatives | 5 / 5; 0 | 0 |
+
+The v0.2 change improved top-rank quality and reduced labeled negative-query false positives in this fixture without changing R@5, temporal correctness, evidence completeness, or namespace leakage. It does not establish semantic retrieval. A candidate requiring three distinct query terms improved a dev measure but regressed held-out R@5 from 1.000 to .875, evidence completeness from 1.000 to .917, MRR from .906 to .875, and nDCG@10 from .900 to .860; that code was reverted. The rejected run is retained as [`memory-retrieval-large-v2-rejected-threshold3-5e19393-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-rejected-threshold3-5e19393-20261104.json).
+
+The v3 memory FTS migration removes the second full-text copy. In the same paired MCP artifacts, the post-close database plus sidecars was 6,811,648 B at baseline and 5,369,856 B after v0.2 (single snapshots, not a repeated footprint distribution). The v0.2 before-close total was 10,482,616 B, reflecting WAL/SHM state before connection shutdown; this is a lifecycle snapshot, not a comparable compacted-size claim. External-content FTS was not separately prototyped, so contentless-delete is retained based on compatibility and measured post-close footprint, not a claimed exhaustive storage winner comparison.
+
+The synthetic 1k/10k/100k per-operation profile is recorded separately in [`memory-scaling-2ab6393-20261104.json`](../benchmark/evidence/memory-scaling-2ab6393-20261104.json). It includes persistent-session and one-shot store/recall samples, setup throughput, query plan, database bytes, CPU time, and sampled RSS. Its generated corpus is a performance workload, not retrieval-quality ground truth.
+
+## Paired persistent MCP code retrieval
+
+The local `scripts/performance_campaign.py` smoke run used the same generated 10,000-file / 100 MiB code fixture (seed `20261103`), one indexing worker, and five independent sessions for each release binary. Each session measured the first useful context and five subsequent `search_code` tool calls (n=25 warm searches). Both indexes completed catalog and structural indexing; all measured searches hit the expected file. The paired summary and raw warm samples are in [`mcp-code-context-paired-01b98c7-2ab6393-20261104.json`](../benchmark/evidence/mcp-code-context-paired-01b98c7-2ab6393-20261104.json).
+
+| Persistent MCP code measurement | Baseline | v0.2 | Samples |
+| --- | ---: | ---: | --- |
+| Initialize + first useful context p50 / p95 / p99 (ms) | 72.135 / 72.793 / 72.793 | 70.014 / 72.607 / 72.607 | n=5 |
+| First `search_code` tool latency p50 / p95 / p99 (ms) | 13.856 / 13.983 / 13.983 | 13.975 / 14.044 / 14.044 | n=5 |
+| Warm `search_code` p50 / p95 / p99 (ms) | 12.240 / 13.876 / 14.625 | 12.152 / 13.235 / 13.543 | n=25 |
+| Fresh-process initialize + one search p50 / p95 / p99 (ms) | 112.511 / 114.030 / 114.030 | 112.772 / 113.913 / 113.913 | n=5 |
+| Full index p50 / p95 / p99 (ms, one worker) | 3,919.645 / 4,102.129 / 4,102.129 | 3,814.034 / 3,871.189 / 3,871.189 | n=5 |
+| Full-index CPU p50 (s), sampled RSS high-water p50 (MB) | 4.225, 25.997 | 4.124, 25.846 | n=5 |
+| Idle MCP CPU | 0.0% | 0.0% | n=5; below measured interval resolution |
+
+The code retrieval path is essentially unchanged, with no observed regression; the 10k-file one-worker full-index p95 is 3.87 s and is not evidence for the proposed 3-second multiworker target. Percentiles from n=5 have low resolution; the p95/p99 values are the largest observations. This campaign does not include direct-file refresh latency or simultaneous code-index and memory-recall load.
+
+The direct-file path has a separate focused comparison using [`scripts/benchmark_refresh_file.py`](../scripts/benchmark_refresh_file.py) and [`refresh-file-10k-2ab6393-20261104.json`](../benchmark/evidence/refresh-file-10k-2ab6393-20261104.json). It created one Rust target plus 9,999 small background files, indexed the 10,000-file repository, and then ran 30 paired updates in one MCP session. Each timer starts after writing the changed source and covers the index/refresh tool call plus a `search_code` call that verifies the new result is fresh.
+
+| 10k-file update-to-visible path | p50 / p95 / p99 (ms) | n | Result status |
+| --- | ---: | ---: | --- |
+| Full `index_repository` reconciliation + search | 322.038 / 379.019 / 419.110 | 30 | Every hit fresh; catalog complete |
+| `refresh_indexed_file` + search | 11.547 / 12.689 / 12.911 | 30 | Every hit fresh; catalog partial until reconciliation |
+
+Direct refresh reduced p95 by 96.7% (29.9× faster) on this generated fixture, under the proposed 150 ms one-file visibility target. The final full reconciliation restored complete status. This is a same-process paired result on one host; it does not measure missed filesystem notifications because the path is explicit, and it does not imply a watcher or automatic change discovery.
+
 ## FTS5 tokenizer comparison and lifecycle stress
 
 The fixed fixture also compared contentless FTS5 trigram and `unicode61 remove_diacritics 2` using Python SQLite 3.53.1; the release build uses bundled SQLite 3.54.1. Build and final index-size values are single observations (n=1, anecdotal); each tokenizer’s four-query retrieval score is also anecdotal (n=4). Warm search used 100 samples per content query (n=400 aggregate), and exact path lookup used n=100.

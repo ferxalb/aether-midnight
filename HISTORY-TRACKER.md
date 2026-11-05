@@ -2,6 +2,12 @@
 
 This file records unreleased development progress. Entries use `YYYY-MM-DD (n) - short description` and are ordered newest first. The number in parentheses is the modification's ordinal within that date; for six modifications on one date, entries are numbered `(6)` through `(1)` from top to bottom. This is a development history, not a release record.
 
+* 2026-11-04 (8) - Measured direct-file MCP refresh at 12.7 ms p95 on a 10k-file fixture versus 379.0 ms for full reconciliation; freshness and final reconciliation passed.
+* 2026-11-04 (7) - Added persistent MCP memory sessions, atomic bounded batch ingestion, scoped contentless memory FTS migration, and deterministic lexical reranking.
+* 2026-11-04 (6) - Added frozen 10k-background retrieval evaluation and paired persistent MCP CPU, latency, storage, and quality evidence.
+* 2026-11-04 (5) - Added explicit one-file index refresh with containment/security checks and full-reconciliation freshness semantics.
+* 2026-11-04 (4) - Reverted a three-term retrieval threshold after held-out R@5 and evidence completeness regressed; retained the rejected-run artifact.
+* 2026-11-04 (3) - Added isolated 1k/10k/100k persistent memory scaling benchmark and documented root-cause/query-plan findings.
 * 2026-11-04 (2) - Added bounded parallel indexing, cancellation-aware reads, identifier decomposition, and fixed-fixture benchmark evidence.
 * 2026-11-04 (1) - Added release-only changelog and this tracker; v0.1.0 remains unreleased.
 * 2026-11-03 (6) - Benchmarked SQLite FTS5 tokenizers on a fixed workload, selected `unicode61`, and added the index-format-2 migration.
