@@ -326,7 +326,12 @@ def main():
         key_to_id[record["key"]] = memory["id"]
         id_to_key[memory["id"]] = record["key"]
 
-    wal_autocheckpoint_pages = wal_probe.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+    wal_probe_autocheckpoint_pages = wal_probe.execute(
+        "PRAGMA wal_autocheckpoint"
+    ).fetchone()[0]
+    wal_writer_autocheckpoint_pages = int(
+        os.environ.get("AETHER_WAL_AUTOCHECKPOINT_PAGES", "1000")
+    )
     wal_probe.close()
     remember_outliers = [sample for sample in remember_wal_samples if sample["elapsed_ms"] >= 4]
     checkpoint_progress_latencies = [
@@ -339,10 +344,28 @@ def main():
         for sample in remember_wal_samples
         if sample["wal_status"] is not None and not sample["checkpoint_progress_observed"]
     ]
+    observed_wal_status = [
+        sample["wal_status"]
+        for sample in remember_wal_samples
+        if sample["wal_status"] is not None
+    ]
     wal_diagnostics = {
         "probe": "PRAGMA wal_checkpoint(NOOP), sampled after each completed remember call; it does not checkpoint",
-        "configured_autocheckpoint_pages": wal_autocheckpoint_pages,
+        "writer_autocheckpoint_pages_requested": wal_writer_autocheckpoint_pages,
+        "probe_connection_autocheckpoint_pages": wal_probe_autocheckpoint_pages,
         "status_available": any(sample["wal_status"] is not None for sample in remember_wal_samples),
+        "maximum_observed_log_frames": max(
+            (status["log_frames"] for status in observed_wal_status if status["log_frames"] >= 0),
+            default=None,
+        ),
+        "maximum_observed_uncheckpointed_frames": max(
+            (
+                status["uncheckpointed_frames"]
+                for status in observed_wal_status
+                if status["uncheckpointed_frames"] is not None
+            ),
+            default=None,
+        ),
         "checkpoint_progress_sample_count": len(checkpoint_progress_latencies),
         "latency_with_checkpoint_progress": distribution(checkpoint_progress_latencies),
         "latency_without_observed_checkpoint_progress": distribution(stable_checkpoint_latencies),
