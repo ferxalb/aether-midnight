@@ -69,6 +69,17 @@ impl RecallCandidateOrder {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateCoverage {
+    /// Every row matching the lexical query and SQL filters was considered.
+    Complete,
+    /// Only the top bounded FTS5 BM25 candidate window was reranked.
+    Bm25TopK,
+    /// Candidates came from bounded row-ID windows and may omit interior rows.
+    RowIdSample,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryRecord {
     pub id: i64,
@@ -89,6 +100,7 @@ pub struct MemorySearchResult {
     pub memory: MemoryRecord,
     pub match_reason: String,
     pub score: f64,
+    pub candidate_coverage: CandidateCoverage,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -349,8 +361,6 @@ impl MemorySession {
         profile.active_scope_record_count = Some(active_scope_record_count);
         profile.output_fraction_of_scope = (active_scope_record_count > 0)
             .then(|| profile.candidates_hydrated as f64 / active_scope_record_count as f64);
-        profile.candidate_budget_saturated =
-            profile.candidate_limit > 0 && profile.candidates_hydrated == profile.candidate_limit;
         profile.add_benchmark_wall_phase(
             "diagnostic_active_scope_count",
             count_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -684,7 +694,7 @@ fn configured_candidate_order() -> RecallCandidateOrder {
             _ => {}
         }
     }
-    RecallCandidateOrder::BalancedRowIdWindows
+    RecallCandidateOrder::Ranked
 }
 
 fn recall_on_profiled(
@@ -790,6 +800,7 @@ fn recall_on_profiled(
         }
         order => ([(order, candidate_limit), (order, 0)], 1, None),
     };
+    let mut candidate_scan_truncated = false;
     for (scan_index, (order, scan_limit)) in scan_specs.into_iter().take(scan_count).enumerate() {
         if scan_limit == 0 {
             continue;
@@ -854,6 +865,7 @@ fn recall_on_profiled(
                         memory,
                         match_reason: "memory_lexical".into(),
                         score: (20.0 + (-rank * 1_000_000.0).clamp(0.0, 30.0)).clamp(0.0, 50.0),
+                        candidate_coverage: CandidateCoverage::Complete,
                     },
                     rank,
                 )))
@@ -874,12 +886,23 @@ fn recall_on_profiled(
         }
         drop(rows);
         drop(stmt);
+        candidate_scan_truncated |= scan_rows == scan_limit;
         if let Some(profile) = profile.as_deref_mut() {
             sqlite_statement_profile(conn, sql, profile);
         }
         if scan_index == 0 && ascending_budget.is_some_and(|budget| scan_rows < budget) {
             break;
         }
+    }
+    let candidate_coverage = if !candidate_scan_truncated {
+        CandidateCoverage::Complete
+    } else if matches!(candidate_order, RecallCandidateOrder::Ranked) {
+        CandidateCoverage::Bm25TopK
+    } else {
+        CandidateCoverage::RowIdSample
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.candidate_budget_saturated = candidate_scan_truncated;
     }
     if let Some(profile) = profile.as_deref_mut()
         && let Some(cache_before) = cache_before
@@ -947,8 +970,19 @@ fn recall_on_profiled(
             .cmp(&left.1)
             .then_with(|| right.2.cmp(&left.2))
             .then_with(|| left.3.total_cmp(&right.3))
-            .then_with(|| right.0.memory.created_at.cmp(&left.0.memory.created_at))
-            .then_with(|| right.0.memory.id.cmp(&left.0.memory.id))
+            .then_with(|| right.0.memory.observed_at.cmp(&left.0.memory.observed_at))
+            .then_with(|| right.0.memory.valid_from.cmp(&left.0.memory.valid_from))
+            .then_with(|| left.0.memory.content.cmp(&right.0.memory.content))
+            .then_with(|| left.0.memory.source_uri.cmp(&right.0.memory.source_uri))
+            .then_with(|| left.0.memory.kind.cmp(&right.0.memory.kind))
+            .then_with(|| left.0.memory.source_id.cmp(&right.0.memory.source_id))
+            .then_with(|| {
+                left.0
+                    .memory
+                    .supersedes_id
+                    .cmp(&right.0.memory.supersedes_id)
+            })
+            .then_with(|| left.0.memory.id.cmp(&right.0.memory.id))
     });
     if let Some(phase) = phase {
         phase.finish();
@@ -956,7 +990,10 @@ fn recall_on_profiled(
     let results = ranked
         .into_iter()
         .take(result_limit)
-        .map(|(result, _, _, _)| result)
+        .map(|(mut result, _, _, _)| {
+            result.candidate_coverage = candidate_coverage;
+            result
+        })
         .collect::<Vec<_>>();
     finish_profile_total(profile, total_wall_started, total_cpu_started);
     Ok(results)

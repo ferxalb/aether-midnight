@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 
 use tempfile::TempDir;
 
@@ -1173,6 +1173,76 @@ fn memory_temporal_provenance_scope_and_forget_are_enforced() {
 }
 
 #[test]
+fn memory_recall_remains_scoped_during_concurrent_writes() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("memory-concurrency.sqlite3");
+    let scope = "project:concurrency";
+    memory::remember(
+        &database,
+        scope,
+        "source",
+        "concurrent smoke marker seed",
+        Some("benchmark://concurrency/seed"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let barrier = Arc::new(Barrier::new(5));
+    let readers = (0..4)
+        .map(|reader_index| {
+            let database = database.clone();
+            let scope = scope.to_string();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..20 {
+                    let results =
+                        memory::recall(&database, &scope, "concurrent smoke marker", None, 10)
+                            .unwrap();
+                    assert!(!results.is_empty(), "reader {reader_index} lost the seed");
+                    assert!(results.iter().all(|result| result.memory.scope == scope));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let writer_database = database.clone();
+    let writer_scope = scope.to_string();
+    let writer_barrier = Arc::clone(&barrier);
+    let writer = std::thread::spawn(move || {
+        writer_barrier.wait();
+        for sample in 0..20 {
+            memory::remember(
+                &writer_database,
+                &writer_scope,
+                "source",
+                &format!("concurrent smoke marker write {sample}"),
+                Some(&format!("benchmark://concurrency/{sample}")),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+    });
+
+    for reader in readers {
+        reader.join().unwrap();
+    }
+    writer.join().unwrap();
+    assert!(
+        !memory::recall(&database, scope, "concurrent smoke marker", None, 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn memory_recall_prefers_exact_and_covered_evidence_and_handles_unicode_and_abstention() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("memory-ranking.sqlite3");
@@ -1295,8 +1365,12 @@ fn balanced_memory_recall_deduplicates_overlapping_candidate_windows() {
     assert_eq!(profile.candidates_returned, 50);
     assert_eq!(profile.candidate_rows_deduplicated, 20);
     assert_eq!(profile.candidates_hydrated, 30);
-    assert!(!profile.candidate_budget_saturated);
+    assert!(profile.candidate_budget_saturated);
     assert_eq!(first.len(), 10);
+    assert_eq!(
+        first[0].candidate_coverage,
+        memory::CandidateCoverage::RowIdSample
+    );
     assert_eq!(
         first
             .iter()
@@ -1307,6 +1381,112 @@ fn balanced_memory_recall_deduplicates_overlapping_candidate_windows() {
             .map(|result| result.memory.id)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn default_memory_recall_finds_exact_phrase_at_every_matching_position() {
+    const FANOUT: usize = 1_000;
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("memory-position-recall.sqlite3");
+    let scope = "project:position-recall";
+    let positions = [
+        0,
+        FANOUT / 10,
+        FANOUT / 4,
+        FANOUT / 2,
+        FANOUT * 3 / 4,
+        FANOUT * 9 / 10,
+        FANOUT - 1,
+    ];
+    let mut session = memory::MemorySession::open(&database).unwrap();
+    let inputs = positions
+        .iter()
+        .enumerate()
+        .flat_map(|(case, target_position)| {
+            (0..FANOUT).map(move |index| {
+                let term = format!("helioscase{case}");
+                let content = if index == *target_position {
+                    format!("where {term}")
+                } else {
+                    format!("{term} low value background entry {index:04}")
+                };
+                memory::MemoryInput {
+                    scope: scope.into(),
+                    kind: "source".into(),
+                    content,
+                    source_uri: Some(format!("benchmark://position/{case}/{index}")),
+                    source_id: None,
+                    supersedes_id: None,
+                    observed_at: None,
+                    valid_from: None,
+                    valid_to: None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for batch in inputs.chunks(memory::MAX_MEMORY_BATCH_RECORDS) {
+        session.remember_batch(batch).unwrap();
+    }
+
+    for (case, target_position) in positions.into_iter().enumerate() {
+        let query = format!("where helioscase{case}");
+        let (balanced, balanced_profile) = session
+            .recall_profiled_ordered(
+                scope,
+                &query,
+                None,
+                10,
+                memory::RecallCandidateOrder::BalancedRowIdWindows,
+            )
+            .unwrap();
+        let balanced_finds_target = balanced.iter().any(|result| result.memory.content == query);
+        assert_eq!(
+            balanced_finds_target,
+            !(25..FANOUT - 25).contains(&target_position),
+            "balanced-window coverage changed at matching position {target_position}/{FANOUT}"
+        );
+        assert!(balanced_profile.candidate_budget_saturated);
+        assert_eq!(
+            balanced[0].candidate_coverage,
+            memory::CandidateCoverage::RowIdSample
+        );
+
+        let (ranked, _) = session
+            .recall_profiled_ordered(
+                scope,
+                &query,
+                None,
+                10,
+                memory::RecallCandidateOrder::Ranked,
+            )
+            .unwrap();
+        assert!(ranked.iter().any(|result| result.memory.content == query));
+
+        let results = session.recall(scope, &query, None, 10).unwrap();
+        let exact_phrase = results
+            .iter()
+            .find(|result| result.memory.content == query)
+            .unwrap_or_else(|| {
+                panic!(
+                    "exact-phrase evidence at matching position {target_position}/{FANOUT} was omitted"
+                )
+            });
+        assert_eq!(
+            exact_phrase.candidate_coverage,
+            memory::CandidateCoverage::Bm25TopK,
+            "exact-phrase evidence at matching position {target_position}/{FANOUT} was omitted"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.memory.content.as_str())
+                .collect::<Vec<_>>(),
+            ranked
+                .iter()
+                .map(|result| result.memory.content.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]

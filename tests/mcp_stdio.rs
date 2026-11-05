@@ -245,6 +245,73 @@ fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
     assert!(child.wait().unwrap().success());
 }
 
+#[test]
+fn mcp_recall_finds_middle_exact_phrase_and_reports_candidate_coverage() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("mcp-middle-recall.sqlite3");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .arg("--db")
+        .arg(&database)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}
+        }),
+    );
+    read_response(&mut stdout);
+    write_request(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+
+    let memories = (0..100)
+        .map(|index| {
+            json!({
+                "scope":"project:mcp-middle",
+                "kind":"source",
+                "content":if index == 50 { "where is nebula".to_string() } else { format!("nebula low value background entry {index:03}") },
+                "source_uri":format!("benchmark://mcp-middle/{index:03}")
+            })
+        })
+        .collect::<Vec<_>>();
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"remember_batch","arguments":{"memories":memories}}
+        }),
+    );
+    let remembered = read_response(&mut stdout);
+    assert_eq!(remembered["result"]["isError"], false);
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"recall","arguments":{"scope":"project:mcp-middle","query":"where is nebula","limit":10}}
+        }),
+    );
+    let recalled = read_response(&mut stdout);
+    let rows: Value =
+        serde_json::from_str(recalled["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(rows[0]["memory"]["content"], "where is nebula");
+    assert_eq!(rows[0]["match_reason"], "memory_exact_phrase");
+    assert_eq!(rows[0]["candidate_coverage"], "bm25_top_k");
+
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
 fn write_request(stdin: &mut impl Write, value: &Value) {
     serde_json::to_writer(&mut *stdin, value).unwrap();
     stdin.write_all(b"\n").unwrap();

@@ -207,7 +207,7 @@ pub fn run(
     let heldout_quality =
         retrieval_suite_quality(&heldout_db, &heldout_repo, &heldout_suite.queries)?;
     let rg = ripgrep_baseline(&repo, &manifest.queries)?;
-    let memory_scaling = memory_scaling(base.path(), &[1_000, 10_000, 100_000], false)?;
+    let memory_scaling = memory_scaling(base.path(), &[1_000, 10_000, 100_000], false, 4)?;
     let incremental = incremental_samples(&primary_db, &repo, 30)?;
     let partial_context = partial_context_during_index(base.path(), &repo, cold_query, 30)?;
     let stress = stress_cycles_run(base.path(), stress_cycles.max(1))?;
@@ -545,15 +545,32 @@ pub fn run_memory_scaling(sizes: &[usize]) -> Result<Value> {
 }
 
 pub fn run_memory_scaling_with_profile(sizes: &[usize], profile_recall: bool) -> Result<Value> {
+    run_memory_scaling_with_layout(sizes, profile_recall, 4)
+}
+
+pub fn run_memory_scaling_with_layout(
+    sizes: &[usize],
+    profile_recall: bool,
+    namespace_count: usize,
+) -> Result<Value> {
     if sizes.is_empty() || sizes.iter().any(|size| !(4..=100_000).contains(size)) {
         bail!("memory benchmark sizes must be between 4 and 100000 records");
     }
+    if !matches!(namespace_count, 1 | 4) {
+        bail!("memory benchmark namespace count must be 1 or 4");
+    }
     let base = TempDir::new().context("create isolated memory benchmark directory")?;
-    memory_scaling(base.path(), sizes, profile_recall)
+    memory_scaling(base.path(), sizes, profile_recall, namespace_count)
 }
 
-fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) -> Result<Value> {
-    let scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
+fn memory_scaling(
+    base: &Path,
+    requested_sizes: &[usize],
+    profile_recall: bool,
+    namespace_count: usize,
+) -> Result<Value> {
+    let all_scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
+    let scopes = &all_scopes[..namespace_count];
     let mut workloads = Vec::new();
     for target in requested_sizes.iter().copied() {
         let workload_cpu_started = code::process_cpu_seconds();
@@ -561,7 +578,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         let mut source_ids = std::collections::HashMap::new();
         let setup_started = Instant::now();
         let mut memory_session = memory::MemorySession::open(&db_path)?;
-        for scope in scopes {
+        for scope in scopes.iter().copied() {
             let record = memory_session.remember(
                 scope,
                 "source",
@@ -628,7 +645,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
             let start = Instant::now();
             memory::remember(
                 &db_path,
-                scopes[index % 4],
+                scopes[index % scopes.len()],
                 "source",
                 &format!("store sample marker {target} {index}"),
                 Some("benchmark://store"),
@@ -646,7 +663,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         }
 
         let mut prior_ids = std::collections::HashMap::new();
-        for scope in scopes {
+        for scope in scopes.iter().copied() {
             let seed = memory::remember(
                 &db_path,
                 scope,
@@ -663,8 +680,8 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         }
         let mut update_ms = Vec::new();
         for index in 0..30 {
-            let scope = scopes[index % 4];
-            let day = index / 4 + 2;
+            let scope = scopes[index % scopes.len()];
+            let day = index / scopes.len() + 2;
             let valid_from = format!("2020-01-{day:02}T00:00:00Z");
             let start = Instant::now();
             let updated = memory::remember(
@@ -685,7 +702,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
 
         let mut delete_ids = Vec::new();
         for index in 0..30 {
-            let scope = scopes[index % 4];
+            let scope = scopes[index % scopes.len()];
             let record = memory::remember(
                 &db_path,
                 scope,
@@ -712,7 +729,13 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         let mut recall_ms = Vec::new();
         for index in 0..100 {
             let start = Instant::now();
-            let result = memory::recall(&db_path, scopes[index % 4], "namespace", None, 10)?;
+            let result = memory::recall(
+                &db_path,
+                scopes[index % scopes.len()],
+                "namespace",
+                None,
+                10,
+            )?;
             if result.is_empty() {
                 bail!("memory recall benchmark returned no results at size {target}");
             }
@@ -723,7 +746,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         for index in 0..30 {
             let start = Instant::now();
             memory_session.remember(
-                scopes[index % 4],
+                scopes[index % scopes.len()],
                 "source",
                 &format!("persistent store marker {target} {index}"),
                 Some("benchmark://persistent-store"),
@@ -746,7 +769,8 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         let mut persistent_recall_ms = Vec::new();
         for index in 0..100 {
             let start = Instant::now();
-            let result = memory_session.recall(scopes[index % 4], "namespace", None, 10)?;
+            let result =
+                memory_session.recall(scopes[index % scopes.len()], "namespace", None, 10)?;
             if result.is_empty() {
                 bail!("persistent memory recall returned no results at size {target}");
             }
@@ -786,7 +810,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
                 (
                     "selective_single_term",
                     "sourcequality000",
-                    memory::RecallCandidateOrder::BalancedRowIdWindows,
+                    memory::RecallCandidateOrder::Ranked,
                     &mut selective_profile_samples,
                 ),
             ] {
@@ -823,7 +847,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
         let mut persistent_delete_ids = Vec::new();
         for index in 0..30 {
             let record = memory_session.remember(
-                scopes[index % 4],
+                scopes[index % scopes.len()],
                 "source",
                 &format!("persistent delete marker {target} {index}"),
                 Some("benchmark://persistent-delete"),
@@ -833,7 +857,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
                 None,
                 None,
             )?;
-            persistent_delete_ids.push((scopes[index % 4], record.id));
+            persistent_delete_ids.push((scopes[index % scopes.len()], record.id));
         }
         let mut persistent_delete_ms = Vec::new();
         for (scope, id) in persistent_delete_ids {
@@ -982,7 +1006,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
             "retrieval_quality":retrieval_quality}));
     }
     Ok(
-        json!({"memory_records_include_source_and_derived_across_four_namespaces":true,"workloads":workloads,
+        json!({"memory_records_include_source_and_derived_across_four_namespaces":namespace_count == 4,"namespace_layout":if namespace_count == 1 {"single_namespace"} else {"four_distributed_namespaces"},"workloads":workloads,
         "rss_method":"current RSS sampled with ps; getrusage ru_maxrss normalized to bytes; reported peak is max(getrusage peak, every sampled RSS) and asserted against all samples; peak is cumulative across sizes"}),
     )
 }

@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "dataset": "AETHER Midnight high-fan-out position and insertion-order suite",
+  "frozen_at": "2026-11-05",
+  "labeling": "Each generated collection has one labeled exact-phrase record and 999 low-value records containing the same single informative term. Labels are explicit fixture truth, not inferred from keyword overlap.",
+  "records": [],
+  "generated_collections": [
+    {
+      "id": "position-0pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase0",
+      "count": 1000,
+      "target_position": 0,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    },
+    {
+      "id": "position-10pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase1",
+      "count": 1000,
+      "target_position": 100,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    },
+    {
+      "id": "position-25pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase2",
+      "count": 1000,
+      "target_position": 250,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    },
+    {
+      "id": "position-50pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase3",
+      "count": 1000,
+      "target_position": 500,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    },
+    {
+      "id": "position-75pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase4",
+      "count": 1000,
+      "target_position": 750,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    },
+    {
+      "id": "position-90pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase5",
+      "count": 1000,
+      "target_position": 900,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    },
+    {
+      "id": "position-100pct",
+      "scope": "project:adversarial",
+      "query_term": "helioscase6",
+      "count": 1000,
+      "target_position": 999,
+      "target_template": "where is {term}",
+      "background_template": "{term} low value background entry {index:04d}"
+    }
+  ],
+  "forget_keys": [],
+  "queries": [
+    {
+      "id": "position-0pct",
+      "split": "dev",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase0",
+      "matching_candidate_count": 1000,
+      "relevant_position": 0,
+      "relevant": ["position-0pct-target"]
+    },
+    {
+      "id": "position-10pct",
+      "split": "dev",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase1",
+      "matching_candidate_count": 1000,
+      "relevant_position": 100,
+      "relevant": ["position-10pct-target"]
+    },
+    {
+      "id": "position-25pct",
+      "split": "heldout",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase2",
+      "matching_candidate_count": 1000,
+      "relevant_position": 250,
+      "relevant": ["position-25pct-target"]
+    },
+    {
+      "id": "position-50pct",
+      "split": "dev",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase3",
+      "matching_candidate_count": 1000,
+      "relevant_position": 500,
+      "relevant": ["position-50pct-target"]
+    },
+    {
+      "id": "position-75pct",
+      "split": "heldout",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase4",
+      "matching_candidate_count": 1000,
+      "relevant_position": 750,
+      "relevant": ["position-75pct-target"]
+    },
+    {
+      "id": "position-90pct",
+      "split": "heldout",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase5",
+      "matching_candidate_count": 1000,
+      "relevant_position": 900,
+      "relevant": ["position-90pct-target"]
+    },
+    {
+      "id": "position-100pct",
+      "split": "dev",
+      "category": "high_fanout_position",
+      "scope": "project:adversarial",
+      "query": "where is helioscase6",
+      "matching_candidate_count": 1000,
+      "relevant_position": 999,
+      "relevant": ["position-100pct-target"]
+    }
+  ]
+}

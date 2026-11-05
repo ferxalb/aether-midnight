@@ -175,20 +175,42 @@ class McpClient:
         }
 
 
-def fixture_records(fixture):
-    """Expand the frozen fixture with its deterministic background records."""
-    records = list(fixture["records"])
-    background = fixture["background_collection"]
-    records.extend(
-        {
-            "key": f"background-{index:03d}",
-            "scope": background["scope"],
-            "kind": "source",
-            "content": background["template"].format(index=index),
-            "source_uri": f"benchmark://background/{index:03d}",
-        }
-        for index in range(background["count"])
-    )
+def fixture_records(fixture, insertion_order="forward"):
+    """Expand frozen records and compact generated collections deterministically."""
+    records = list(fixture.get("records", []))
+    background = fixture.get("background_collection")
+    if background:
+        records.extend(
+            {
+                "key": f"background-{index:03d}",
+                "scope": background["scope"],
+                "kind": "source",
+                "content": background["template"].format(index=index),
+                "source_uri": f"benchmark://background/{index:03d}",
+            }
+            for index in range(background["count"])
+        )
+    for collection in fixture.get("generated_collections", []):
+        collection_id = collection["id"]
+        term = collection["query_term"]
+        target_key = f"{collection_id}-target"
+        for index in range(collection["count"]):
+            is_target = index == collection["target_position"]
+            records.append(
+                {
+                    "key": target_key if is_target else f"{collection_id}-background-{index:04d}",
+                    "scope": collection["scope"],
+                    "kind": collection.get("kind", "source"),
+                    "content": (
+                        collection["target_template"].format(term=term)
+                        if is_target
+                        else collection["background_template"].format(term=term, index=index)
+                    ),
+                    "source_uri": f"benchmark://{collection_id}/{index:04d}",
+                }
+            )
+    if insertion_order == "reverse":
+        records.reverse()
     return records
 
 
@@ -201,7 +223,7 @@ def valid_at(memory, at):
     )
 
 
-def evaluate_query(query, samples, id_to_key):
+def evaluate_query(query, samples, id_to_key, insertion_order="forward"):
     """Compute retrieval quality and response metrics for one fixture query."""
     relevant = set(query["relevant"])
     results = samples[-1]["results"]
@@ -239,6 +261,12 @@ def evaluate_query(query, samples, id_to_key):
         "query": query["query"],
         "at": query.get("at"),
         "relevant": sorted(relevant),
+        "relevant_record_position": (
+            query.get("matching_candidate_count", 0) - 1 - query["relevant_position"]
+            if insertion_order == "reverse" and "relevant_position" in query
+            else query.get("relevant_position")
+        ),
+        "matching_candidate_count": query.get("matching_candidate_count"),
         "top10": actual[:10],
         "first_relevant_rank": first_relevant_rank,
         "found_relevant_count_at_10": len(set(actual[:10]) & relevant),
@@ -274,6 +302,7 @@ def main():
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
     parser.add_argument("--source-commit")
     parser.add_argument("--split", choices=("dev", "heldout", "all"), default="dev")
+    parser.add_argument("--insertion-order", choices=("forward", "reverse"), default="forward")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -317,7 +346,7 @@ def main():
     remember_ms = []
     remember_wal_samples = []
     prior_checkpointed_frames = None
-    for record in fixture_records(fixture):
+    for record in fixture_records(fixture, args.insertion_order):
         arguments = {
             key: record[key]
             for key in (
@@ -440,7 +469,7 @@ def main():
                     "response_bytes": response_size,
                 }
             )
-        quality_rows.append(evaluate_query(query, samples, id_to_key))
+        quality_rows.append(evaluate_query(query, samples, id_to_key, args.insertion_order))
 
     for _ in range(30):
         elapsed, _, _, _ = client.call("list_memories", {"scope": "user:maya", "limit": 100})
@@ -505,9 +534,11 @@ def main():
         "suite": args.split,
         "fixture": fixture_name,
         "fixture_frozen_at": fixture["frozen_at"],
+        "insertion_order": args.insertion_order,
         "query_count": len(queries),
         "memory_count": len(key_to_id),
-        "background_record_count": fixture["background_collection"]["count"],
+        "background_record_count": fixture.get("background_collection", {}).get("count", 0)
+        + sum(collection["count"] for collection in fixture.get("generated_collections", [])),
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),

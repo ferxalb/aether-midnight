@@ -28,6 +28,10 @@ For a raw source, `source_uri` is optional. Derived memories must cite a raw `so
 
 `refresh-file` updates one repository-relative path without a repository walk. A full `index` is still required afterward to reconcile other changes and restore complete status. `bench-memory` runs the isolated synthetic 1k/10k/100k memory scaling workload.
 
+`recall` returns an array of `MemorySearchResult` objects. Each result includes `candidate_coverage`, an additive field describing the candidate generator: `complete` means every row matching the lexical query and scope/deletion/validity filters was considered; `bm25_top_k` means only the bounded FTS5 BM25 candidate window was reranked; `row_id_sample` identifies the experimental row-ID window strategy. `bm25_top_k` does not claim semantic completeness. An empty array has no per-result coverage field and means no evidence was returned, not that the whole namespace was exhaustively searched. The production path uses BM25 ordering; row-ID sampling is available only in retrieval-experiment builds.
+
+Use `bench-memory --namespace-count 1` for one large namespace or `--namespace-count 4` for the distributed workload. Both use the same total record counts and report warm recall, storage, CPU, RSS, and retrieval-quality measurements.
+
 To reproduce the 10k-file full-reconciliation versus direct-refresh visibility workload, run `python3 scripts/benchmark_refresh_file.py --files 10000 --samples 30`; it emits JSON and never contacts a service.
 
 ## MCP
