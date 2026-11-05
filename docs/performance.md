@@ -286,4 +286,6 @@ python3 scripts/evaluate_memory_retrieval.py --fixture benchmark/memory_quality_
   --split dev --repeats 3 --output /tmp/memory-retrieval-v03-dev.json
 ```
 
+The WAL probe uses Python's `sqlite3` module and requires its linked SQLite library to be at least 3.51.0. Earlier versions can interpret the unknown `NOOP` checkpoint mode as `PASSIVE`; the evaluator rejects them before collecting measurements.
+
 For the WAL experiment, build with `--features retrieval-experiments`, then run the same evaluator with `AETHER_WAL_AUTOCHECKPOINT_PAGES=256`, `1000`, and `4096`. Each run creates its own disposable database. The existing Windows/macOS campaigns, full 200-query evaluation, large-payload stress, multi-process contention, long-reader checkpoint starvation, and separate internal commit timing remain unmeasured.

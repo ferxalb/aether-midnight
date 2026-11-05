@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "benchmark" / "memory_quality_v1.json"
 DEFAULT_BINARY = ROOT / "target" / "release" / "aether-midnight"
+MIN_NOOP_SQLITE_VERSION = (3, 51, 0)
 
 
 def distribution(values):
@@ -252,6 +253,11 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
+    if sqlite3.sqlite_version_info < MIN_NOOP_SQLITE_VERSION:
+        parser.error(
+            "Python sqlite3 requires SQLite >= 3.51.0 for non-checkpointing "
+            f"PRAGMA wal_checkpoint(NOOP); found {sqlite3.sqlite_version}"
+        )
     binary = args.binary.resolve()
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}; run cargo build --release --locked first")
