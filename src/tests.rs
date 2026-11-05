@@ -72,7 +72,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -98,6 +98,14 @@ fn migrations_and_interrupted_transaction_recover() {
         )
         .unwrap();
     assert_eq!(format, "2");
+    let schema: String = reopened
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema, "3");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -128,6 +136,22 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
                  content,content='',contentless_delete=1,tokenize='trigram case_sensitive 0'
              );
              INSERT INTO code_trigram(rowid,content) VALUES(1,'legacy trigram content');
+             CREATE TABLE memories(
+                 id INTEGER PRIMARY KEY,scope TEXT NOT NULL,kind TEXT NOT NULL,content TEXT NOT NULL,
+                 source_uri TEXT,source_id INTEGER,supersedes_id INTEGER,created_at TEXT NOT NULL,
+                 observed_at TEXT,valid_from TEXT,valid_to TEXT,deleted_at TEXT
+             );
+             CREATE VIRTUAL TABLE memory_fts USING fts5(content,tokenize='unicode61 remove_diacritics 2');
+             CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
+                 DELETE FROM memory_fts WHERE rowid=old.id;
+             END;
+             CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
+             WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+                 DELETE FROM memory_fts WHERE rowid=new.id;
+             END;
+             INSERT INTO memories(id,scope,kind,content,source_uri,created_at)
+                 VALUES(10,'user:legacy','source','legacy memory provenance fact','legacy://source','2025-01-01T00:00:00.000000000Z');
+             INSERT INTO memory_fts(rowid,content) VALUES(10,'legacy memory provenance fact');
              PRAGMA user_version=1;",
         )
         .unwrap();
@@ -137,7 +161,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -155,6 +179,225 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     assert!(new_table);
     assert_eq!(files, 0);
     assert!(!complete);
+    assert!(
+        memory::recall(&database, "user:legacy", "legacy provenance", None, 10)
+            .unwrap()
+            .iter()
+            .any(|result| result.memory.id == 10
+                && result.memory.source_uri.as_deref() == Some("legacy://source"))
+    );
+}
+
+#[test]
+fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_is_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("schema-two.sqlite3");
+    let legacy = rusqlite::Connection::open(&database).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+             INSERT INTO metadata(key,value) VALUES('index_format_version','2'),('schema_version','2');
+             CREATE TABLE memories(
+                 id INTEGER PRIMARY KEY,scope TEXT NOT NULL,kind TEXT NOT NULL,content TEXT NOT NULL,
+                 source_uri TEXT,source_id INTEGER,supersedes_id INTEGER,created_at TEXT NOT NULL,
+                 observed_at TEXT,valid_from TEXT,valid_to TEXT,deleted_at TEXT
+             );
+             CREATE INDEX memories_scope_active ON memories(scope,deleted_at,created_at);
+             CREATE INDEX memories_source ON memories(source_id);
+             CREATE VIRTUAL TABLE memory_fts USING fts5(content,tokenize='unicode61 remove_diacritics 2');
+             CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
+                 DELETE FROM memory_fts WHERE rowid=old.id;
+             END;
+             CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
+             WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+                 DELETE FROM memory_fts WHERE rowid=new.id;
+             END;
+             INSERT INTO memories(id,scope,kind,content,source_uri,created_at,valid_from)
+                 VALUES(1,'user:alice','source','shared preference morning review','uri://source','2025-01-01T00:00:00.000000000Z','2024-01-01T00:00:00.000000000Z');
+             INSERT INTO memories(id,scope,kind,content,source_id,supersedes_id,created_at,valid_from)
+                 VALUES(2,'user:bob','derived','shared preference evening review',1,1,'2025-02-01T00:00:00.000000000Z','2025-01-01T00:00:00.000000000Z');
+             INSERT INTO memories(id,scope,kind,content,created_at,deleted_at)
+                 VALUES(3,'user:alice','source','removed forgotten memory','2025-03-01T00:00:00.000000000Z','2025-04-01T00:00:00.000000000Z');
+             INSERT INTO memory_fts(rowid,content) VALUES
+                 (1,'shared preference morning review'),(2,'shared preference evening review');
+             PRAGMA user_version=2;",
+        )
+        .unwrap();
+    drop(legacy);
+
+    let migrated = db::open_db(&database).unwrap();
+    let version: i64 = migrated
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let schema_version: String = migrated
+        .query_row(
+            "SELECT value FROM metadata WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "3");
+    let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
+        i64,
+        String,
+        i64,
+        i64,
+        String,
+        bool,
+    ) = migrated
+        .query_row(
+            "SELECT count(*),
+                    (SELECT source_uri FROM memories WHERE id=1),
+                    (SELECT source_id FROM memories WHERE id=2),
+                    (SELECT supersedes_id FROM memories WHERE id=2),
+                    (SELECT deleted_at FROM memories WHERE id=3),
+                    (SELECT content IS NULL FROM memory_fts WHERE rowid=1)
+             FROM memories",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(records, 3);
+    assert_eq!(source_uri, "uri://source");
+    assert_eq!(source_link, 1);
+    assert_eq!(supersedes_link, 1);
+    assert!(deleted_at.contains("2025-04-01"));
+    assert!(content_column_is_null);
+
+    let alice_results = memory::recall(
+        &database,
+        "user:alice",
+        "shared preference morning review",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(alice_results.len(), 1);
+    assert_eq!(alice_results[0].memory.id, 1);
+    assert!(
+        memory::recall(
+            &database,
+            "user:alice",
+            "removed forgotten memory",
+            None,
+            10
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        memory::recall(
+            &database,
+            "user:bob",
+            "shared preference evening review",
+            None,
+            10
+        )
+        .unwrap()[0]
+            .memory
+            .id,
+        2
+    );
+    drop(migrated);
+
+    let reopened = db::open_db(&database).unwrap();
+    let reopened_version: i64 = reopened
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(reopened_version, 3);
+    assert_eq!(
+        memory::recall(&database, "user:alice", "morning review", None, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn schema_two_memory_fts_migration_rolls_back_on_invalid_legacy_rows() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("invalid-schema-two.sqlite3");
+    let legacy = rusqlite::Connection::open(&database).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+             INSERT INTO metadata(key,value) VALUES('index_format_version','2'),('schema_version','2');
+             CREATE TABLE memories(id INTEGER PRIMARY KEY,content TEXT,deleted_at TEXT);
+             CREATE VIRTUAL TABLE memory_fts USING fts5(content);
+             INSERT INTO memories(id,content) VALUES(1,'preserve old row');
+             INSERT INTO memory_fts(rowid,content) VALUES(1,'preserve old row');
+             PRAGMA user_version=2;",
+        )
+        .unwrap();
+    drop(legacy);
+
+    assert!(db::open_db(&database).is_err());
+    let reopened = rusqlite::Connection::open(&database).unwrap();
+    let (version, old_fts, old_row): (i64, bool, bool) = reopened
+        .query_row(
+            "SELECT (SELECT user_version FROM pragma_user_version),
+                    EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_fts'),
+                    EXISTS(SELECT 1 FROM memories WHERE id=1 AND content='preserve old row')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(version, 2);
+    assert!(old_fts);
+    assert!(old_row);
+}
+
+#[test]
+fn memory_batch_is_bounded_and_rolls_back_every_record_when_a_link_is_invalid() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("memory-batch.sqlite3");
+    let inputs = vec![
+        memory::MemoryInput {
+            scope: "user:batch".into(),
+            kind: "source".into(),
+            content: "valid first source".into(),
+            source_uri: Some("batch://valid".into()),
+            source_id: None,
+            supersedes_id: None,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+        },
+        memory::MemoryInput {
+            scope: "user:batch".into(),
+            kind: "derived".into(),
+            content: "invalid second fact".into(),
+            source_uri: None,
+            source_id: Some(999),
+            supersedes_id: None,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+        },
+    ];
+    assert!(memory::remember_batch(&database, &inputs).is_err());
+    let connection = db::open_db(&database).unwrap();
+    let record_count: i64 = connection
+        .query_row("SELECT count(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    let indexed_count: i64 = connection
+        .query_row("SELECT count(*) FROM memory_fts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(record_count, 0);
+    assert_eq!(indexed_count, 0);
+
+    let too_many = vec![inputs[0].clone(); memory::MAX_MEMORY_BATCH_RECORDS + 1];
+    assert!(memory::remember_batch(&database, &too_many).is_err());
 }
 
 #[test]
@@ -317,6 +560,82 @@ fn fts_symbols_paths_and_retrieval_time_freshness_work() {
         .query_row("SELECT count(*) FROM code_fts", [], |row| row.get(0))
         .unwrap();
     assert_eq!(fts_documents, 0);
+}
+
+#[test]
+fn explicit_file_refresh_updates_one_path_and_requires_full_reconciliation() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("refresh.sqlite3");
+    let repo = new_repo(&temp, "refresh-repo");
+    let source = repo.join("src/lib.rs");
+    fs::write(&source, "pub fn before_refresh_token() {}\n").unwrap();
+    let initial = run_index(&database, &repo);
+    assert!(initial.complete);
+
+    fs::write(&source, "pub fn after_refresh_token() {}\n").unwrap();
+    let refreshed =
+        code::refresh_indexed_file(&database, &repo, "src/lib.rs", &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!(refreshed.operation, "updated");
+    assert!(refreshed.generation > initial.generation);
+    assert!(!refreshed.catalog_complete);
+    assert!(refreshed.reconciliation_required);
+    assert_eq!(
+        code::search_code(&database, &repo, "after_refresh_token", 5).unwrap()[0].freshness,
+        "fresh"
+    );
+    assert!(
+        code::search_code(&database, &repo, "before_refresh_token", 5)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !code::index_status(&database, &repo)
+            .unwrap()
+            .catalog_complete
+    );
+
+    let added = repo.join("src/added.rs");
+    fs::write(&added, "pub fn added_refresh_token() {}\n").unwrap();
+    let added_report =
+        code::refresh_indexed_file(&database, &repo, "src/added.rs", &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!(added_report.operation, "updated");
+    assert_eq!(
+        code::search_code(&database, &repo, "added_refresh_token", 5).unwrap()[0].freshness,
+        "fresh"
+    );
+
+    fs::write(repo.join(".gitignore"), "src/added.rs\n").unwrap();
+    let ignored =
+        code::refresh_indexed_file(&database, &repo, "src/added.rs", &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!(ignored.operation, "removed");
+    assert!(
+        code::search_code(&database, &repo, "added_refresh_token", 5)
+            .unwrap()
+            .is_empty()
+    );
+
+    assert!(
+        code::refresh_indexed_file(&database, &repo, "../outside.rs", &AtomicBool::new(false),)
+            .is_err()
+    );
+    assert!(
+        code::refresh_indexed_file(&database, &repo, "..\\outside.rs", &AtomicBool::new(false),)
+            .is_err()
+    );
+    assert!(run_index(&database, &repo).complete);
+    fs::remove_file(source).unwrap();
+    let deleted =
+        code::refresh_indexed_file(&database, &repo, "src/lib.rs", &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!(deleted.operation, "removed");
+    assert!(
+        code::search_code(&database, &repo, "after_refresh_token", 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -851,4 +1170,133 @@ fn memory_temporal_provenance_scope_and_forget_are_enforced() {
         )
         .unwrap();
     assert!(compacted_content.is_empty());
+}
+
+#[test]
+fn memory_recall_prefers_exact_and_covered_evidence_and_handles_unicode_and_abstention() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("memory-ranking.sqlite3");
+    let scope = "user:rank";
+    let exact = memory::remember(
+        &database,
+        scope,
+        "source",
+        "Maya design review schedule 10:30",
+        Some("benchmark://exact"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    memory::remember(
+        &database,
+        scope,
+        "source",
+        "Maya weekly planning review note records recurring calendar context.",
+        Some("benchmark://shared-terms"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    memory::remember(
+        &database,
+        scope,
+        "source",
+        "Maya disfruta del café y trabaja los miércoles.",
+        Some("benchmark://accented"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let exact_results = memory::recall(
+        &database,
+        scope,
+        "Maya design review schedule 10:30",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(exact_results[0].memory.id, exact.id);
+    assert_eq!(exact_results[0].match_reason, "memory_exact_phrase");
+    assert!(
+        memory::recall(&database, scope, "Maya home mailing address Oslo", None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        memory::recall(&database, scope, "Maya trabaja los miercoles", None, 10)
+            .unwrap()
+            .iter()
+            .any(|result| result.memory.content.contains("miércoles"))
+    );
+    assert!(
+        memory::recall(&database, scope, "!!!", None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(memory::recall(&database, scope, "Maya\" OR content:secret*", None, 10).is_ok());
+    assert!(memory::recall(&database, scope, "!!!", Some("yesterday"), 10).is_err());
+    let too_many_terms = (0..65)
+        .map(|index| format!("word{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(memory::recall(&database, scope, &too_many_terms, None, 10).is_err());
+}
+
+#[test]
+fn memory_batch_inserts_all_records_and_indexes_them_together() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("memory-batch-success.sqlite3");
+    let source = memory::remember(
+        &database,
+        "project:batch",
+        "source",
+        "The service API timeout policy is documented.",
+        Some("batch://source"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let inputs = vec![
+        memory::MemoryInput {
+            scope: "project:batch".into(),
+            kind: "derived".into(),
+            content: "The service API timeout is 250 milliseconds.".into(),
+            source_uri: None,
+            source_id: Some(source.id),
+            supersedes_id: None,
+            observed_at: None,
+            valid_from: Some("2025-01-01T00:00:00Z".into()),
+            valid_to: None,
+        },
+        memory::MemoryInput {
+            scope: "project:batch".into(),
+            kind: "source".into(),
+            content: "The service API retries twice after timeout.".into(),
+            source_uri: Some("batch://retry".into()),
+            source_id: None,
+            supersedes_id: None,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+        },
+    ];
+    let inserted = memory::remember_batch(&database, &inputs).unwrap();
+    assert_eq!(inserted.len(), 2);
+    assert_eq!(inserted[0].source_id, Some(source.id));
+    let rows = memory::recall(&database, "project:batch", "service API timeout", None, 10).unwrap();
+    assert!(rows.iter().any(|row| row.memory.id == inserted[0].id));
+    assert!(rows.iter().any(|row| row.memory.id == inserted[1].id));
 }

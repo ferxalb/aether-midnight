@@ -6,7 +6,22 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
+         scope_token,
+         content,
+         content='',
+         contentless_delete=1,
+         tokenize='unicode61 remove_diacritics 2'
+     );
+     CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
+         DELETE FROM memory_fts WHERE rowid = old.id;
+     END;
+     CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
+     WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+         DELETE FROM memory_fts WHERE rowid = new.id;
+     END;";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RepoScope {
@@ -167,21 +182,11 @@ fn migrate(connection: &Connection) -> Result<()> {
                      CREATE INDEX memories_scope_active
                          ON memories(scope, deleted_at, created_at);
                      CREATE INDEX memories_source ON memories(source_id);
-                     CREATE VIRTUAL TABLE memory_fts USING fts5(
-                         content,
-                         tokenize='unicode61 remove_diacritics 2'
-                     );
-                     CREATE TRIGGER memories_delete_fts AFTER DELETE ON memories BEGIN
-                         DELETE FROM memory_fts WHERE rowid = old.id;
-                     END;
-                     CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
-                     WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
-                         DELETE FROM memory_fts WHERE rowid = new.id;
-                     END;
                      INSERT INTO metadata(key,value) VALUES
-                         ('index_format_version','2'), ('schema_version','2');
-                     PRAGMA user_version=2;",
+                         ('index_format_version','2'), ('schema_version','3');
+                     PRAGMA user_version=3;",
                 )?;
+                connection.execute_batch(MEMORY_FTS_SCHEMA)?;
             } else if locked_version == 1 {
                 connection.execute_batch(
                     "DROP TABLE code_trigram;
@@ -200,7 +205,9 @@ fn migrate(connection: &Connection) -> Result<()> {
             }
             let migrated_version: i64 =
                 connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if migrated_version != SCHEMA_VERSION {
+            if migrated_version == 2 {
+                migrate_memory_fts_v2(connection)?;
+            } else if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");
             }
             Ok(())
@@ -222,6 +229,37 @@ fn migrate(connection: &Connection) -> Result<()> {
         bail!("unsupported index format version {format}");
     }
     Ok(())
+}
+
+fn migrate_memory_fts_v2(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "DROP TRIGGER IF EXISTS memories_delete_fts;
+         DROP TRIGGER IF EXISTS memories_soft_delete_fts;
+         DROP TABLE IF EXISTS memory_fts;",
+    )?;
+    connection.execute_batch(MEMORY_FTS_SCHEMA)?;
+
+    let mut rows =
+        connection.prepare("SELECT id,scope,content FROM memories WHERE deleted_at IS NULL")?;
+    let mut insert = connection
+        .prepare_cached("INSERT INTO memory_fts(rowid,scope_token,content) VALUES(?1,?2,?3)")?;
+    let mut rows = rows.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let scope: String = row.get(1)?;
+        let content: String = row.get(2)?;
+        insert.execute(rusqlite::params![id, memory_scope_token(&scope), content])?;
+    }
+    connection.execute(
+        "UPDATE metadata SET value='3' WHERE key='schema_version'",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+pub(crate) fn memory_scope_token(scope: &str) -> String {
+    format!("s{}", hash_bytes(scope.as_bytes()))
 }
 
 pub fn repo_scope(path: &Path) -> Result<RepoScope> {

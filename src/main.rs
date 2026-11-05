@@ -33,6 +33,14 @@ enum Commands {
         #[arg(long)]
         verify_hashes: bool,
     },
+    /// Refresh one explicit, repository-relative file without walking the repository.
+    /// A later full index run is required to restore complete catalog status.
+    RefreshFile {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        path: String,
+    },
     /// Search paths, symbols, whole-token content, and identifier-boundary fragments; arbitrary in-token substrings are unsupported.
     Search {
         #[arg(long, default_value = ".")]
@@ -141,6 +149,12 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         stress_cycles: usize,
     },
+    /// Run the isolated 1k/10k/100k memory workload without the repository-index campaign.
+    BenchMemory {
+        /// Comma-separated record counts. Maximum is 100000 to keep the default local run bounded.
+        #[arg(long, value_delimiter = ',', default_value = "1000,10000,100000")]
+        sizes: Vec<usize>,
+    },
     #[command(hide = true)]
     FtsEval {
         #[arg(long)]
@@ -184,6 +198,14 @@ fn main() -> Result<()> {
             if result.cancelled {
                 std::process::exit(130);
             }
+        }
+        Commands::RefreshFile { repo, path } => {
+            print_json(&code::refresh_indexed_file(
+                &db_path,
+                &repo,
+                &path,
+                &cancellation,
+            )?)?;
         }
         Commands::Search {
             repo,
@@ -305,6 +327,9 @@ fn main() -> Result<()> {
                 stress_cycles,
             )?;
             print_json(&result)?;
+        }
+        Commands::BenchMemory { sizes } => {
+            print_json(&benchmark::run_memory_scaling(&sizes)?)?;
         }
         Commands::FtsEval {
             repo,

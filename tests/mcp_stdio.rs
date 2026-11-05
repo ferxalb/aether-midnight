@@ -53,7 +53,9 @@ fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
         .filter_map(|item| item["name"].as_str())
         .collect::<Vec<_>>();
     assert!(names.contains(&"search_code"));
+    assert!(names.contains(&"refresh_indexed_file"));
     assert!(names.contains(&"remember"));
+    assert!(names.contains(&"remember_batch"));
     write_request(
         &mut stdin,
         &json!({
@@ -67,6 +69,178 @@ fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
     assert_eq!(rows["results"][0]["path"], "src/lib.rs");
     assert_eq!(rows["results"][0]["freshness"], "fresh_unindexed");
     assert!(rows["estimated_tokens"].as_u64().unwrap() <= rows["token_budget"].as_u64().unwrap());
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"remember_batch","arguments":{"memories":[
+                {"scope":"project:mcp","kind":"source","content":"persistent session atlas alpha token","source_uri":"mcp://alpha"},
+                {"scope":"project:mcp","kind":"source","content":"persistent session atlas beta token","source_uri":"mcp://beta"}
+            ]}}
+        }),
+    );
+    let batch = read_response(&mut stdout);
+    assert_eq!(batch["result"]["isError"], false);
+    let batch_rows: Value =
+        serde_json::from_str(batch["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(batch_rows.as_array().unwrap().len(), 2);
+    let first_memory_id = batch_rows[0]["id"].as_i64().unwrap();
+
+    for request_id in [5, 6] {
+        write_request(
+            &mut stdin,
+            &json!({
+                "jsonrpc":"2.0","id":request_id,"method":"tools/call",
+                "params":{"name":"recall","arguments":{"scope":"project:mcp","query":"persistent session atlas alpha token","limit":10}}
+            }),
+        );
+        let recalled = read_response(&mut stdout);
+        let recalled_rows: Value =
+            serde_json::from_str(recalled["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(recalled_rows[0]["memory"]["id"], first_memory_id);
+        assert_eq!(recalled_rows[0]["match_reason"], "memory_exact_phrase");
+    }
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"list_memories","arguments":{"scope":"project:mcp","limit":10}}
+        }),
+    );
+    let listed = read_response(&mut stdout);
+    let listed_rows: Value =
+        serde_json::from_str(listed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(listed_rows.as_array().unwrap().len(), 2);
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":8,"method":"tools/call",
+            "params":{"name":"forget","arguments":{"scope":"project:mcp","id":first_memory_id}}
+        }),
+    );
+    let forgotten = read_response(&mut stdout);
+    assert_eq!(
+        forgotten["result"]["content"][0]["text"],
+        "{\"forgotten\":true}"
+    );
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":9,"method":"tools/call",
+            "params":{"name":"recall","arguments":{"scope":"project:mcp","query":"persistent session atlas alpha token","limit":10}}
+        }),
+    );
+    let after_forget = read_response(&mut stdout);
+    let after_forget_rows: Value = serde_json::from_str(
+        after_forget["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        after_forget_rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["memory"]["id"] != first_memory_id)
+    );
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":10,"method":"tools/call",
+            "params":{"name":"remember_batch","arguments":{"memories":[
+                {"scope":"project:mcp","kind":"source","content":"rollback atomic marker first","source_uri":"mcp://rollback"},
+                {"scope":"project:mcp","kind":"derived","content":"rollback atomic marker second","source_id":999}
+            ]}}
+        }),
+    );
+    let failed_batch = read_response(&mut stdout);
+    assert_eq!(failed_batch["result"]["isError"], true);
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":11,"method":"tools/call",
+            "params":{"name":"recall","arguments":{"scope":"project:mcp","query":"rollback atomic marker","limit":10}}
+        }),
+    );
+    let rolled_back = read_response(&mut stdout);
+    let rolled_back_rows: Value = serde_json::from_str(
+        rolled_back["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(rolled_back_rows.as_array().unwrap().is_empty());
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":12,"method":"tools/call",
+            "params":{"name":"recall","arguments":{"scope":"project:mcp","query":"!!!","limit":10}}
+        }),
+    );
+    let no_tokens = read_response(&mut stdout);
+    assert_eq!(no_tokens["result"]["isError"], false);
+    let no_tokens_rows: Value =
+        serde_json::from_str(no_tokens["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(no_tokens_rows.as_array().unwrap().is_empty());
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":13,"method":"tools/call",
+            "params":{"name":"index_repository","arguments":{"repo_path":repo}}
+        }),
+    );
+    let indexed = read_response(&mut stdout);
+    assert_eq!(indexed["result"]["isError"], false);
+    let indexed_report: Value =
+        serde_json::from_str(indexed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(indexed_report["complete"], true);
+
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn mcp_refreshed_file_marker() {}\n",
+    )
+    .unwrap();
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":14,"method":"tools/call",
+            "params":{"name":"refresh_indexed_file","arguments":{"repo_path":repo,"path":"src/lib.rs"}}
+        }),
+    );
+    let refreshed = read_response(&mut stdout);
+    assert_eq!(refreshed["result"]["isError"], false);
+    let refresh_report: Value =
+        serde_json::from_str(refreshed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(refresh_report["operation"], "updated");
+    assert_eq!(refresh_report["catalog_complete"], false);
+    assert_eq!(refresh_report["reconciliation_required"], true);
+
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":15,"method":"tools/call",
+            "params":{"name":"search_code","arguments":{"repo_path":repo,"query":"mcp_refreshed_file_marker","limit":5}}
+        }),
+    );
+    let refreshed_search = read_response(&mut stdout);
+    let refreshed_results: Value = serde_json::from_str(
+        refreshed_search["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(refreshed_results["results"][0]["freshness"], "fresh");
+
     drop(stdin);
     assert!(child.wait().unwrap().success());
 }

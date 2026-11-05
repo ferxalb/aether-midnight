@@ -70,6 +70,19 @@ pub struct IndexReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FileRefreshReport {
+    pub repo_id: String,
+    pub worktree_id: String,
+    pub path: String,
+    pub operation: String,
+    pub generation: u64,
+    pub catalog_complete: bool,
+    pub reconciliation_required: bool,
+    pub reason: Option<String>,
+    pub elapsed_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct IndexStatus {
     pub repo_id: String,
     pub worktree_id: String,
@@ -298,6 +311,303 @@ pub fn index_repository(
         cancellation,
         None,
     )
+}
+
+/// Refresh one explicit repository-relative path without walking the repository.
+/// The path is checked against current ignore/security rules. This updates a known file or
+/// removes it when it is missing or no longer eligible, then marks the catalog partial until
+/// `index_repository` performs full reconciliation.
+pub fn refresh_indexed_file(
+    db_path: &Path,
+    root: &Path,
+    relative_path: &str,
+    cancellation: &AtomicBool,
+) -> Result<FileRefreshReport> {
+    let started = Instant::now();
+    let scope = repo_scope(root)?;
+    let requested_relative_path = safe_relative_path(relative_path)?;
+    if Path::new(&requested_relative_path).components().count() > 128 {
+        bail!("repository-relative path exceeds the 128 component index limit");
+    }
+    let mut relative_path = requested_relative_path.clone();
+    let requested_relative = Path::new(&requested_relative_path);
+    let _index_lock = acquire_index_lock(db_path, &scope)?;
+    let mut conn = open_db(db_path)?;
+    let status: Option<i64> = conn
+        .query_row(
+            "SELECT generation FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
+            params![scope.repo_id, scope.worktree_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(previous_generation) = status else {
+        bail!("repository has no index yet; run index_repository before refreshing a file");
+    };
+    let generation = (previous_generation as u64).saturating_add(1);
+    if cancellation.load(Ordering::Relaxed) {
+        bail!("file refresh cancelled before reading the target");
+    }
+
+    let target = scope.root.join(requested_relative);
+    let mut target_metadata = None;
+    let eligibility_reason = if is_secret_path(requested_relative) {
+        Some("credential_or_key")
+    } else if is_vcs_metadata_path(requested_relative) {
+        Some("version_control_metadata")
+    } else if default_generated_path(requested_relative) {
+        Some("generated_or_vendor_default")
+    } else {
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                if metadata.len() > MAX_FILE_BYTES {
+                    Some("oversized")
+                } else if has_symlink_component(&scope.root, requested_relative)? {
+                    Some("missing_or_unsafe_file")
+                } else {
+                    match target.canonicalize() {
+                        Ok(canonical) if canonical.starts_with(&scope.root) => {
+                            let canonical_relative = canonical
+                                .strip_prefix(&scope.root)?
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            let canonical_path = Path::new(&canonical_relative);
+                            if is_secret_path(canonical_path) {
+                                Some("credential_or_key")
+                            } else if is_vcs_metadata_path(canonical_path) {
+                                Some("version_control_metadata")
+                            } else if default_generated_path(canonical_path) {
+                                Some("generated_or_vendor_default")
+                            } else {
+                                relative_path = canonical_relative;
+                                target_metadata = Some(metadata);
+                                match target_is_eligible(&scope.root, Path::new(&relative_path))? {
+                                    Ok(true) => None,
+                                    Ok(false) | Err(_) => {
+                                        Some("ignored_or_unreadable_ignore_rules")
+                                    }
+                                }
+                            }
+                        }
+                        _ => Some("missing_or_unsafe_file"),
+                    }
+                }
+            }
+            _ => Some("missing_or_unsafe_file"),
+        }
+    };
+
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND rel_path=?3",
+            params![scope.repo_id, scope.worktree_id, relative_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let prepared = if eligibility_reason.is_none() {
+        let metadata = target_metadata.expect("eligible target metadata was recorded");
+        if metadata.len() > MAX_FILE_BYTES {
+            None
+        } else {
+            let job = IndexJob {
+                sequence: 0,
+                root: scope.root.clone(),
+                rel_path: relative_path.clone(),
+                size: metadata.len(),
+                modified_ns: modified_ns(&metadata),
+                previous_hash: None,
+                previous_parse_error: false,
+                is_new: existing.is_none(),
+                language: language_for(&relative_path),
+                verify_hashes: true,
+                reserved_bytes: (metadata.len() as usize).saturating_mul(3),
+            };
+            let mut parser_cache = ParserCache::default();
+            Some(prepare_file(job, cancellation, &mut parser_cache, &None))
+        }
+    } else {
+        None
+    };
+
+    if cancellation.load(Ordering::Relaxed)
+        || matches!(
+            prepared.as_ref().map(|file| &file.kind),
+            Some(PreparedKind::Cancelled)
+        )
+    {
+        bail!("file refresh cancelled while reading the target");
+    }
+
+    let (operation, reason) = match prepared.as_ref().map(|file| &file.kind) {
+        Some(PreparedKind::Changed(_)) => ("updated", None),
+        Some(PreparedKind::Unchanged { .. }) => ("unchanged", None),
+        Some(PreparedKind::Skipped(reason)) => ("removed", Some((*reason).to_string())),
+        Some(PreparedKind::Cancelled) => unreachable!("cancellation handled above"),
+        None if eligibility_reason.is_some() => (
+            if existing.is_some() {
+                "removed"
+            } else {
+                "skipped"
+            },
+            eligibility_reason.map(str::to_string),
+        ),
+        None => (
+            if existing.is_some() {
+                "removed"
+            } else {
+                "skipped"
+            },
+            Some("not_a_regular_indexable_file".to_string()),
+        ),
+    };
+
+    let tx = conn.transaction()?;
+    match prepared {
+        Some(prepared) => match prepared.kind {
+            PreparedKind::Changed(file) => refresh_changed_file(&tx, &scope, generation, file)?,
+            PreparedKind::Unchanged { .. } => {
+                tx.execute(
+                    "UPDATE code_files SET size_bytes=?4,modified_ns=?5,indexed_generation=?6 WHERE repo_id=?1 AND worktree_id=?2 AND rel_path=?3",
+                    params![
+                        scope.repo_id,
+                        scope.worktree_id,
+                        relative_path,
+                        prepared.size as i64,
+                        prepared.modified_ns,
+                        generation as i64
+                    ],
+                )?;
+            }
+            PreparedKind::Skipped(_) => {
+                if let Some(id) = existing {
+                    tx.execute("DELETE FROM code_fts WHERE rowid=?1", [id])?;
+                    tx.execute("DELETE FROM code_files WHERE id=?1", [id])?;
+                }
+            }
+            PreparedKind::Cancelled => unreachable!("cancellation handled above"),
+        },
+        None => {
+            if let Some(id) = existing {
+                tx.execute("DELETE FROM code_fts WHERE rowid=?1", [id])?;
+                tx.execute("DELETE FROM code_files WHERE id=?1", [id])?;
+            }
+        }
+    }
+    let now = now_utc();
+    tx.execute(
+        "UPDATE repositories SET generation=?3,is_complete=0,structural_complete=0,
+         last_index_started=?4,last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
+        params![scope.repo_id, scope.worktree_id, generation as i64, now],
+    )?;
+    tx.commit()?;
+
+    Ok(FileRefreshReport {
+        repo_id: scope.repo_id,
+        worktree_id: scope.worktree_id,
+        path: relative_path,
+        operation: operation.to_string(),
+        generation,
+        catalog_complete: false,
+        reconciliation_required: true,
+        reason,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+fn target_is_eligible(root: &Path, relative: &Path) -> Result<std::result::Result<bool, String>> {
+    let aetherignore = root.join(".aetherignore");
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false)
+        .parents(false)
+        .current_dir(root)
+        .follow_links(false)
+        .max_depth(Some(128));
+    if valid_aetherignore(&aetherignore, root)
+        && let Some(error) = builder.add_ignore(&aetherignore)
+    {
+        return Ok(Err(error.to_string()));
+    }
+    let mut matchers = builder.build_matchers();
+    let Some(mut matcher) = matchers.pop() else {
+        bail!("failed to construct repository ignore matcher");
+    };
+    let (matched, error) = matcher.matched_with_errors(relative, false);
+    if let Some(error) = error {
+        return Ok(Err(error.to_string()));
+    }
+    Ok(Ok(!matched.is_ignore()))
+}
+
+fn has_symlink_component(root: &Path, relative: &Path) -> Result<bool> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
+}
+
+fn refresh_changed_file(
+    tx: &rusqlite::Transaction<'_>,
+    scope: &RepoScope,
+    generation: u64,
+    file: PendingFile,
+) -> Result<()> {
+    let file_id: i64 = tx
+        .prepare_cached(
+            "INSERT INTO code_files(repo_id,worktree_id,rel_path,content_hash,language,size_bytes,modified_ns,indexed_generation,parse_error)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(repo_id,worktree_id,rel_path) DO UPDATE SET content_hash=excluded.content_hash,
+               language=excluded.language,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,
+               indexed_generation=excluded.indexed_generation,parse_error=excluded.parse_error
+             RETURNING id",
+        )?
+        .query_row(
+            params![
+                scope.repo_id,
+                scope.worktree_id,
+                file.rel_path,
+                file.hash,
+                file.language,
+                file.size as i64,
+                file.modified_ns,
+                generation as i64,
+                file.parse_error
+            ],
+            |row| row.get(0),
+        )?;
+    let mut searchable = file.text;
+    if !file.identifier_terms.is_empty() {
+        searchable.push('\n');
+        searchable.push_str(&file.identifier_terms);
+    }
+    SqliteFtsIndex.replace(tx, file_id, &searchable)?;
+    tx.execute("DELETE FROM code_symbols WHERE file_id=?1", [file_id])?;
+    let mut symbol_stmt = tx.prepare_cached(
+        "INSERT INTO code_symbols(file_id,name,kind,line_start,line_end,byte_start,byte_end)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+    )?;
+    for symbol in file.symbols {
+        symbol_stmt.execute(params![
+            file_id,
+            symbol.name,
+            symbol.kind,
+            symbol.line_start,
+            symbol.line_end,
+            symbol.byte_start as i64,
+            symbol.byte_end as i64
+        ])?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2322,7 +2632,8 @@ fn safe_relative_path(input: &str) -> Result<String> {
     if input.len() > MAX_RELATIVE_PATH_BYTES {
         bail!("repository-relative path exceeds 4096 bytes");
     }
-    let path = Path::new(input);
+    let normalized = input.replace('\\', "/");
+    let path = Path::new(&normalized);
     if path.is_absolute()
         || path
             .components()
@@ -2330,7 +2641,7 @@ fn safe_relative_path(input: &str) -> Result<String> {
     {
         bail!("path must be repository-relative and cannot contain traversal components");
     }
-    Ok(path.to_string_lossy().replace('\\', "/"))
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn excerpt(text: &str, query: &str) -> (u32, u32, String) {
@@ -2826,6 +3137,24 @@ pub fn peak_rss_bytes() -> Option<u64> {
         {
             Some(value.saturating_mul(1024))
         }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Return process user plus system CPU time in seconds where the platform exposes it.
+pub fn process_cpu_seconds() -> Option<f64> {
+    #[cfg(unix)]
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
+            return None;
+        }
+        let timeval_seconds =
+            |value: libc::timeval| value.tv_sec as f64 + value.tv_usec as f64 / 1_000_000.0;
+        Some(timeval_seconds(usage.ru_utime) + timeval_seconds(usage.ru_stime))
     }
     #[cfg(not(unix))]
     {

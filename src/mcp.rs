@@ -14,6 +14,7 @@ pub fn run_stdio(db_path: &Path, cancellation: Arc<AtomicBool>) -> Result<()> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut stdout = std::io::stdout().lock();
+    let mut memory_session = None;
     loop {
         let Some((bytes, too_long)) = read_bounded_line(&mut input, MAX_MCP_MESSAGE_BYTES)? else {
             break;
@@ -69,7 +70,7 @@ pub fn run_stdio(db_path: &Path, cancellation: Arc<AtomicBool>) -> Result<()> {
             "initialize" => initialize(id.clone().unwrap(), &params),
             "ping" => ok_response(id.clone().unwrap(), json!({})),
             "tools/list" => ok_response(id.clone().unwrap(), json!({"tools":tools()})),
-            "tools/call" => match call_tool(db_path, &params, &cancellation) {
+            "tools/call" => match call_tool(db_path, &mut memory_session, &params, &cancellation) {
                 Ok(result) => ok_response(
                     id.clone().unwrap(),
                     json!({
@@ -150,6 +151,11 @@ fn tools() -> Vec<Value> {
             json!({"type":"object","properties":{"repo_path":{"type":"string"},"include_generated":{"type":"boolean"},"verify_hashes":{"type":"boolean"}},"required":["repo_path"]}),
         ),
         tool(
+            "refresh_indexed_file",
+            "Refresh one explicit repository-relative file without walking the repository. Current ignore/security rules are applied; the catalog remains partial until index_repository reconciles all changes.",
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"}},"required":["repo_path","path"]}),
+        ),
+        tool(
             "search_code",
             "Search exact paths, extracted symbols, whole lexical tokens, and identifier-boundary fragments. Arbitrary substrings inside a token are unsupported. Returns current-source evidence and packs snippets within a deterministic estimated-token budget.",
             json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192}},"required":["repo_path","query"]}),
@@ -180,6 +186,11 @@ fn tools() -> Vec<Value> {
             json!({"type":"object","properties":{"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["scope","kind","content"]}),
         ),
         tool(
+            "remember_batch",
+            "Atomically persist 1 to 512 explicit source or derived memories. A failed record rolls back the entire batch; larger imports should be split into caller-managed batches.",
+            json!({"type":"object","properties":{"memories":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["scope","kind","content"]}}},"required":["memories"]}),
+        ),
+        tool(
             "recall",
             "Search active memories in exactly one namespace and time; repository code is never included.",
             json!({"type":"object","properties":{"scope":{"type":"string"},"query":{"type":"string"},"at":{"type":"string"},"limit":{"type":"integer"}},"required":["scope","query"]}),
@@ -201,7 +212,12 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":input_schema})
 }
 
-fn call_tool(db_path: &Path, params: &Value, cancellation: &AtomicBool) -> Result<Value> {
+fn call_tool(
+    db_path: &Path,
+    memory_session: &mut Option<memory::MemorySession>,
+    params: &Value,
+    cancellation: &AtomicBool,
+) -> Result<Value> {
     let name = required_str(params, "name")?;
     let args = params
         .get("arguments")
@@ -224,6 +240,16 @@ fn call_tool(db_path: &Path, params: &Value, cancellation: &AtomicBool) -> Resul
                 &repo,
                 include_generated,
                 verify_hashes,
+                cancellation,
+            )?;
+            Ok(serde_json::to_value(result)?)
+        }
+        "refresh_indexed_file" => {
+            let repo = path_arg(&args, "repo_path")?;
+            let result = code::refresh_indexed_file(
+                db_path,
+                &repo,
+                required_str(&args, "path")?,
                 cancellation,
             )?;
             Ok(serde_json::to_value(result)?)
@@ -271,8 +297,7 @@ fn call_tool(db_path: &Path, params: &Value, cancellation: &AtomicBool) -> Resul
             Ok(serde_json::to_value(code::index_status(db_path, &repo)?)?)
         }
         "remember" => {
-            let result = memory::remember(
-                db_path,
+            let result = ensure_memory_session(db_path, memory_session)?.remember(
                 required_str(&args, "scope")?,
                 required_str(&args, "kind")?,
                 required_str(&args, "content")?,
@@ -285,23 +310,48 @@ fn call_tool(db_path: &Path, params: &Value, cancellation: &AtomicBool) -> Resul
             )?;
             Ok(serde_json::to_value(result)?)
         }
-        "recall" => Ok(serde_json::to_value(memory::recall(
-            db_path,
-            required_str(&args, "scope")?,
-            required_str(&args, "query")?,
-            optional_str(&args, "at"),
-            args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
-        )?)?),
-        "list_memories" => Ok(serde_json::to_value(memory::list_memories(
-            db_path,
-            required_str(&args, "scope")?,
-            args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
-        )?)?),
+        "remember_batch" => {
+            let inputs: Vec<memory::MemoryInput> = serde_json::from_value(
+                args.get("memories")
+                    .cloned()
+                    .context("missing memories array")?,
+            )?;
+            let result = ensure_memory_session(db_path, memory_session)?.remember_batch(&inputs)?;
+            Ok(serde_json::to_value(result)?)
+        }
+        "recall" => Ok(serde_json::to_value(
+            ensure_memory_session(db_path, memory_session)?.recall(
+                required_str(&args, "scope")?,
+                required_str(&args, "query")?,
+                optional_str(&args, "at"),
+                args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
+            )?,
+        )?),
+        "list_memories" => Ok(serde_json::to_value(
+            ensure_memory_session(db_path, memory_session)?.list_memories(
+                required_str(&args, "scope")?,
+                args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
+            )?,
+        )?),
         "forget" => Ok(
-            json!({"forgotten":memory::forget(db_path,required_str(&args,"scope")?,args.get("id").and_then(Value::as_i64).context("missing integer id")?)?}),
+            json!({"forgotten":ensure_memory_session(db_path,memory_session)?.forget(
+            required_str(&args,"scope")?,args.get("id").and_then(Value::as_i64).context("missing integer id")?
+        )?}),
         ),
         _ => bail!("unknown tool {name}"),
     }
+}
+
+fn ensure_memory_session<'a>(
+    db_path: &Path,
+    session: &'a mut Option<memory::MemorySession>,
+) -> Result<&'a mut memory::MemorySession> {
+    if session.is_none() {
+        *session = Some(memory::MemorySession::open(db_path)?);
+    }
+    session
+        .as_mut()
+        .context("memory database session failed to initialize")
 }
 
 fn path_arg(args: &Value, key: &str) -> Result<PathBuf> {

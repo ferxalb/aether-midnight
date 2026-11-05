@@ -207,7 +207,7 @@ pub fn run(
     let heldout_quality =
         retrieval_suite_quality(&heldout_db, &heldout_repo, &heldout_suite.queries)?;
     let rg = ripgrep_baseline(&repo, &manifest.queries)?;
-    let memory_scaling = memory_scaling(base.path())?;
+    let memory_scaling = memory_scaling(base.path(), &[1_000, 10_000, 100_000])?;
     let incremental = incremental_samples(&primary_db, &repo, 30)?;
     let partial_context = partial_context_during_index(base.path(), &repo, cold_query, 30)?;
     let stress = stress_cycles_run(base.path(), stress_cycles.max(1))?;
@@ -540,16 +540,25 @@ fn sqlite_file_bytes(path: &Path) -> u64 {
     .sum()
 }
 
-fn memory_scaling(base: &Path) -> Result<Value> {
+pub fn run_memory_scaling(sizes: &[usize]) -> Result<Value> {
+    if sizes.is_empty() || sizes.iter().any(|size| !(4..=100_000).contains(size)) {
+        bail!("memory benchmark sizes must be between 4 and 100000 records");
+    }
+    let base = TempDir::new().context("create isolated memory benchmark directory")?;
+    memory_scaling(base.path(), sizes)
+}
+
+fn memory_scaling(base: &Path, requested_sizes: &[usize]) -> Result<Value> {
     let scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
-    let mut sizes = Vec::new();
-    for target in [1_000usize, 10_000, 100_000] {
+    let mut workloads = Vec::new();
+    for target in requested_sizes.iter().copied() {
+        let workload_cpu_started = code::process_cpu_seconds();
         let db_path = base.join(format!("memory-{target}.sqlite3"));
         let mut source_ids = std::collections::HashMap::new();
         let setup_started = Instant::now();
+        let mut memory_session = memory::MemorySession::open(&db_path)?;
         for scope in scopes {
-            let record = memory::remember(
-                &db_path,
+            let record = memory_session.remember(
                 scope,
                 "source",
                 "benchmark namespace anchor",
@@ -563,6 +572,8 @@ fn memory_scaling(base: &Path) -> Result<Value> {
             source_ids.insert(scope, record.id);
         }
         let mut quality = Vec::new();
+        let mut batch = Vec::with_capacity(memory::MAX_MEMORY_BATCH_RECORDS);
+        let mut batch_labels = Vec::with_capacity(memory::MAX_MEMORY_BATCH_RECORDS);
         for index in 0..(target - scopes.len()) {
             let scope = scopes[index % scopes.len()];
             let (kind, token) = if index < 25 {
@@ -575,23 +586,34 @@ fn memory_scaling(base: &Path) -> Result<Value> {
                 ("derived", format!("memoryload{index:06}"))
             };
             let source_id = source_ids[scope];
-            let record = memory::remember(
-                &db_path,
-                scope,
-                kind,
-                &format!("{token} namespace workload record {index}"),
-                Some("benchmark://load"),
-                (kind == "derived").then_some(source_id),
-                None,
-                None,
-                None,
-                None,
-            )?;
-            if index < 50 {
-                quality.push((scope.to_string(), token, record.id, kind.to_string()));
+            batch.push(memory::MemoryInput {
+                scope: scope.to_string(),
+                kind: kind.to_string(),
+                content: format!("{token} namespace workload record {index}"),
+                source_uri: Some("benchmark://load".into()),
+                source_id: (kind == "derived").then_some(source_id),
+                supersedes_id: None,
+                observed_at: None,
+                valid_from: None,
+                valid_to: None,
+            });
+            batch_labels.push((scope.to_string(), token, kind.to_string(), index < 50));
+            if batch.len() == memory::MAX_MEMORY_BATCH_RECORDS || index + 1 == target - scopes.len()
+            {
+                let records = memory_session.remember_batch(&batch)?;
+                for (record, (scope, token, kind, is_quality_record)) in
+                    records.into_iter().zip(batch_labels.drain(..))
+                {
+                    if is_quality_record {
+                        quality.push((scope, token, record.id, kind));
+                    }
+                }
+                batch.clear();
             }
         }
         let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
+        let recall_query_plan =
+            memory_session.recall_query_plan(scopes[0], "namespace workload record 0")?;
         code::wal_checkpoint(&db_path)?;
         let db_bytes_before_ops = code::database_bytes(&db_path);
 
@@ -693,6 +715,63 @@ fn memory_scaling(base: &Path) -> Result<Value> {
             recall_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         }
 
+        let mut persistent_store_ms = Vec::new();
+        for index in 0..30 {
+            let start = Instant::now();
+            memory_session.remember(
+                scopes[index % 4],
+                "source",
+                &format!("persistent store marker {target} {index}"),
+                Some("benchmark://persistent-store"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            persistent_store_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut persistent_list_ms = Vec::new();
+        for _ in 0..30 {
+            let start = Instant::now();
+            if memory_session.list_memories(scopes[0], 10)?.is_empty() {
+                bail!("persistent memory list returned no records at size {target}");
+            }
+            persistent_list_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut persistent_recall_ms = Vec::new();
+        for index in 0..100 {
+            let start = Instant::now();
+            let result = memory_session.recall(scopes[index % 4], "namespace", None, 10)?;
+            if result.is_empty() {
+                bail!("persistent memory recall returned no results at size {target}");
+            }
+            persistent_recall_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut persistent_delete_ids = Vec::new();
+        for index in 0..30 {
+            let record = memory_session.remember(
+                scopes[index % 4],
+                "source",
+                &format!("persistent delete marker {target} {index}"),
+                Some("benchmark://persistent-delete"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            persistent_delete_ids.push((scopes[index % 4], record.id));
+        }
+        let mut persistent_delete_ms = Vec::new();
+        for (scope, id) in persistent_delete_ids {
+            let start = Instant::now();
+            if !memory_session.forget(scope, id)? {
+                bail!("persistent memory delete did not delete id {id}");
+            }
+            persistent_delete_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
         let mut quality_scores = [0.0f64; 3];
         let mut mrr = 0.0;
         let mut quality_hits = 0usize;
@@ -772,29 +851,45 @@ fn memory_scaling(base: &Path) -> Result<Value> {
                 "normalized process peak RSS {peak_rss} bytes is below sampled RSS {max_sampled_rss} bytes"
             );
         }
-        sizes.push(json!({"memory_count":target,"namespace_count":scopes.len(),"namespaces":scopes,
-            "setup_ms":setup_ms,"setup_sample_count":1,"setup_status":"anecdotal","records_loaded":target,"db_bytes_before_measured_ops":db_bytes_before_ops,
+        let persistent_session = json!({
+            "store": distribution(&persistent_store_ms),
+            "list": distribution(&persistent_list_ms),
+            "delete": distribution(&persistent_delete_ms),
+            "recall": distribution(&persistent_recall_ms)
+        });
+        let retrieval_quality = json!({"labeled_query_count":quality.len(),"recall_at_1":quality_scores[0]/quality.len().max(1) as f64,
+            "recall_at_5":quality_scores[1]/quality.len().max(1) as f64,"recall_at_10":quality_scores[2]/quality.len().max(1) as f64,
+            "mrr":mrr/quality.len().max(1) as f64,"found_expected_record_count":quality_hits,"cross_namespace_checks":leakage_checks,
+            "by_kind":{"source":{"query_count":source_count,"recall_at_1":quality_source_scores[0]/source_count.max(1) as f64,
+                "recall_at_5":quality_source_scores[1]/source_count.max(1) as f64,"recall_at_10":quality_source_scores[2]/source_count.max(1) as f64,"mrr":source_mrr/source_count.max(1) as f64},
+                "derived":{"query_count":derived_count,"recall_at_1":quality_derived_scores[0]/derived_count.max(1) as f64,
+                "recall_at_5":quality_derived_scores[1]/derived_count.max(1) as f64,"recall_at_10":quality_derived_scores[2]/derived_count.max(1) as f64,"mrr":derived_mrr/derived_count.max(1) as f64}},
+            "queries":quality_rows,"cross_namespace_leaks":0,"cross_namespace_isolation":"pass","cross_namespace_checks_raw":leakage_rows});
+        let workload_cpu_seconds = workload_cpu_started
+            .zip(code::process_cpu_seconds())
+            .map(|(started, finished)| (finished - started).max(0.0));
+        workloads.push(json!({"memory_count":target,"namespace_count":scopes.len(),"namespaces":scopes,
+            "setup_ms":setup_ms,"setup_sample_count":1,"setup_status":"anecdotal","setup_connection_mode":"one warm SQLite session; atomic batches of at most 512 records",
+            "setup_records_per_second":(target.saturating_sub(scopes.len())) as f64/(setup_ms/1000.0).max(f64::EPSILON),
+            "records_loaded":target,"db_bytes_before_measured_ops":db_bytes_before_ops,
             "db_bytes_after_measured_ops":db_bytes_after_ops,"db_growth_bytes_during_operations":db_bytes_after_ops.saturating_sub(db_bytes_before_ops),
             "database_bytes_during_30_store_samples":distribution_u64(&database_size_during_store),
             "database_growth_bytes_during_30_store_samples":distribution_u64(&database_size_during_store.iter()
                 .map(|bytes|bytes.saturating_sub(db_bytes_before_ops)).collect::<Vec<_>>()),
             "current_rss_during_30_store_samples_bytes":distribution_u64(&rss_during_store),
             "store":distribution(&store_ms),"update_by_supersession":distribution(&update_ms),"delete":distribution(&delete_ms),"recall":distribution(&recall_ms),
+            "persistent_session":persistent_session,
+            "recall_query_plan":recall_query_plan,
+            "process_cpu_seconds_for_workload":workload_cpu_seconds,
+            "process_cpu_seconds_per_stored_record":workload_cpu_seconds.map(|seconds|seconds/target.max(1) as f64),
             "current_rss_bytes_after_workload":current_rss,"current_rss_after_workload_status":"anecdotal; one observation",
             "process_peak_rss_bytes":peak_rss,"process_peak_rss_status":"max of normalized process getrusage high-water and sampled current RSS; process-wide cumulative across sizes",
             "normalized_ru_maxrss_bytes":normalized_ru_maxrss_bytes,
             "max_sampled_rss_bytes":max_sampled_rss,"peak_rss_ge_every_sampled_rss":true,
-            "retrieval_quality":{"labeled_query_count":quality.len(),"recall_at_1":quality_scores[0]/quality.len().max(1) as f64,
-                "recall_at_5":quality_scores[1]/quality.len().max(1) as f64,"recall_at_10":quality_scores[2]/quality.len().max(1) as f64,
-                "mrr":mrr/quality.len().max(1) as f64,"found_expected_record_count":quality_hits,"cross_namespace_checks":leakage_checks,
-                "by_kind":{"source":{"query_count":source_count,"recall_at_1":quality_source_scores[0]/source_count.max(1) as f64,
-                    "recall_at_5":quality_source_scores[1]/source_count.max(1) as f64,"recall_at_10":quality_source_scores[2]/source_count.max(1) as f64,"mrr":source_mrr/source_count.max(1) as f64},
-                    "derived":{"query_count":derived_count,"recall_at_1":quality_derived_scores[0]/derived_count.max(1) as f64,
-                    "recall_at_5":quality_derived_scores[1]/derived_count.max(1) as f64,"recall_at_10":quality_derived_scores[2]/derived_count.max(1) as f64,"mrr":derived_mrr/derived_count.max(1) as f64}},
-                "queries":quality_rows,"cross_namespace_leaks":0,"cross_namespace_isolation":"pass","cross_namespace_checks_raw":leakage_rows}}));
+            "retrieval_quality":retrieval_quality}));
     }
     Ok(
-        json!({"memory_records_include_source_and_derived_across_four_namespaces":true,"workloads":sizes,
+        json!({"memory_records_include_source_and_derived_across_four_namespaces":true,"workloads":workloads,
         "rss_method":"current RSS sampled with ps; getrusage ru_maxrss normalized to bytes; reported peak is max(getrusage peak, every sampled RSS) and asserted against all samples; peak is cumulative across sizes"}),
     )
 }
