@@ -192,8 +192,8 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "recall",
-            "Search active memories in exactly one namespace and time; repository code is never included.",
-            json!({"type":"object","properties":{"scope":{"type":"string"},"query":{"type":"string"},"at":{"type":"string"},"limit":{"type":"integer"}},"required":["scope","query"]}),
+            "Search active memories in exactly one namespace and time; repository code is never included. Results carry candidate_coverage: complete, exact_top_k (exact under the documented ordering), bm25_top_k (bounded window for queries with more than six informative terms), or recency_window (only when broad_terms is recent).",
+            json!({"type":"object","properties":{"scope":{"type":"string"},"query":{"type":"string"},"at":{"type":"string"},"limit":{"type":"integer"},"broad_terms":{"type":"string","enum":["exact","recent"],"description":"Default exact BM25 ranking. recent opts a single query term found in at least half of the namespace into a fast newest-first window that can omit older evidence."}},"required":["scope","query"]}),
         ),
         tool(
             "list_memories",
@@ -320,11 +320,16 @@ fn call_tool(
             Ok(serde_json::to_value(result)?)
         }
         "recall" => Ok(serde_json::to_value(
-            ensure_memory_session(db_path, memory_session)?.recall(
+            ensure_memory_session(db_path, memory_session)?.recall_with_policy(
                 required_str(&args, "scope")?,
                 required_str(&args, "query")?,
                 optional_str(&args, "at"),
                 args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
+                match optional_str(&args, "broad_terms") {
+                    None | Some("exact") => memory::BroadTermPolicy::Exact,
+                    Some("recent") => memory::BroadTermPolicy::Recent,
+                    Some(other) => bail!("broad_terms must be exact or recent, not {other:?}"),
+                },
             )?,
         )?),
         "list_memories" => Ok(serde_json::to_value(

@@ -161,6 +161,15 @@ enum Commands {
         #[arg(long)]
         profile_recall: bool,
     },
+    /// Paired staged-vs-v0.3.1 recall measurement on a deterministic Zipf corpus.
+    BenchRetrieval {
+        #[arg(long, default_value_t = 100_000)]
+        size: usize,
+        #[arg(long, default_value_t = 1)]
+        namespace_count: usize,
+        #[arg(long, default_value_t = 100)]
+        samples: usize,
+    },
     #[command(hide = true)]
     FtsEval {
         #[arg(long)]
@@ -343,6 +352,17 @@ fn main() -> Result<()> {
                 &sizes,
                 profile_recall,
                 namespace_count,
+            )?)?;
+        }
+        Commands::BenchRetrieval {
+            size,
+            namespace_count,
+            samples,
+        } => {
+            print_json(&benchmark::run_retrieval_ab(
+                size,
+                namespace_count,
+                samples,
             )?)?;
         }
         Commands::FtsEval {

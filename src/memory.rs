@@ -94,6 +94,20 @@ impl RecallCandidateOrder {
     }
 }
 
+/// How a single query term found in at least half of a namespace is retrieved.
+///
+/// BM25 length and frequency normalization still orders such terms meaningfully (the frozen
+/// `common-status-single-token` case ranks the short status-focused record first), so `Exact`
+/// is the default. `Recent` is an explicit, bounded, observable shortcut: it skips ranking and
+/// returns the newest matches, labeled `recency_window`, and can omit older relevant evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadTermPolicy {
+    #[default]
+    Exact,
+    Recent,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateCoverage {
@@ -352,6 +366,48 @@ impl MemorySession {
         recall_on(&self.connection, scope, query, at, limit)
     }
 
+    /// Recall with an explicit policy for single terms that occur in most of a namespace.
+    pub(crate) fn recall_with_policy(
+        &self,
+        scope: &str,
+        query: &str,
+        at: Option<&str>,
+        limit: usize,
+        broad_terms: BroadTermPolicy,
+    ) -> Result<Vec<MemorySearchResult>> {
+        recall_on_profiled(
+            &self.connection,
+            scope,
+            query,
+            at,
+            limit,
+            None,
+            configured_candidate_order(),
+            broad_terms,
+        )
+    }
+
+    /// Unprofiled recall with an explicit candidate strategy, for paired A/B measurement.
+    pub(crate) fn recall_ordered(
+        &self,
+        scope: &str,
+        query: &str,
+        at: Option<&str>,
+        limit: usize,
+        candidate_order: RecallCandidateOrder,
+    ) -> Result<Vec<MemorySearchResult>> {
+        recall_on_profiled(
+            &self.connection,
+            scope,
+            query,
+            at,
+            limit,
+            None,
+            candidate_order,
+            BroadTermPolicy::Exact,
+        )
+    }
+
     pub(crate) fn recall_profiled_ordered(
         &self,
         scope: &str,
@@ -382,6 +438,7 @@ impl MemorySession {
             limit,
             Some(&mut profile),
             candidate_order,
+            BroadTermPolicy::Exact,
         )?;
         profile.result_count = results.len();
         let count_started = Instant::now();
@@ -712,6 +769,7 @@ fn recall_on(
         limit,
         None,
         configured_candidate_order(),
+        BroadTermPolicy::Exact,
     )
 }
 
@@ -738,6 +796,7 @@ fn recall_on_profiled(
     limit: usize,
     mut profile: Option<&mut MemoryRecallProfile>,
     candidate_order: RecallCandidateOrder,
+    broad_terms: BroadTermPolicy,
 ) -> Result<Vec<MemorySearchResult>> {
     let scanstatus_enabled = if profile.is_some() {
         sqlite_scanstatus_enabled(conn)
@@ -797,6 +856,7 @@ fn recall_on_profiled(
             &full_terms,
             &query_terms,
             limit.clamp(1, 100),
+            broad_terms,
             profile.as_deref_mut(),
         )?;
         finish_profile_total(
@@ -1066,11 +1126,30 @@ enum StageKind {
     Recency,
 }
 
-fn scoped_match(scope: &str, content_expr: &str) -> String {
-    format!(
-        "scope_token : \"{}\" AND content : ({content_expr})",
-        memory_scope_token(scope)
-    )
+/// Namespace sizes from the trigger-maintained counters: (this namespace, all namespaces).
+fn scope_sizes(conn: &Connection, scope: &str) -> Result<(usize, usize)> {
+    let (scope_active, total_active): (i64, i64) = conn
+        .prepare_cached(
+            "SELECT COALESCE((SELECT active FROM memory_scope_counts WHERE scope=?1),0),
+                    COALESCE((SELECT active FROM memory_scope_counts WHERE scope=''),0)",
+        )?
+        .query_row([scope], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok((scope_active.max(0) as usize, total_active.max(0) as usize))
+}
+
+/// Restrict the FTS expression to a namespace. When the namespace holds at least half of all
+/// memories the `scope_token` term prunes little but forces FTS5 to walk a posting list as long
+/// as the namespace, so the SQL `m.scope = ?` predicate alone enforces the boundary. The
+/// scope column has BM25 weight 0, so scores are identical either way.
+fn scoped_match(scope: &str, content_expr: &str, use_scope_term: bool) -> String {
+    if use_scope_term {
+        format!(
+            "scope_token : \"{}\" AND content : ({content_expr})",
+            memory_scope_token(scope)
+        )
+    } else {
+        format!("content : ({content_expr})")
+    }
 }
 
 fn all_terms_expr(terms: &[&str]) -> String {
@@ -1114,21 +1193,6 @@ fn at_least_expr(terms: &[&str], size: usize) -> String {
         .join(" OR ")
 }
 
-/// Linear-size expression for "at least two distinct terms" used beyond the staged limit.
-fn pair_chain_expr(terms: &[&str]) -> String {
-    (0..terms.len() - 1)
-        .map(|index| {
-            let rest = terms[index + 1..]
-                .iter()
-                .map(|term| format!("\"{term}\""))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            format!("(\"{}\" AND ({rest}))", terms[index])
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ")
-}
-
 fn count_matches_up_to(conn: &Connection, match_query: &str, cap: usize) -> Result<usize> {
     let count: i64 = conn
         .prepare_cached(
@@ -1140,14 +1204,18 @@ fn count_matches_up_to(conn: &Connection, match_query: &str, cap: usize) -> Resu
 
 /// A single term found in at least half of a namespace has no positive BM25 weight, so ranking
 /// every match only orders noise. Small namespaces are never classified this way.
-fn is_non_discriminative_term(conn: &Connection, scope: &str, term_match: &str) -> Result<bool> {
-    if count_matches_up_to(conn, term_match, BROAD_TERM_PROBE_MATCHES)? < BROAD_TERM_PROBE_MATCHES {
+fn is_non_discriminative_term(
+    conn: &Connection,
+    term_match: &str,
+    scope_active: usize,
+) -> Result<bool> {
+    if scope_active < BROAD_TERM_PROBE_MATCHES
+        || count_matches_up_to(conn, term_match, BROAD_TERM_PROBE_MATCHES)?
+            < BROAD_TERM_PROBE_MATCHES
+    {
         return Ok(false);
     }
-    let active: i64 = conn
-        .prepare_cached("SELECT count(*) FROM memories WHERE scope=?1 AND deleted_at IS NULL")?
-        .query_row([scope], |row| row.get(0))?;
-    let threshold = (active as usize).div_ceil(2).max(BROAD_TERM_PROBE_MATCHES);
+    let threshold = scope_active.div_ceil(2).max(BROAD_TERM_PROBE_MATCHES);
     Ok(count_matches_up_to(conn, term_match, threshold)? >= threshold)
 }
 
@@ -1293,25 +1361,34 @@ fn recall_staged(
     full_terms: &[String],
     query_terms: &[String],
     limit: usize,
+    broad_terms: BroadTermPolicy,
     mut profile: Option<&mut MemoryRecallProfile>,
 ) -> Result<Vec<MemorySearchResult>> {
     let phase = ProfileTimer::start(profile.as_deref_mut(), "fts_query_construction");
     let terms = query_terms.iter().map(String::as_str).collect::<Vec<_>>();
     let term_count = terms.len();
+    let (scope_active, total_active) = scope_sizes(conn, scope)?;
+    let use_scope_term = scope_active * 2 < total_active;
     let mut stages: Vec<(String, StageKind, usize)> = Vec::new();
     let mut bounded_window = false;
     let mut recency_stage = false;
     if full_terms.len() > 1 {
         let phrase = format!("\"{}\"", full_terms.join(" "));
         stages.push((
-            scoped_match(scope, &format!("{phrase} AND {}", all_terms_expr(&terms))),
+            scoped_match(
+                scope,
+                &format!("{phrase} AND {}", all_terms_expr(&terms)),
+                use_scope_term,
+            ),
             StageKind::Ranked,
             limit,
         ));
     }
     if term_count == 1 {
-        let term_match = scoped_match(scope, &all_terms_expr(&terms));
-        if is_non_discriminative_term(conn, scope, &term_match)? {
+        let term_match = scoped_match(scope, &all_terms_expr(&terms), use_scope_term);
+        if broad_terms == BroadTermPolicy::Recent
+            && is_non_discriminative_term(conn, &term_match, scope_active)?
+        {
             recency_stage = true;
             stages.push((term_match, StageKind::Recency, limit));
         } else {
@@ -1319,22 +1396,28 @@ fn recall_staged(
         }
     } else {
         stages.push((
-            scoped_match(scope, &all_terms_expr(&terms)),
+            scoped_match(scope, &all_terms_expr(&terms), use_scope_term),
             StageKind::Ranked,
             limit,
         ));
         if term_count <= MAX_STAGED_CLASS_TERMS {
             for size in (MIN_DISTINCT_TERM_MATCHES..term_count).rev() {
                 stages.push((
-                    scoped_match(scope, &at_least_expr(&terms, size)),
+                    scoped_match(scope, &at_least_expr(&terms, size), use_scope_term),
                     StageKind::Ranked,
                     limit,
                 ));
             }
         } else {
+            // Long queries keep the uniform-weight v0.3.1 expression over a bounded window.
             bounded_window = true;
+            let alternatives = terms
+                .iter()
+                .map(|term| format!("\"{term}\""))
+                .collect::<Vec<_>>()
+                .join(" OR ");
             stages.push((
-                scoped_match(scope, &pair_chain_expr(&terms)),
+                scoped_match(scope, &alternatives, use_scope_term),
                 StageKind::Ranked,
                 limit
                     .saturating_mul(MAX_RERANK_MULTIPLIER)

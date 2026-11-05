@@ -592,50 +592,102 @@ fn recall_is_invariant_to_insertion_order() {
 }
 
 #[test]
-fn non_discriminative_term_returns_newest_rows_and_still_finds_the_exact_phrase() {
+fn broad_single_term_is_exact_by_default_and_recency_window_only_when_requested() {
     let scope = "project:broad";
-    let mut inputs = (0..6_000)
-        .map(|index| input(scope, format!("status background entry {index:05}")))
-        .collect::<Vec<_>>();
-    inputs.insert(2_900, input(scope, "where is status"));
+    // Short, older, status-focused evidence amid thousands of longer boilerplate records that
+    // all contain the same term (mirrors the frozen `common-status-single-token` dev case).
+    let mut inputs = vec![
+        input(scope, "status report"),
+        input(scope, "where is status"),
+    ];
+    inputs.extend((0..5_000).map(|index| {
+        input(
+            scope,
+            format!("status background entry with extra boilerplate words {index:05}"),
+        )
+    }));
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("broad.sqlite3");
     let mut session = memory::MemorySession::open(&path).unwrap();
     let all_ids = insert_all(&mut session, &inputs);
+    let oracle = Oracle::new(load_corpus(&path));
 
-    // Single informative term present in every record: ranking would only order noise.
-    let newest = session.recall(scope, "status", None, 5).unwrap();
+    // Default: exact BM25 order. The short record about status ranks first, as in v0.3.1.
+    let exact = session.recall(scope, "status", None, 5).unwrap();
+    assert_eq!(exact[0].memory.content, "status report");
+    assert_eq!(exact[0].candidate_coverage, CandidateCoverage::ExactTopK);
+    assert_oracle_agreement(&session, &oracle, scope, "status", 5);
+
+    // Opt-in recent policy: newest rows, explicitly labeled, and it can omit older evidence.
+    let recent = session
+        .recall_with_policy(scope, "status", None, 5, memory::BroadTermPolicy::Recent)
+        .unwrap();
     assert_eq!(
-        ids(&newest),
+        ids(&recent),
         all_ids.iter().rev().take(5).copied().collect::<Vec<_>>()
     );
     assert!(
-        newest
+        recent
             .iter()
-            .all(|result| result.candidate_coverage == CandidateCoverage::RecencyWindow)
+            .all(|r| r.candidate_coverage == CandidateCoverage::RecencyWindow)
     );
+    assert!(recent.iter().all(|r| r.memory.content != "status report"));
 
-    // The exact-phrase record sits mid-history but must still be rank 1.
-    let phrase = session.recall(scope, "where is status", None, 5).unwrap();
+    // Even in recent mode the exact-phrase record is found; it sits ahead of the window.
+    let phrase = session
+        .recall_with_policy(
+            scope,
+            "where is status",
+            None,
+            5,
+            memory::BroadTermPolicy::Recent,
+        )
+        .unwrap();
     assert_eq!(phrase[0].memory.content, "where is status");
     assert_eq!(phrase[0].match_reason, "memory_exact_phrase");
-    assert_eq!(
-        phrase[0].candidate_coverage,
-        CandidateCoverage::RecencyWindow
-    );
-    assert_eq!(
-        ids(&phrase[1..]),
-        all_ids.iter().rev().take(4).copied().collect::<Vec<_>>()
-    );
 
     // Forgotten and not-yet-valid rows never appear in the recency window.
     session.forget(scope, *all_ids.last().unwrap()).unwrap();
-    let after_forget = session.recall(scope, "status", None, 3).unwrap();
+    let after_forget = session
+        .recall_with_policy(scope, "status", None, 3, memory::BroadTermPolicy::Recent)
+        .unwrap();
     assert_eq!(after_forget[0].memory.id, all_ids[all_ids.len() - 2]);
     let at_past = session
-        .recall(scope, "status", Some("2000-01-01T00:00:00Z"), 3)
+        .recall_with_policy(
+            scope,
+            "status",
+            Some("2000-01-01T00:00:00Z"),
+            3,
+            memory::BroadTermPolicy::Recent,
+        )
         .unwrap();
     assert_eq!(at_past.len(), 3);
+
+    // Small namespaces never use the shortcut, even if requested.
+    let small_scope = "project:small";
+    session
+        .remember(
+            small_scope,
+            "source",
+            "status report small",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let small = session
+        .recall_with_policy(
+            small_scope,
+            "status",
+            None,
+            3,
+            memory::BroadTermPolicy::Recent,
+        )
+        .unwrap();
+    assert_eq!(small[0].candidate_coverage, CandidateCoverage::Complete);
 }
 
 #[test]
@@ -1119,4 +1171,186 @@ fn independently_labeled_long_term_memory_cases_meet_quality_gates() {
     assert!(r5 / n >= 0.99, "R@5 {}", r5 / n);
     assert!(r10 / n >= 0.99, "R@10 {}", r10 / n);
     assert!(mrr / n >= 0.75, "MRR {}", mrr / n);
+}
+
+fn assert_scope_counts_match_rows(connection: &Connection) {
+    let mut expected: Vec<(String, i64)> = connection
+        .prepare("SELECT scope,count(*) FROM memories WHERE deleted_at IS NULL GROUP BY scope")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let total: i64 = expected.iter().map(|(_, count)| count).sum();
+    expected.push((String::new(), total));
+    expected.sort();
+    let mut stored: Vec<(String, i64)> = connection
+        .prepare("SELECT scope,active FROM memory_scope_counts WHERE active > 0 ORDER BY scope")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    stored.sort();
+    expected.retain(|(_, count)| *count > 0);
+    assert_eq!(stored, expected);
+}
+
+#[test]
+fn scope_counts_track_remember_forget_batch_and_hard_delete() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("counts.sqlite3");
+    let mut session = memory::MemorySession::open(&path).unwrap();
+    let inputs = (0..30)
+        .map(|i| {
+            input(
+                ["user:a", "user:b", "project:c"][i % 3],
+                format!("count row {i}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let ids = insert_all(&mut session, &inputs);
+    let single = session
+        .remember(
+            "user:a",
+            "source",
+            "single insert",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let raw = Connection::open(&path).unwrap();
+    assert_scope_counts_match_rows(&raw);
+    assert!(session.forget("user:a", single.id).unwrap());
+    assert!(!session.forget("user:a", single.id).unwrap());
+    assert!(session.forget("user:b", ids[1]).unwrap());
+    assert_scope_counts_match_rows(&raw);
+    raw.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    raw.execute("DELETE FROM memories WHERE id=?1", [ids[2]])
+        .unwrap();
+    raw.execute("DELETE FROM memories WHERE id=?1", [ids[1]])
+        .unwrap(); // already forgotten
+    assert_scope_counts_match_rows(&raw);
+    // A failing batch rolls back the counters together with the rows.
+    let mut bad = vec![input("user:a", "valid before failure")];
+    let mut invalid = input("user:a", "invalid link");
+    invalid.source_id = Some(9_999_999);
+    bad.push(invalid);
+    assert!(session.remember_batch(&bad).is_err());
+    assert_scope_counts_match_rows(&raw);
+}
+
+#[test]
+fn schema_three_database_migrates_to_scope_counts_and_keeps_every_memory() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("v3.sqlite3");
+    {
+        let mut session = memory::MemorySession::open(&path).unwrap();
+        let inputs = (0..12)
+            .map(|i| {
+                input(
+                    ["user:a", "user:b"][i % 2],
+                    format!("legacy shared fact {i}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        insert_all(&mut session, &inputs);
+        session.forget("user:a", 1).unwrap();
+    }
+    // Reconstruct exactly what a v3 binary leaves behind: no counter table or triggers.
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER memories_count_insert; DROP TRIGGER memories_count_soft_delete;
+         DROP TRIGGER memories_count_delete; DROP TABLE memory_scope_counts;
+         UPDATE metadata SET value='3' WHERE key='schema_version';
+         PRAGMA user_version=3;",
+    )
+    .unwrap();
+    let before: i64 = raw
+        .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    drop(raw);
+
+    let migrated = crate::db::open_db(&path).unwrap();
+    let version: i64 = migrated
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 4);
+    let after: i64 = migrated
+        .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, after);
+    assert_scope_counts_match_rows(&migrated);
+    drop(migrated);
+    let session = memory::MemorySession::open(&path).unwrap();
+    assert_eq!(
+        session
+            .recall("user:b", "legacy shared fact", None, 10)
+            .unwrap()
+            .len(),
+        6
+    );
+    assert_eq!(
+        session
+            .recall("user:a", "legacy shared fact", None, 10)
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn skewed_namespaces_use_sql_scope_filter_and_still_match_the_oracle() {
+    // 90% of rows are in one namespace, so its FTS expression omits the scope term.
+    let mut rng = Xorshift(77);
+    let mut inputs = Vec::new();
+    for index in 0..1_800 {
+        inputs.push(input(
+            "user:big",
+            format!(
+                "term{:02} term{:02} term{:02} fact{index:04}",
+                rng.below(12),
+                rng.below(12),
+                rng.below(40)
+            ),
+        ));
+    }
+    for index in 0..200 {
+        inputs.push(input(
+            "user:small",
+            format!(
+                "term{:02} term{:02} term{:02} small{index:04}",
+                rng.below(12),
+                rng.below(12),
+                rng.below(40)
+            ),
+        ));
+    }
+    for index in (1..inputs.len()).rev() {
+        inputs.swap(index, rng.below(index + 1));
+    }
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("skew.sqlite3");
+    let mut session = memory::MemorySession::open(&path).unwrap();
+    insert_all(&mut session, &inputs);
+    let oracle = Oracle::new(load_corpus(&path));
+    let mut compared = 0;
+    for query in [
+        "term01 term02",
+        "term03 term04 term30",
+        "term05",
+        "term00 term07 term11",
+    ] {
+        for scope in ["user:big", "user:small"] {
+            assert_oracle_agreement(&session, &oracle, scope, query, 10);
+            let results = session.recall(scope, query, None, 50).unwrap();
+            assert!(results.iter().all(|result| result.memory.scope == scope));
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 8);
 }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -21,6 +21,34 @@ const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
      CREATE TRIGGER memories_soft_delete_fts AFTER UPDATE OF deleted_at ON memories
      WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
          DELETE FROM memory_fts WHERE rowid = new.id;
+     END;";
+
+/// Trigger-maintained active-memory counts per namespace. The empty-string row (never a valid
+/// scope) holds the total across namespaces. They let the recall planner size a namespace in
+/// O(log n) instead of counting rows on every query.
+const MEMORY_SCOPE_COUNTS_SCHEMA: &str = "CREATE TABLE memory_scope_counts (
+         scope TEXT PRIMARY KEY,
+         active INTEGER NOT NULL CHECK(active >= 0)
+     ) WITHOUT ROWID;
+     INSERT INTO memory_scope_counts(scope,active)
+         SELECT scope,count(*) FROM memories WHERE deleted_at IS NULL GROUP BY scope;
+     INSERT INTO memory_scope_counts(scope,active)
+         SELECT '',COALESCE(sum(active),0) FROM memory_scope_counts;
+     CREATE TRIGGER memories_count_insert AFTER INSERT ON memories
+     WHEN new.deleted_at IS NULL BEGIN
+         INSERT INTO memory_scope_counts(scope,active) VALUES(new.scope,1)
+             ON CONFLICT(scope) DO UPDATE SET active=active+1;
+         UPDATE memory_scope_counts SET active=active+1 WHERE scope='';
+     END;
+     CREATE TRIGGER memories_count_soft_delete AFTER UPDATE OF deleted_at ON memories
+     WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+         UPDATE memory_scope_counts SET active=active-1 WHERE scope=old.scope;
+         UPDATE memory_scope_counts SET active=active-1 WHERE scope='';
+     END;
+     CREATE TRIGGER memories_count_delete AFTER DELETE ON memories
+     WHEN old.deleted_at IS NULL BEGIN
+         UPDATE memory_scope_counts SET active=active-1 WHERE scope=old.scope;
+         UPDATE memory_scope_counts SET active=active-1 WHERE scope='';
      END;";
 
 #[derive(Clone, Debug, Serialize)]
@@ -213,11 +241,17 @@ fn migrate(connection: &Connection) -> Result<()> {
                      PRAGMA user_version=2;",
                 )?;
             }
-            let migrated_version: i64 =
+            let mut migrated_version: i64 =
                 connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
             if migrated_version == 2 {
                 migrate_memory_fts_v2(connection)?;
-            } else if migrated_version != SCHEMA_VERSION {
+                migrated_version = 3;
+            }
+            if migrated_version == 3 {
+                migrate_scope_counts_v4(connection)?;
+                migrated_version = 4;
+            }
+            if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");
             }
             Ok(())
@@ -265,6 +299,22 @@ fn migrate_memory_fts_v2(connection: &Connection) -> Result<()> {
         [],
     )?;
     connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn migrate_scope_counts_v4(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "DROP TRIGGER IF EXISTS memories_count_insert;
+         DROP TRIGGER IF EXISTS memories_count_soft_delete;
+         DROP TRIGGER IF EXISTS memories_count_delete;
+         DROP TABLE IF EXISTS memory_scope_counts;",
+    )?;
+    connection.execute_batch(MEMORY_SCOPE_COUNTS_SCHEMA)?;
+    connection.execute(
+        "UPDATE metadata SET value='4' WHERE key='schema_version'",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", 4)?;
     Ok(())
 }
 
