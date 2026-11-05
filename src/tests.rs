@@ -1253,6 +1253,63 @@ fn memory_recall_prefers_exact_and_covered_evidence_and_handles_unicode_and_abst
 }
 
 #[test]
+fn balanced_memory_recall_deduplicates_overlapping_candidate_windows() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("memory-balanced-recall.sqlite3");
+    let scope = "user:balanced";
+    let mut session = memory::MemorySession::open(&database).unwrap();
+    let inputs = (0..30)
+        .map(|index| memory::MemoryInput {
+            scope: scope.into(),
+            kind: "source".into(),
+            content: format!("status fact {index}"),
+            source_uri: Some(format!("benchmark://status/{index}")),
+            source_id: None,
+            supersedes_id: None,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+        })
+        .collect::<Vec<_>>();
+    session.remember_batch(&inputs).unwrap();
+
+    let (first, profile) = session
+        .recall_profiled_ordered(
+            scope,
+            "status",
+            None,
+            10,
+            memory::RecallCandidateOrder::BalancedRowIdWindows,
+        )
+        .unwrap();
+    let (second, _) = session
+        .recall_profiled_ordered(
+            scope,
+            "status",
+            None,
+            10,
+            memory::RecallCandidateOrder::BalancedRowIdWindows,
+        )
+        .unwrap();
+
+    assert_eq!(profile.candidates_returned, 50);
+    assert_eq!(profile.candidate_rows_deduplicated, 20);
+    assert_eq!(profile.candidates_hydrated, 30);
+    assert!(!profile.candidate_budget_saturated);
+    assert_eq!(first.len(), 10);
+    assert_eq!(
+        first
+            .iter()
+            .map(|result| result.memory.id)
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|result| result.memory.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn memory_batch_inserts_all_records_and_indexes_them_together() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("memory-batch-success.sqlite3");

@@ -6,6 +6,10 @@ license = "Apache-2.0"
 description = "A local-first memory and code retrieval engine for AI agents"
 default-run = "aether-midnight"
 
+[features]
+sqlite-scanstatus = []
+retrieval-experiments = []
+
 [dependencies]
 anyhow = "1.0.100"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -32,4 +36,9 @@ unicode-normalization = "0.1"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
 

@@ -22,7 +22,13 @@ DEFAULT_BINARY = ROOT / "target" / "release" / "aether-midnight"
 def distribution(values):
     ordered = sorted(values)
     if not ordered:
-        return {"sample_count": 0, "p50_ms": None, "p95_ms": None, "p99_ms": None}
+        return {
+            "sample_count": 0,
+            "p50_ms": None,
+            "p95_ms": None,
+            "p99_ms": None,
+            "p99_9_ms": None,
+        }
 
     def percentile(p):
         return ordered[min(math.ceil((len(ordered) - 1) * p), len(ordered) - 1)]
@@ -32,6 +38,7 @@ def distribution(values):
         "p50_ms": percentile(0.50),
         "p95_ms": percentile(0.95),
         "p99_ms": percentile(0.99),
+        "p99_9_ms": percentile(0.999),
         "samples_ms": values,
     }
 
@@ -52,6 +59,26 @@ def process_rss_bytes(pid):
         return int(result.stdout.strip()) * 1024
     except ValueError:
         return None
+
+
+def wal_checkpoint_noop(connection):
+    """Read WAL progress without checkpointing or changing its policy."""
+    try:
+        busy, log_frames, checkpointed_frames = connection.execute(
+            "PRAGMA wal_checkpoint(NOOP)"
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    return {
+        "busy": busy,
+        "log_frames": log_frames,
+        "checkpointed_frames": checkpointed_frames,
+        "uncheckpointed_frames": (
+            max(log_frames - checkpointed_frames, 0)
+            if log_frames >= 0 and checkpointed_frames >= 0
+            else None
+        ),
+    }
 
 
 class McpClient:
@@ -252,10 +279,13 @@ def main():
     first_tool_ms, _, _, _ = client.call(
         "list_memories", {"scope": "user:maya", "limit": 10}
     )
+    wal_probe = sqlite3.connect(database, isolation_level=None)
 
     key_to_id = {}
     id_to_key = {}
     remember_ms = []
+    remember_wal_samples = []
+    prior_checkpointed_frames = None
     for record in fixture_records(fixture):
         arguments = {
             key: record[key]
@@ -276,8 +306,50 @@ def main():
             arguments["supersedes_id"] = key_to_id[record["supersedes_key"]]
         elapsed, memory, _, _ = client.call("remember", arguments)
         remember_ms.append(elapsed)
+        wal_status = wal_checkpoint_noop(wal_probe)
+        checkpoint_progress = False
+        if wal_status is not None:
+            checkpointed_frames = wal_status["checkpointed_frames"]
+            checkpoint_progress = (
+                prior_checkpointed_frames is not None
+                and checkpointed_frames > prior_checkpointed_frames
+            )
+            prior_checkpointed_frames = checkpointed_frames
+        remember_wal_samples.append(
+            {
+                "sample_index": len(remember_ms),
+                "elapsed_ms": elapsed,
+                "wal_status": wal_status,
+                "checkpoint_progress_observed": checkpoint_progress,
+            }
+        )
         key_to_id[record["key"]] = memory["id"]
         id_to_key[memory["id"]] = record["key"]
+
+    wal_autocheckpoint_pages = wal_probe.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+    wal_probe.close()
+    remember_outliers = [sample for sample in remember_wal_samples if sample["elapsed_ms"] >= 4]
+    checkpoint_progress_latencies = [
+        sample["elapsed_ms"]
+        for sample in remember_wal_samples
+        if sample["checkpoint_progress_observed"]
+    ]
+    stable_checkpoint_latencies = [
+        sample["elapsed_ms"]
+        for sample in remember_wal_samples
+        if sample["wal_status"] is not None and not sample["checkpoint_progress_observed"]
+    ]
+    wal_diagnostics = {
+        "probe": "PRAGMA wal_checkpoint(NOOP), sampled after each completed remember call; it does not checkpoint",
+        "configured_autocheckpoint_pages": wal_autocheckpoint_pages,
+        "status_available": any(sample["wal_status"] is not None for sample in remember_wal_samples),
+        "checkpoint_progress_sample_count": len(checkpoint_progress_latencies),
+        "latency_with_checkpoint_progress": distribution(checkpoint_progress_latencies),
+        "latency_without_observed_checkpoint_progress": distribution(stable_checkpoint_latencies),
+        "remember_calls_at_least_4ms": len(remember_outliers),
+        "outlier_samples": remember_outliers,
+        "raw_samples": remember_wal_samples,
+    }
 
     forget_ms = []
     for key in fixture["forget_keys"]:
@@ -396,6 +468,7 @@ def main():
             "initialize_wire_bytes": initialize_wire_bytes,
             "first_tool_list_memories_ms": first_tool_ms,
             "individual_remember": distribution(remember_ms),
+            "individual_remember_wal_diagnostics": wal_diagnostics,
             "warm_recall": distribution(recall_ms),
             "list_memories": distribution(list_ms),
             "forget": distribution(forget_ms),
