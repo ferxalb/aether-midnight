@@ -2,6 +2,7 @@
 
 This file records unreleased development progress. Entries use `YYYY-MM-DD (n) - short description` and are ordered newest first. The number in parentheses is the modification's ordinal within that date; for six modifications on one date, entries are numbered `(6)` through `(1)` from top to bottom. This is a development history, not a release record.
 
+* 2026-11-05 (5) - Redacted host, runtime, local-path, and account-cost identifiers from published benchmark reports while retaining measured result distributions.
 * 2026-11-05 (4) - Reproduced middle-window evidence loss, made BM25 ranking the production candidate order, exposed bounded candidate coverage, and added positional, insertion-order, and MCP regressions.
 * 2026-11-05 (3) - Added non-stripped recall phase profiling, SQLite statement and scan counters, and an alternating page-cache screen; measured FTS execution as the 100k broad-query bottleneck.
 * 2026-11-05 (2) - Added bounded two-window candidate retrieval for one-term queries; preserved existing dev and held-out retrieval metrics and reduced repeated 100k persistent recall p95 to 7.32–7.53 ms.

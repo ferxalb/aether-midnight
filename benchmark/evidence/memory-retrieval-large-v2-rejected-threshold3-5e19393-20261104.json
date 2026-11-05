@@ -9,12 +9,12 @@
   "memory_count": 10027,
   "background_record_count": 10000,
   "environment": {
-    "platform": "macOS-26.7.1-x86_64-i386-64bit",
-    "python": "3.9.6",
-    "engine_sqlite_version": "3.54.1",
-    "python_sqlite_version_for_artifact_read": "3.51.0",
-    "binary": "/Users/fer/Projects/aether-midnight/target/release/aether-midnight",
-    "binary_sha256": "bb00667115fd14503f13ae50d0b7a5b7c7821975651e3ab3508cb873475d5f06"
+    "platform": "redacted by maintainer",
+    "python": "redacted by maintainer",
+    "engine_sqlite_version": "redacted by maintainer",
+    "python_sqlite_version_for_artifact_read": "redacted by maintainer",
+    "binary": "redacted by maintainer",
+    "binary_sha256": "redacted by maintainer"
   },
   "persistent_mcp": {
     "startup_through_initialize_ms": 67.448547,
@@ -11469,5 +11469,6 @@
         "evidence_complete_at_10": false
       }
     ]
-  }
+  },
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
 }

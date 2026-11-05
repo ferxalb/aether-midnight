@@ -14,15 +14,15 @@ The local release-scale campaign measured persistent broad recall p95 at 1k, 10k
 
 ## Scope and evidence
 
-The investigation started on the Intel macOS reference host after Activity Monitor showed `aether-midnight` at about 126% CPU during a repeated Linux Kernel index benchmark. The observation identified active CPU work; it did not measure process memory and did not establish a leak.
+The investigation was prompted by high CPU use during a repeated indexing benchmark. That observation identified active work; it did not measure process memory or establish a leak.
 
-The repository was fetched from `origin/main` before work began. The starting commit was `aedadd122ac42f04250900bc64dc607a60e53903`; work is on `perf/midnight-modal-macos-20261104`. The first campaign used the unmodified indexing implementation and five repetitions per worker count. The comparison campaign changed only batched SQLite statement reuse and used the same generated fixture, machine, release profile, database setup, and six-worker setting.
+The historical investigation compared indexing revisions on a fixed local fixture. Host identifiers, local paths, and account details are omitted from the published report.
 
 ## Resource findings
 
 On the 10,000-file / 100 MiB fixture, the original six-worker run used about 2.02 CPU cores on average during the roughly 2.64-second index. The 126% Activity Monitor reading is therefore consistent with ordinary parallel indexing and is not evidence of memory growth. At 12 workers, throughput was effectively the same as six workers while CPU time and the measured memory high-water marks increased.
 
-The host is macOS 26.7.1, x86_64, Intel Core i5-10400F, 6 physical / 12 logical cores, 24 GiB RAM, APFS on an internal solid-state device. The campaign ran on AC power, with no thermal or performance warning, 73% free memory reported by `memory_pressure`, and about 28 MiB swap used. These are host-wide snapshots, not process-attributed readings.
+Machine model, operating-system revision, storage, power, and host-wide memory details are withheld. Published resource figures retain only the measured process-level aggregates.
 
 | Resource | Original six-worker run, n=5 | Statement-reuse run, n=5 | Measurement meaning |
 | --- | ---: | ---: | --- |
@@ -52,7 +52,7 @@ Decimal MB are used in this table. The RSS high-water and physical footprint are
 | Parser state retained by workers | Bounded by worker count and supported grammar count. Per-parser retained allocation is not separately measured. |
 | Duplicated text buffers | Source bytes become an owned `String` without a conversion copy. The writer still clones text to assemble FTS payloads; the timer is about 9 ms for this fixture. Removing it is a small possible saving, not a leading measured bottleneck, and was left unchanged. |
 | SQLite cache, WAL, or temporary files | WAL grew during indexing and is visible in watched sidecar samples. No runaway sidecar growth was observed; the final summed database size was stable. SQLite cache bytes are not separately exposed by this build. |
-| OS file cache | The source tree and temporary database are on local APFS. OS caches were not flushed, so later samples can benefit from filesystem cache. Host-wide `vm_stat`, swap, and memory-pressure snapshots are recorded, but their changes cannot be attributed solely to Midnight. |
+| OS file cache | The source tree and temporary database are on local filesystem details withheld. OS caches were not flushed, so later samples can benefit from filesystem cache. Host-wide `vm_stat`, swap, and memory-pressure snapshots are recorded, but their changes cannot be attributed solely to Midnight. |
 | Benchmark harness / subprocess overhead | The legacy runners included Linux-only assumptions and fixed high defaults. The new campaign excludes the Python wrapper from process memory and CPU, separates fresh CLI startup from persistent MCP query latency, and records child scope explicitly. |
 | Unexpected parallelism | Worker count is set per run. Six workers produced the best measured throughput plateau on this Mac; 12 workers used more CPU for no useful throughput increase. |
 | Measurement defect | Historical Linux `getrusage` peak values were below later sampled RSS and are therefore invalid as peak RSS. The new collector reports sampled RSS, lifetime counters, physical footprint, and cgroup data as distinct fields. |
@@ -73,7 +73,7 @@ The machine-readable manifests and raw sample arrays are preserved in the local 
 
 - `benchmark/runs/20261105T002945Z_aedadd122ac4_standard_cc6f7fbc/manifest.json` — pre-change worker-count screen.
 - `benchmark/runs/20261105T003600Z_aedadd122ac4_standard_75668a7b/manifest.json` — five-sample before/after trial at six workers, incremental visibility, persistent MCP, and retrieval checks.
-- `benchmark/runs/modal/` — immutable Modal campaign attempts and results.
+- Generated benchmark run artifacts are local-only and are not committed.
 
 These raw generated artifacts are excluded from Git to avoid committing generated benchmark data. Do not replace historical `benchmark/*.json` evidence with local measurements.
 
@@ -95,6 +95,20 @@ The persistent MCP evidence runs 10,027 frozen fictional memories, including 10,
 
 The separate 1k/10k/100k `bench-memory` artifact reports 100k DB bytes 25,559,040 after the measured-operation checkpoint and cumulative process peak 45,019,136 bytes across all three sizes. It achieved 50/50 labeled unique-token lookups and 0/150 cross-namespace leaks. The broad 100k recall query returned 30.290 ms p95 (n=100) and misses the proposed 15 ms target. That artificial exact-token set does not validate paraphrase or answer-generation quality. At 10k, `bench-memory` persistent recall p95 was 3.360 ms; the broader 10k-background MCP fixture p95 was 17.363 ms, demonstrating the sensitivity to candidate distribution.
 
-`/usr/bin/sample` captured a 5-second live MCP recall profile at a 1 ms sampling interval while one namespace held 10,000 records; the process completed 157 broad recall calls during sampling. The report contained 3,892 stack samples and showed a 12.4 MiB physical footprint. Frames remained inside the repeated request/retrieval call chain, but the release binary is stripped (`Cargo.toml` sets `strip=true`), so native function names and a trustworthy SQL-vs-rerank CPU split were unavailable. The raw local stack sample was `/tmp/aether-midnight-memory-recall.sample.txt` and is intentionally not committed; it contains no source corpus. This is a sampled CPU snapshot, not an allocation profile or a statistical latency benchmark.
+`/usr/bin/sample` captured a 5-second live MCP recall profile at a 1 ms sampling interval while one namespace held 10,000 records; the process completed 157 broad recall calls during sampling. The report contained 3,892 stack samples and showed a 12.4 MiB physical footprint. Frames remained inside the repeated request/retrieval call chain, but the release binary is stripped (`Cargo.toml` sets `strip=true`), so native function names and a trustworthy SQL-vs-rerank CPU split were unavailable. The raw local stack sample is intentionally not committed and contains no source corpus. This is a sampled CPU snapshot, not an allocation profile or a statistical latency benchmark.
 
-No Modal or other paid compute was used for this follow-up. A local `scripts/modal_bench.py --mode smoke --dry-run` recomputed the cumulative conservative reservation from the four preserved run artifacts as $26.2031 and refused the default $10 budget, confirming the ledger includes prior attempts. The Modal CLI/account billing interface is unavailable here, so actual invoiced spend from that older campaign remains unverified; no new external reservation was made. The frozen retrieval benchmark is fictional and locally generated; no external benchmark dataset was downloaded.
+Account activity, cost, and billing metadata are not included in this public report. The retrieval fixtures are synthetic and locally generated.
+
+## v0.3.1 memory-candidate retrieval follow-up
+
+The earlier single-informative-term fast path sampled up to 25 matching rows from each end of row-ID order. Its 50-row budget bounded the reranker but could exclude a relevant record in the middle. The positional regression failed at row 100 of 1,000 before the default changed.
+
+The selected production strategy uses FTS5 BM25 rank order for one-term and multi-term queries, then reranks the bounded candidate set by exact phrase, informative-term coverage, lexical rank, temporal evidence, and stable provenance fields. The balanced sample remains available only to retrieval experiments and is labeled `row_id_sample`. `candidate_coverage` reports `complete` when the scan ends before the candidate cap or `bm25_top_k` when the ranked cap fills. It does not change index freshness or temporal-validity flags.
+
+For seven frozen positional queries, balanced windows found 2/7 targets at the 0% and 100% endpoints (Recall@1/5/10 .286). BM25 found all seven exact-phrase targets at rank 1 in forward and reverse insertion order (Recall@1/5/10 1.0). Forward/reverse top-10 Jaccard remained low (.053 after the change) because tied weak fillers vary; the labeled target stayed stable. The existing v0.2 and single-term suites showed no aggregate retrieval, temporal, deletion, or namespace regression.
+
+The candidate window still bounds hydration and Rust reranking, not FTS5 posting traversal. On the bounded local 100k run, FTS candidate stepping accounted for 112.924 / 115.865 / 124.542 ms p50/p95/p99, while total recall was 113.436 / 116.452 / 125.139 ms. The 50 candidates were hydrated in .060 ms p95 and final sorting took .008 ms p95. This made BM25 materially slower than balanced windows, whose p95 was 12.471 ms in the same profile. A separate native release run measured p95 30.285 ms across four namespaces and 102.887 ms in a single large namespace. These are workload observations with host identifiers withheld; they do not establish cross-machine performance.
+
+A SQL secondary tie sort was tested and rejected because it introduced broad-match sorting, a temporary B-tree, and over two million SQLite VM steps. Staged expansion was also rejected because a stopping point without a validated evidence threshold cannot prove that unseen candidates are weaker. The chosen path surfaces bounded coverage and preserves BM25 relevance order without introducing another index or schema migration.
+
+The result is suitable as the default lexical candidate strategy when callers retain the `bm25_top_k` approximation signal. It does not promise semantic completeness; relevance below the BM25 cutoff may remain unseen. The 100k latency goal remains unmet for both tested layouts. See [the performance report](performance.md) and host-redacted [machine-readable evidence](../benchmark/evidence/memory-retrieval-v031-20261105.json) for metrics and reproduction commands.

@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
   "environment": {
-    "os": "linux",
-    "arch": "x86_64",
-    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
-    "logical_cores": 3,
-    "ram_bytes": 10452459520,
-    "disk_type_report": "vda   1 disk virtio \npmem0 0 disk",
-    "filesystem_mount": "overlay overlay /",
-    "kernel": "6.18.57",
-    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-    "sqlite_version": "3.54.1",
-    "storage_media_limit": "VM reports virtio block device; physical backing media cannot be identified"
+    "os": "redacted by maintainer",
+    "arch": "redacted by maintainer",
+    "cpu_model": "redacted by maintainer",
+    "logical_cores": "redacted by maintainer",
+    "ram_bytes": "redacted by maintainer",
+    "disk_type_report": "redacted by maintainer",
+    "filesystem_mount": "redacted by maintainer",
+    "kernel": "redacted by maintainer",
+    "rustc": "redacted by maintainer",
+    "sqlite_version": "redacted by maintainer",
+    "storage_media_limit": "redacted by maintainer"
   },
   "sample_count_per_repository": 30,
   "timing_boundary": "after file write, before index process start, through fresh CLI search confirming the updated file is fresh and query-visible",
@@ -1123,9 +1123,7 @@
       "--repo",
       "vscode=/tmp/aether-repos/vscode@src/vs/code/electron-main/app.ts"
     ],
-    "environment_variables": {
-      "MIDNIGHT_INCREMENTAL_SAMPLES": "30"
-    },
+    "environment_variables": "redacted by maintainer",
     "os_cache_dropped": false
   },
   "pending_verification": {
@@ -1135,5 +1133,6 @@
     "Bun": "pending (not run)",
     "Windows": "pending (not run)",
     "ARM": "pending (not run)"
-  }
+  },
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
 }

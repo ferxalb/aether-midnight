@@ -1,6 +1,6 @@
 {
-  "binary": "/Users/fer/Projects/aether-midnight/target/release/aether-midnight",
-  "binary_sha256": "c53b54b9c1cd943e7693083dc180d9771e358a2c358d2ae3f4afd8652dc62230",
+  "binary": "redacted by maintainer",
+  "binary_sha256": "redacted by maintainer",
   "binary_version": "aether-midnight 0.1.0",
   "created_at_utc": "2026-11-05T02:32:16Z",
   "direct_file_refresh_visibility": {
@@ -156,12 +156,13 @@
     ]
   },
   "host": {
-    "architecture": "x86_64",
-    "os": "macOS-26.7.1-x86_64-i386-64bit"
+    "architecture": "redacted by maintainer",
+    "os": "redacted by maintainer"
   },
   "index_complete_after_initial_scan": true,
   "reconciled_catalog_complete_at_end": true,
   "samples": 30,
   "schema_version": 1,
-  "source_commit": "2ab6393d4693d0c27e83297604d1fe05739deb3f"
+  "source_commit": "2ab6393d4693d0c27e83297604d1fe05739deb3f",
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
 }

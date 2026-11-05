@@ -1,26 +1,26 @@
 {
   "database_file_bytes": 18710528,
   "environment": {
-    "arch": "x86_64",
-    "bun": null,
-    "cargo_profile": "release",
-    "corpus_root": "/tmp/aether-midnight-bench-v2by1c83/corpus",
-    "cpu": null,
-    "go": null,
-    "logical_cores": 2,
-    "node": "v24.22.1",
-    "os": "linux",
-    "ram_bytes": null,
-    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.45 is available (JIT is available)",
-    "rusqlite_crate": "0.41.1",
-    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-    "sqlite_version": "3.54.1",
-    "storage_mount": "overlay         7.9G  2.2G  5.3G  29% /",
-    "tree_sitter_crate": "0.27.1",
+    "arch": "redacted by maintainer",
+    "bun": "redacted by maintainer",
+    "cargo_profile": "redacted by maintainer",
+    "corpus_root": "redacted by maintainer",
+    "cpu": "redacted by maintainer",
+    "go": "redacted by maintainer",
+    "logical_cores": "redacted by maintainer",
+    "node": "redacted by maintainer",
+    "os": "redacted by maintainer",
+    "ram_bytes": "redacted by maintainer",
+    "ripgrep": "redacted by maintainer",
+    "rusqlite_crate": "redacted by maintainer",
+    "rustc": "redacted by maintainer",
+    "sqlite_version": "redacted by maintainer",
+    "storage_mount": "redacted by maintainer",
+    "tree_sitter_crate": "redacted by maintainer",
     "tree_sitter_grammar_crates": {
-      "python": "0.25.0",
-      "rust": "0.24.2",
-      "typescript": "0.23.2"
+      "python": "redacted by maintainer",
+      "rust": "redacted by maintainer",
+      "typescript": "redacted by maintainer"
     }
   },
   "fixture": {
@@ -583,5 +583,6 @@
         ]
       }
     }
-  }
+  },
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
 }

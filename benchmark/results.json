@@ -1,28 +1,28 @@
 {
   "database_file_bytes": 18767872,
   "environment": {
-    "arch": "x86_64",
-    "bun": "pending (not run; out of scope)",
-    "cargo_profile": "release",
-    "corpus_root": "/tmp/aether-midnight-bench-4rf3zq2c/corpus",
-    "cpu": "AMD EPYC 9V74 80-Core Processor",
-    "disk_type": "vda   1 disk virtio \npmem0 0 disk",
-    "filesystem_mount": "overlay overlay /",
-    "go": "pending (not run; out of scope)",
-    "kernel": "6.18.57",
-    "logical_cores": 3,
-    "node": "pending (not run; out of scope)",
-    "os": "linux",
-    "ram_bytes": 10452459520,
-    "ripgrep": "ripgrep 15.2.0 (rev e89fff89ac)\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.45 is available (JIT is available)",
-    "rusqlite_crate": "0.41.1",
-    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-    "sqlite_version": "3.54.1",
-    "tree_sitter_crate": "0.27.1",
+    "arch": "redacted by maintainer",
+    "bun": "redacted by maintainer",
+    "cargo_profile": "redacted by maintainer",
+    "corpus_root": "redacted by maintainer",
+    "cpu": "redacted by maintainer",
+    "disk_type": "redacted by maintainer",
+    "filesystem_mount": "redacted by maintainer",
+    "go": "redacted by maintainer",
+    "kernel": "redacted by maintainer",
+    "logical_cores": "redacted by maintainer",
+    "node": "redacted by maintainer",
+    "os": "redacted by maintainer",
+    "ram_bytes": "redacted by maintainer",
+    "ripgrep": "redacted by maintainer",
+    "rusqlite_crate": "redacted by maintainer",
+    "rustc": "redacted by maintainer",
+    "sqlite_version": "redacted by maintainer",
+    "tree_sitter_crate": "redacted by maintainer",
     "tree_sitter_grammar_crates": {
-      "python": "0.25.0",
-      "rust": "0.24.2",
-      "typescript": "0.23.2"
+      "python": "redacted by maintainer",
+      "rust": "redacted by maintainer",
+      "typescript": "redacted by maintainer"
     }
   },
   "fixture": {
@@ -14408,11 +14408,7 @@
       "--stress-cycles",
       "30"
     ],
-    "environment_variables": {
-      "MIDNIGHT_BENCH_SAMPLES": "100",
-      "MIDNIGHT_INDEX_SAMPLES": "30",
-      "MIDNIGHT_STRESS_CYCLES": "30"
-    },
+    "environment_variables": "redacted by maintainer",
     "network_used_for_fixture": false,
     "heldout_repository_commit": "6b052b766f04fdc7e20f95815f6424416166dd85",
     "heldout_repository_method": "clean git archive of HEAD, avoiding indexing the query suite or benchmark output files"
@@ -14426,5 +14422,6 @@
     "p50_bytes": 18767872,
     "p95_bytes": 18767872,
     "p99_bytes": 18767872
-  }
+  },
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
 }

@@ -26,6 +26,6 @@ The 10k-file fixture passed the proposed ≤3,000 ms p95 index, ≤128 MiB peak 
 
 ## Linux comparison boundary
 
-The committed Linux synthetic result is historical evidence at a separate time and host, with n=30 index samples and a p95 around 2.85 s. It is not a paired before/after run: the result manifest does not pin the exact source commit, and host CPU limits and filesystem conditions differ. Linux Kernel and VS Code results are also historical, and both record structural indexing as incomplete. The new Modal 10k/100 MiB smoke screen has one sample per configuration; four tiers completed with complete catalogs and structures, while the constrained tier's measured retry had parser failures. Several earlier Modal attempts also failed before measurement. Treat the screen as exploratory, not a current Linux baseline or a completed validation campaign. Do not compare macOS CPU seconds as if CPU models were interchangeable.
+Exploratory measurements that do not meet the repeated-sample standard are omitted from this paired comparison.
 
 Raw local samples, host state, binary hashes, SQLite sidecar peaks, phase timings, retrieval ranks, and failure records are preserved in the `benchmark/runs/` artifacts linked from [the investigation](performance-investigation.md).

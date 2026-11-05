@@ -1,7 +1,7 @@
 {
   "baseline": {
     "all_warm_searches_expected_hit": true,
-    "binary_sha256": "8aa98a6194cd4be1f7b91ebd9c49da6bc8ba7f68610593fbb1af1343a4244139",
+    "binary_sha256": "redacted by maintainer",
     "binary_source_commit": "01b98c76ff1241d8e4a8459cf9e42445c8e72d16",
     "binary_version": "aether-midnight 0.1.0",
     "first_search_tool_latency": {
@@ -165,7 +165,7 @@
   "created_at_utc": "2026-11-05T02:26:28.493351+00:00",
   "current": {
     "all_warm_searches_expected_hit": true,
-    "binary_sha256": "c53b54b9c1cd943e7693083dc180d9771e358a2c358d2ae3f4afd8652dc62230",
+    "binary_sha256": "redacted by maintainer",
     "binary_source_commit": "2ab6393d4693d0c27e83297604d1fe05739deb3f",
     "binary_version": "aether-midnight 0.1.0",
     "first_search_tool_latency": {
@@ -334,13 +334,13 @@
     "seed": 20261103
   },
   "host": {
-    "architecture": "x86_64",
-    "cpu_model": "Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz",
-    "logical_cores": 12,
-    "memory_bytes": 25769803776,
-    "os": "macOS-26.7.1-x86_64-i386-64bit",
-    "physical_cores": 6,
-    "sqlite_version": "3.54.1"
+    "architecture": "redacted by maintainer",
+    "cpu_model": "redacted by maintainer",
+    "logical_cores": "redacted by maintainer",
+    "memory_bytes": "redacted by maintainer",
+    "os": "redacted by maintainer",
+    "physical_cores": "redacted by maintainer",
+    "sqlite_version": "redacted by maintainer"
   },
   "runner": {
     "mode": "smoke",
@@ -353,5 +353,6 @@
     ]
   },
   "schema_version": 1,
-  "title": "Paired persistent MCP code retrieval and 10k-file indexing on Intel macOS"
+  "title": "Paired persistent MCP code retrieval and 10k-file indexing on Intel macOS",
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
 }

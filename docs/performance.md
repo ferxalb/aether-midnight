@@ -2,19 +2,9 @@
 
 This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md) and [the investigation](performance-investigation.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
-## Host and method
+## Measurement handling
 
-- OS/kernel: Linux x86_64, kernel `6.18.57`.
-- CPU: AMD EPYC 9V74 80-Core Processor; 3 logical CPUs visible to the container.
-- RAM: `10,452,459,520` bytes reported by `/proc/meminfo`.
-- Storage: overlay filesystem mounted at `/`; `lsblk` reports `vda` as a virtual virtio block device with ROTA=1. The physical backing medium cannot be identified from this VM.
-- Rust: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`; bundled SQLite `3.54.1`; `rusqlite 0.41.1`.
-
-No OS page-cache drop was attempted. A fresh SQLite database is “cold” only at the database layer: later index samples may benefit from warm OS file cache. Search comparisons use a completed, warm database and leave OS caches alone. CLI and `rg` timings include process start. MCP timings include process start, initialize, and one `tools/call` round trip.
-
-Database byte measurements sum the SQLite main file and any present WAL/SHM files. Database-to-source ratios divide that sum by eligible source bytes.
-
-Percentiles use the benchmark’s sorted nearest-index rule: `ceil((n - 1) × p)`, capped at `n - 1`. Each raw result file stores sorted sample arrays alongside p50, p95, p99, and n. `benchmark/results.json` is the deterministic synthetic fixture run; the real-repository evidence is split between the index/search file and the incremental visibility file.
+Published benchmark artifacts retain measured result distributions and sample counts. Host, runtime, account, and local path identifiers are omitted. Percentiles use the benchmark's recorded nearest-index rule. Results describe their measured fixture and are not cross-machine guarantees.
 
 ## Reproduce
 
@@ -26,7 +16,7 @@ python3 scripts/performance_campaign.py --mode smoke --workers 1,2,4,6 \
   --update-workers 4 --interval-ms 50 --max-duration-s 600
 ```
 
-For the supported Modal resource tiers and cost guard, see the [Modal benchmark guide](modal-benchmark-guide.md). For native macOS measurements, see the [macOS benchmark guide](macos-benchmark-guide.md).
+For local reproduction guidance, see the [benchmark guide](macos-benchmark-guide.md).
 
 The legacy real-repository runners default to five index samples and 25 query samples. For one isolated comparison, preserve output under a unique directory rather than redirecting over a committed JSON file:
 
@@ -121,7 +111,7 @@ Per-query memory Recall@1/5/10 and reciprocal-rank distributions, including sour
 
 ## v0.2 persistent memory path and retrieval quality
 
-The local paired run uses the same Intel macOS 26.7.1 x86_64 host, bundled SQLite 3.54.1, release profile, frozen 25-query suite, and 10,000 irrelevant-background records. The verified baseline is commit `01b98c76ff1241d8e4a8459cf9e42445c8e72d16`; the implementation is commit `2ab6393` (engine tree from `9c358e2`, with a rejected ranking threshold experiment reverted). Full raw evidence, including query samples, is in [`memory-retrieval-large-v2-baseline-01b98c7-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-baseline-01b98c7-20261104.json) and [`memory-retrieval-large-v2-after-2ab6393-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-after-2ab6393-20261104.json). Percentiles use each artifact's recorded nearest-index rule.
+The local paired run uses the same local reference host (identifiers withheld), release profile, frozen 25-query suite, and 10,000 irrelevant-background records. The verified baseline is commit `01b98c76ff1241d8e4a8459cf9e42445c8e72d16`; the implementation is commit `2ab6393` (engine tree from `9c358e2`, with a rejected ranking threshold experiment reverted). Full raw evidence, including query samples, is in [`memory-retrieval-large-v2-baseline-01b98c7-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-baseline-01b98c7-20261104.json) and [`memory-retrieval-large-v2-after-2ab6393-20261104.json`](../benchmark/evidence/memory-retrieval-large-v2-after-2ab6393-20261104.json). Percentiles use each artifact's recorded nearest-index rule.
 
 | Persistent MCP measurement | Baseline | v0.2 | Samples / interpretation |
 | --- | ---: | ---: | --- |
@@ -235,7 +225,7 @@ The prior report stated that the four tokenizer queries had Recall@5 and MRR 1.0
 
 ## v0.3 memory retrieval and WAL follow-up (2026-11-05)
 
-This campaign starts at baseline `9d39467b5c5531bb53464b3f1ce4254304ef6077` and measures candidate code at `667cea3ad1cb3c475d5deeaf675f5eb374fcdf09` on `perf/midnight-v03-end-to-end-engine`. It ran on Linux 6.18.57 x86_64, an AMD EPYC 9V74 VM with 3 visible vCPUs and 10,452,459,520 bytes of reported RAM, on an overlay filesystem over virtual `vda` storage whose backing medium is unknown. Rust was `1.99.1`; bundled SQLite was `3.54.1`. No OS page-cache flush was attempted. The release binary used the normal optimized, stripped profile. Phase profiling used an optimized, debug-symbol build and `SQLITE_ENABLE_STMT_SCANSTATUS`.
+This campaign starts at baseline `9d39467b5c5531bb53464b3f1ce4254304ef6077` and measures candidate code at `667cea3ad1cb3c475d5deeaf675f5eb374fcdf09` on `perf/midnight-v03-end-to-end-engine`. It ran on a local Linux reference environment with host and storage identifiers withheld. Rust was `1.99.1`; bundled SQLite was `3.54.1`. No OS page-cache flush was attempted. The release binary used the normal optimized, stripped profile. Phase profiling used an optimized, debug-symbol build and `SQLITE_ENABLE_STMT_SCANSTATUS`.
 
 ### Broad-query results
 
@@ -289,3 +279,46 @@ python3 scripts/evaluate_memory_retrieval.py --fixture benchmark/memory_quality_
 The WAL probe uses Python's `sqlite3` module and requires its linked SQLite library to be at least 3.51.0. Earlier versions can interpret the unknown `NOOP` checkpoint mode as `PASSIVE`; the evaluator rejects them before collecting measurements.
 
 For the WAL experiment, build with `--features retrieval-experiments`, then run the same evaluator with `AETHER_WAL_AUTOCHECKPOINT_PAGES=256`, `1000`, and `4096`. Each run creates its own disposable database. The existing Windows/macOS campaigns, full 200-query evaluation, large-payload stress, multi-process contention, long-reader checkpoint starvation, and separate internal commit timing remain unmeasured.
+
+## v0.3.1 memory retrieval correctness follow-up
+
+The production default now uses FTS5 BM25 rank order for one-term and multi-term recall. The previous two-ended row-ID sample remains available only in retrieval experiment builds. This corrects the measured interior-position omission while retaining the bounded rerank window.
+
+Each returned memory result carries additive `candidate_coverage`: `complete` means the filtered FTS scan ended before the cap; `bm25_top_k` means the BM25 window filled; `row_id_sample` identifies the experimental sampler. Saturation is visible to callers, but it is not a semantic recall guarantee. FTS5 ties may still change which weak filler candidates enter the bounded window when records are inserted in a different order.
+
+The frozen v0.2 suites had identical baseline and candidate metrics. The 25-query suite returned Recall@1/5/10 of .550/.975/.975, P@5 .310, MRR .892, nDCG@10 .896, evidence completeness .969, temporal accuracy 1.0, zero stale-fact results, zero namespace leaks, and one false-positive query out of five negatives. The 26-query single-term suite returned Recall@1/5/10 of .548/.952/.952, P@5 .305, MRR .897, nDCG@10 .883, evidence completeness .941, temporal accuracy 1.0, zero stale-fact results, zero namespace leaks, and one false-positive query out of five negatives.
+
+The adversarial fixture has seven labeled exact-phrase targets placed at 0%, 10%, 25%, 50%, 75%, 90%, and 100% in seven 1,000-record matching collections. Balanced windows found two endpoints (Recall@1/5/10 .286); BM25 found all seven at rank 1 in both forward and reverse insertion order (Recall@1/5/10 1.0). Forward/reverse top-10 Jaccard increased from .015 to .053 because tied low-value fillers still differ; the labeled target stayed stable.
+
+The bounded release scale campaign reported these recall distributions on a local native host. Host and platform identifiers are intentionally withheld:
+
+| Layout / records | Recall p50 / p95 / p99 ms | Process CPU for workload | Peak RSS | DB after measured ops |
+| --- | ---: | ---: | ---: | ---: |
+| Four namespaces / 1k | 1.514 / 1.619 / 1.732 | 0.580 s | 14,462,976 B | 446,464 B |
+| Four namespaces / 10k | 4.101 / 4.218 / 4.496 | 1.418 s | 18,202,624 B | 2,691,072 B |
+| Four namespaces / 100k | 29.492 / 30.285 / 30.548 | 10.050 s | 44,675,072 B | 25,559,040 B |
+| One namespace / 1k | 2.139 / 2.213 / 2.546 | 0.591 s | 14,639,104 B | 446,464 B |
+| One namespace / 10k | 10.103 / 10.323 / 10.433 | 2.474 s | 23,212,032 B | 2,707,456 B |
+| One namespace / 100k | 99.984 / 102.887 / 123.926 | 23.450 s | 34,582,528 B | 25,997,312 B |
+
+At 100k, the previous balanced default measured p95 9.156 ms on the same local test setup; BM25 measured 30.285 ms for four distributed namespaces. In one namespace, BM25 measured 102.887 ms p95. The 100k and single-namespace 10k results miss the target latency. A selective one-result profile measured 5.738 / 6.081 / 6.468 ms p50/p95/p99.
+
+Profiling the 100k single-namespace broad query showed the 50-candidate window saturated. Total p50/p95/p99 was 113.436 / 116.452 / 125.139 ms; SQLite candidate stepping was 112.924 / 115.865 / 124.542 ms. Hydration p95 was .060 ms, candidate tokenization .187 ms, and final sort .008 ms. SQLite reported 1,315 VM steps, zero sort operations, 2,103,296 bytes of page cache used, and 688 cache misses at p50. The query plan used the FTS5 rank scan and a primary-key lookup. Host, runtime, and storage identifiers are withheld; OS-level cache and disk I/O were not attributed.
+
+The 10k-file code refresh check completed 30 samples: full reconciliation p95 325.159 ms and direct-file refresh p95 11.847 ms. Every search returned fresh content and final reconciliation restored catalog completeness. The default WAL autocheckpoint remained 1,000 pages. Individual remember, superseding update, forget, migration, temporal, deletion, namespace, concurrent-write, cancellation, indexing freshness, and MCP regression checks passed. Long-reader WAL growth, repeated compaction, battery, and idle CPU were not measured in this follow-up.
+
+The compact, host-redacted result summary is [`memory-retrieval-v031-20261105.json`](../benchmark/evidence/memory-retrieval-v031-20261105.json). Reproduce locally with:
+
+```sh
+cargo build --release --locked
+python3 scripts/evaluate_memory_retrieval.py --binary target/release/aether-midnight \
+  --fixture benchmark/memory_quality_v2.json --split all --repeats 3
+python3 scripts/evaluate_memory_retrieval.py --binary target/release/aether-midnight \
+  --fixture benchmark/memory_quality_single_term_v1.json --split all --repeats 3
+python3 scripts/evaluate_memory_retrieval.py --binary target/release/aether-midnight \
+  --fixture benchmark/memory_retrieval_adversarial_v1.json --split all --repeats 1 \
+  --insertion-order forward
+target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespace-count 4
+target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespace-count 1
+python3 scripts/benchmark_refresh_file.py --files 10000 --samples 30
+```

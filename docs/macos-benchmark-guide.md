@@ -33,9 +33,9 @@ For one controlled optimization comparison, keep the same binary configuration e
 
 ## Reference observations
 
-The Intel reference machine used for the November 2026 run was x86_64, 6 physical / 12 logical CPU cores, Intel Core i5-10400F, 24 GiB RAM, APFS on an internal SSD, AC power, and no thermal warning. The runner recorded the advertised CPU feature strings. No Rosetta translation or Apple Silicon result is claimed. Apple Silicon requires a native arm64 build and a separate run on actual arm64 hardware.
+Published benchmark reports omit machine models, host names, local paths, and other identifying environment details. Run on the actual target platform and keep unredacted measurements private. A result from one platform does not establish performance on another.
 
-On this Mac, six workers formed the best measured throughput point for the 10k/100 MiB fixture; twelve workers did not improve throughput. Use these results as a device-specific observation, not as a Linux or Apple Silicon prediction. APFS OS file cache was left intact. Creating a new database does not make the source fixture's OS pages cold.
+On this Mac, six workers formed the best measured throughput point for the 10k/100 MiB fixture; twelve workers did not improve throughput. Use these results as a device-specific observation, not as a Linux or Apple Silicon prediction. filesystem details withheld OS file cache was left intact. Creating a new database does not make the source fixture's OS pages cold.
 
 For an independent one-off inspection, `/usr/bin/time -l target/release/aether-midnight ...` can provide resource-usage counters, `vmmap <pid>` can inspect VM regions, and Instruments can record allocator and CPU profiles. Keep diagnostic tools out of the timed process path and label their results separately. The built-in collector samples the direct child at 50 ms; sampled peaks can miss brief events, while `ru_maxrss` and `RUSAGE_INFO_V4` lifetime values are retained as separate OS high-water counters.
 
