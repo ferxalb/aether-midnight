@@ -786,7 +786,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) 
                 (
                     "selective_single_term",
                     "sourcequality000",
-                    memory::RecallCandidateOrder::Ranked,
+                    memory::RecallCandidateOrder::BalancedRowIdWindows,
                     &mut selective_profile_samples,
                 ),
             ] {
