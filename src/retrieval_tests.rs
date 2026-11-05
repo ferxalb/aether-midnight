@@ -347,7 +347,7 @@ fn random_queries(seed: u64, documents: &[String], count: usize) -> Vec<String> 
             }
             // Independent terms, optionally padded with stop words.
             1 => {
-                let take = 1 + rng.below(5);
+                let take = 1 + rng.below(4);
                 let mut parts = (0..take)
                     .map(|_| format!("term{:02}", rng.below(70)))
                     .collect::<Vec<_>>();
@@ -357,7 +357,7 @@ fn random_queries(seed: u64, documents: &[String], count: usize) -> Vec<String> 
                 queries.push(parts.join(" "));
             }
             _ => {
-                let take = 2 + rng.below(4);
+                let take = 2 + rng.below(3);
                 queries.push(
                     (0..take)
                         .map(|_| format!("term{:02}", rng.below(20)))
@@ -1424,4 +1424,36 @@ fn print_query_plans() {
                 .unwrap()
         );
     }
+}
+
+#[test]
+fn long_queries_use_a_labeled_bounded_window_and_still_surface_phrase_and_full_matches() {
+    let scope = "project:long";
+    let mut inputs = (0..600)
+        .map(|index| input(scope, format!("alpha filler{} text{index}", index % 13)))
+        .collect::<Vec<_>>();
+    let phrase = "alpha beta gamma delta epsilon zeta";
+    inputs.insert(300, input(scope, phrase));
+    inputs.insert(
+        450,
+        input(scope, "zeta epsilon delta gamma beta alpha reordered"),
+    );
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("long.sqlite3");
+    let mut session = memory::MemorySession::open(&path).unwrap();
+    insert_all(&mut session, &inputs);
+    // Six informative terms: more than the per-class staging limit.
+    let results = session.recall(scope, phrase, None, 5).unwrap();
+    assert_eq!(results[0].memory.content, phrase);
+    assert_eq!(results[0].match_reason, "memory_exact_phrase");
+    assert!(
+        results
+            .iter()
+            .any(|r| r.memory.content == "zeta epsilon delta gamma beta alpha reordered")
+    );
+    assert!(results.iter().all(|r| matches!(
+        r.candidate_coverage,
+        CandidateCoverage::Bm25TopK | CandidateCoverage::Complete
+    )));
+    assert!(results.iter().all(|r| r.memory.scope == scope));
 }

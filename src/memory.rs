@@ -20,7 +20,12 @@ const MAX_RERANK_MULTIPLIER: usize = 5;
 const MAX_RERANK_CANDIDATES: usize = 500;
 const MIN_DISTINCT_TERM_MATCHES: usize = 2;
 /// Largest informative-term count for which every "at least m of n" class is its own stage.
-const MAX_STAGED_CLASS_TERMS: usize = 6;
+/// FTS5 `bm25()` walks every phrase occurrence's posting list for its IDF, and a term appears
+/// C(n-1, m-1) times in such an expression, so larger counts make each stage too costly.
+const MAX_STAGED_CLASS_TERMS: usize = 4;
+/// Eligible rows (two or more distinct terms) below which the whole set is read once and
+/// classified exactly in Rust instead of running one FTS5 stage per class.
+const SPARSE_ELIGIBLE_ROWS: usize = 128;
 /// Matches counted before a single-term query is considered for the non-discriminative path.
 const BROAD_TERM_PROBE_MATCHES: usize = 2048;
 /// Top-N by `(rank, rowid DESC)` entirely inside the FTS5 columns: no `memories` join for rows
@@ -1308,11 +1313,17 @@ fn run_ranked_stage(
     seen: &mut HashSet<i64>,
     query_terms: &[String],
     full_terms: &[String],
+    widen: bool,
     collected: &mut Vec<RankedCandidate>,
     mut profile: Option<&mut MemoryRecallProfile>,
 ) -> Result<bool> {
     // Duplicates of earlier stages and a few filtered rows are absorbed without a second pass.
-    let mut fetch = want + seen.len() + 8;
+    // A non-widening (bounded-window) stage reads a fixed multiple of its window once.
+    let mut fetch = if widen {
+        want + seen.len() + 8
+    } else {
+        (want * 4).min(2_000) + seen.len()
+    };
     loop {
         let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
         let mut statement = conn.prepare_cached(MEMORY_RANKED_SQL)?;
@@ -1344,7 +1355,7 @@ fn run_ranked_stage(
             phase.finish();
         }
         let exhausted = fetched < fetch;
-        if accepted.len() >= want || exhausted {
+        if accepted.len() >= want || exhausted || !widen {
             let overflow = accepted.len() > want;
             accepted.truncate(want);
             if let Some(profile) = profile.as_deref_mut() {
@@ -1356,7 +1367,7 @@ fn run_ranked_stage(
                     profile.record_bytes_hydrated += memory_record_bytes(&candidate.0.memory);
                 }
             }
-            let more = overflow || (!exhausted && accepted.len() >= want);
+            let more = overflow || (!exhausted && (accepted.len() >= want || !widen));
             for candidate in accepted {
                 seen.insert(candidate.0.memory.id);
                 collected.push(candidate);
@@ -1457,7 +1468,8 @@ fn recall_staged(
     let term_count = terms.len();
     let (scope_active, total_active) = scope_sizes(conn, scope)?;
     let use_scope_term = scope_active * 2 < total_active;
-    let mut stages: Vec<(String, StageKind, usize)> = Vec::new();
+    // (FTS5 expression, kind, rows wanted, whether the stage may widen to fill its quota)
+    let mut stages: Vec<(String, StageKind, usize, bool)> = Vec::new();
     let mut bounded_window = false;
     let mut recency_stage = false;
     if full_terms.len() > 1 {
@@ -1470,6 +1482,7 @@ fn recall_staged(
             ),
             StageKind::Ranked,
             limit,
+            true,
         ));
     }
     if term_count == 1 {
@@ -1478,41 +1491,54 @@ fn recall_staged(
             && is_non_discriminative_term(conn, &term_match, scope_active)?
         {
             recency_stage = true;
-            stages.push((term_match, StageKind::Recency, limit));
+            stages.push((term_match, StageKind::Recency, limit, true));
         } else {
-            stages.push((term_match, StageKind::Ranked, limit));
+            stages.push((term_match, StageKind::Ranked, limit, true));
         }
-    } else {
-        stages.push((
-            scoped_match(scope, &all_terms_expr(&terms), use_scope_term),
-            StageKind::Ranked,
-            limit,
-        ));
-        if term_count <= MAX_STAGED_CLASS_TERMS {
+    } else if term_count <= MAX_STAGED_CLASS_TERMS {
+        let pairs = scoped_match(
+            scope,
+            &at_least_expr(&terms, MIN_DISTINCT_TERM_MATCHES),
+            use_scope_term,
+        );
+        if term_count > MIN_DISTINCT_TERM_MATCHES
+            && count_matches_up_to(conn, &pairs, SPARSE_ELIGIBLE_ROWS + 1)? <= SPARSE_ELIGIBLE_ROWS
+        {
+            // Few eligible rows: read them all once; Rust orders the classes exactly.
+            stages.push((pairs, StageKind::Ranked, SPARSE_ELIGIBLE_ROWS, true));
+        } else {
+            stages.push((
+                scoped_match(scope, &all_terms_expr(&terms), use_scope_term),
+                StageKind::Ranked,
+                limit,
+                true,
+            ));
             for size in (MIN_DISTINCT_TERM_MATCHES..term_count).rev() {
                 stages.push((
                     scoped_match(scope, &at_least_expr(&terms, size), use_scope_term),
                     StageKind::Ranked,
                     limit,
+                    true,
                 ));
             }
-        } else {
-            // Long queries keep the uniform-weight v0.3.1 expression over a bounded window.
-            bounded_window = true;
-            let alternatives = terms
-                .iter()
-                .map(|term| format!("\"{term}\""))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            stages.push((
-                scoped_match(scope, &alternatives, use_scope_term),
-                StageKind::Ranked,
-                limit
-                    .saturating_mul(MAX_RERANK_MULTIPLIER)
-                    .min(MAX_RERANK_CANDIDATES)
-                    .max(limit),
-            ));
         }
+    } else {
+        // Long queries keep the uniform-weight v0.3.1 expression over one bounded window.
+        bounded_window = true;
+        let alternatives = terms
+            .iter()
+            .map(|term| format!("\"{term}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        stages.push((
+            scoped_match(scope, &alternatives, use_scope_term),
+            StageKind::Ranked,
+            limit
+                .saturating_mul(MAX_RERANK_MULTIPLIER)
+                .min(MAX_RERANK_CANDIDATES)
+                .max(limit),
+            false,
+        ));
     }
     if let Some(phase) = phase {
         phase.finish();
@@ -1527,7 +1553,7 @@ fn recall_staged(
     let mut every_stage_complete = true;
     let mut recency_truncated = false;
     let stage_total = stages.len();
-    for (index, (match_query, kind, window)) in stages.into_iter().enumerate() {
+    for (index, (match_query, kind, window, widen)) in stages.into_iter().enumerate() {
         let want = if window > limit {
             window
         } else {
@@ -1543,6 +1569,7 @@ fn recall_staged(
                 &mut seen,
                 query_terms,
                 full_terms,
+                widen,
                 &mut collected,
                 profile.as_deref_mut(),
             )?,
@@ -1581,6 +1608,17 @@ fn recall_staged(
         profile.candidate_budget_saturated = !every_stage_complete;
     }
     let phase = ProfileTimer::start(profile, "final_sort");
+    // Membership by class, rank, then newest row (the same rule each stage applies), followed by
+    // presentation order through the deterministic temporal/provenance chain.
+    collected.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.3.total_cmp(&right.3))
+            .then_with(|| right.0.memory.id.cmp(&left.0.memory.id))
+    });
+    collected.truncate(limit);
     collected.sort_by(compare_ranked_candidates);
     if let Some(phase) = phase {
         phase.finish();
