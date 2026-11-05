@@ -788,6 +788,7 @@ fn configured_candidate_order() -> RecallCandidateOrder {
     RecallCandidateOrder::Staged
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the public recall parameters plus profiling and policy.
 fn recall_on_profiled(
     conn: &Connection,
     scope: &str,
@@ -1354,6 +1355,7 @@ fn run_stage(
 /// queries and enumeration stops as soon as `limit` rows are collected. BM25 only orders rows
 /// *within* a class, where the stage expression yields a score that is a uniform multiple of the
 /// BM25 of the query terms. Every collected row therefore outranks every row not enumerated.
+#[allow(clippy::too_many_arguments)]
 fn recall_staged(
     conn: &Connection,
     scope: &str,
