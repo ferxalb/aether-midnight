@@ -1,5 +1,7 @@
 # Performance and memory investigation
 
+> **v0.4 update (2026-11-05):** the high-fan-out memory-recall bottleneck, the rejected experiments, and the replacement class-staged exact top-k design are recorded in `docs/retrieval-v04.md`. Statements below about the `bm25_top_k` window describe v0.3.1.
+
 ## v0.3 high-fan-out recall and write-tail investigation (2026-11-05)
 
 The current follow-up starts from `9d39467b5c5531bb53464b3f1ce4254304ef6077`; the measured implementation is `667cea3ad1cb3c475d5deeaf675f5eb374fcdf09` on `perf/midnight-v03-end-to-end-engine`. The main root cause is now measured: with 25,025 active records in one namespace and 50 bounded candidates, `sqlite_candidate_step` consumed about 26.8 ms p50 in the BM25-ranked query, while row hydration consumed about 0.03 ms and the remaining Rust phases were also small. The FTS query and rank execution dominate this broad one-term case. SQLite scanstatus exposes 50 FTS loop rows and 50 primary-key lookups here; it does not count FTS term postings, so the number of internal postings read remains unknown.
