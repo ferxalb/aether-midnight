@@ -1,0 +1,451 @@
+{
+  "schema_version": 1,
+  "dataset": "AETHER Midnight fictional memory retrieval v1",
+  "frozen_at": "2026-11-04",
+  "records": [
+    {
+      "key": "review-note-old",
+      "scope": "user:maya",
+      "kind": "source",
+      "content": "January 2024 planning meeting note: Maya said she prefers design reviews at 8:30 AM local time before the school drop-off.",
+      "source_uri": "meeting://maya/2024-01-10",
+      "observed_at": "2024-01-10T12:00:00Z"
+    },
+    {
+      "key": "review-time-old",
+      "scope": "user:maya",
+      "kind": "derived",
+      "content": "Maya prefers design reviews at 8:30 AM local time.",
+      "source_key": "review-note-old",
+      "valid_from": "2024-01-10T00:00:00Z",
+      "valid_to": "2025-03-01T00:00:00Z"
+    },
+    {
+      "key": "review-note-current",
+      "scope": "user:maya",
+      "kind": "source",
+      "content": "March 2025 meeting note: Maya said the school drop-off changed and asked to move the design review to 10:30 AM local time.",
+      "source_uri": "meeting://maya/2025-03-01",
+      "observed_at": "2025-03-01T16:00:00Z"
+    },
+    {
+      "key": "review-time-current",
+      "scope": "user:maya",
+      "kind": "derived",
+      "content": "Maya's design review time is 10:30 AM local time.",
+      "source_key": "review-note-current",
+      "supersedes_key": "review-time-old",
+      "valid_from": "2025-03-01T00:00:00Z"
+    },
+    {
+      "key": "review-duration-note",
+      "scope": "user:maya",
+      "kind": "source",
+      "content": "Maya's product design reviews usually last 30 minutes.",
+      "source_uri": "meeting://maya/2025-03-05"
+    },
+    {
+      "key": "review-duration",
+      "scope": "user:maya",
+      "kind": "derived",
+      "content": "Maya's product design review lasts 30 minutes.",
+      "source_key": "review-duration-note",
+      "valid_from": "2025-03-05T00:00:00Z"
+    },
+    {
+      "key": "status-note-es",
+      "scope": "user:maya",
+      "kind": "source",
+      "content": "En la sesión del 2 de abril, Maya pidió recibir los informes de estado los miércoles antes del mediodía.",
+      "source_uri": "meeting://maya/2025-04-02",
+      "observed_at": "2025-04-02T14:00:00Z"
+    },
+    {
+      "key": "status-report",
+      "scope": "user:maya",
+      "kind": "derived",
+      "content": "Maya wants status reports (informes de estado) by Wednesday noon.",
+      "source_key": "status-note-es",
+      "valid_from": "2025-04-02T00:00:00Z"
+    },
+    {
+      "key": "remote-work-note",
+      "scope": "user:maya",
+      "kind": "source",
+      "content": "Maya trabaja desde casa los miércoles.",
+      "source_uri": "meeting://maya/2025-04-03"
+    },
+    {
+      "key": "cedar-session-may",
+      "scope": "project:cedar",
+      "kind": "source",
+      "content": "During the May 6 planning session, Amara named Cedar as the internal project code.",
+      "source_uri": "meeting://cedar/2025-05-06",
+      "observed_at": "2025-05-06T18:00:00Z"
+    },
+    {
+      "key": "cedar-code",
+      "scope": "project:cedar",
+      "kind": "derived",
+      "content": "Amara's project code from the May 6 planning session is Cedar.",
+      "source_key": "cedar-session-may",
+      "valid_from": "2025-05-06T00:00:00Z"
+    },
+    {
+      "key": "cedar-session-june",
+      "scope": "project:cedar",
+      "kind": "source",
+      "content": "At the June 2 follow-up session, Amara confirmed Cedar and asked to move the beta launch to Thursday.",
+      "source_uri": "meeting://cedar/2025-06-02",
+      "observed_at": "2025-06-02T18:00:00Z"
+    },
+    {
+      "key": "beta-move",
+      "scope": "project:cedar",
+      "kind": "derived",
+      "content": "Amara's beta move was to Thursday, confirmed at the June 2 follow-up session.",
+      "source_key": "cedar-session-june",
+      "valid_from": "2025-06-02T00:00:00Z"
+    },
+    {
+      "key": "harbor-roles",
+      "scope": "project:harbor",
+      "kind": "source",
+      "content": "In the Harbor program, Jordan Kim is the design lead who owns the release checklist; Jordan Lee in finance approves supplier invoices.",
+      "source_uri": "meeting://harbor/roles"
+    },
+    {
+      "key": "harbor-checklist-owner",
+      "scope": "project:harbor",
+      "kind": "derived",
+      "content": "Jordan Kim owns the Harbor release checklist.",
+      "source_key": "harbor-roles",
+      "valid_from": "2025-01-01T00:00:00Z"
+    },
+    {
+      "key": "harbor-atlas-checklist",
+      "scope": "project:harbor",
+      "kind": "source",
+      "content": "The separate Atlas migration release checklist belongs to Priya Rao, not Jordan Lee.",
+      "source_uri": "meeting://harbor/atlas-migration"
+    },
+    {
+      "key": "atlas-java-backend",
+      "scope": "project:atlas",
+      "kind": "source",
+      "content": "Atlas backend services run on Java 21 and Kotlin.",
+      "source_uri": "meeting://atlas/backend-runtime"
+    },
+    {
+      "key": "atlas-javascript-frontend",
+      "scope": "project:atlas",
+      "kind": "source",
+      "content": "The Atlas admin frontend runs on JavaScript and Node.js, separate from the Java 21 backend.",
+      "source_uri": "meeting://atlas/frontend-runtime"
+    },
+    {
+      "key": "atlas-retention-source",
+      "scope": "project:atlas",
+      "kind": "source",
+      "content": "Four operations reviews recorded the Atlas cache snapshot retention changes.",
+      "source_uri": "meeting://atlas/retention-history"
+    },
+    {
+      "key": "retention-30",
+      "scope": "project:atlas",
+      "kind": "derived",
+      "content": "Atlas cache snapshots expire after 30 days.",
+      "source_key": "atlas-retention-source",
+      "valid_from": "2021-01-01T00:00:00Z"
+    },
+    {
+      "key": "retention-21",
+      "scope": "project:atlas",
+      "kind": "derived",
+      "content": "Atlas cache snapshots expire after 21 days.",
+      "source_key": "atlas-retention-source",
+      "supersedes_key": "retention-30",
+      "valid_from": "2022-01-01T00:00:00Z"
+    },
+    {
+      "key": "retention-14",
+      "scope": "project:atlas",
+      "kind": "derived",
+      "content": "Atlas cache snapshots expire after 14 days.",
+      "source_key": "atlas-retention-source",
+      "supersedes_key": "retention-21",
+      "valid_from": "2023-01-01T00:00:00Z"
+    },
+    {
+      "key": "retention-7",
+      "scope": "project:atlas",
+      "kind": "derived",
+      "content": "Atlas cache snapshots expire after 7 days.",
+      "source_key": "atlas-retention-source",
+      "supersedes_key": "retention-14",
+      "valid_from": "2024-01-01T00:00:00Z"
+    },
+    {
+      "key": "build-41-staging",
+      "scope": "project:harbor",
+      "kind": "source",
+      "content": "Harbor build 41 passed staging smoke checks on Tuesday.",
+      "source_uri": "release://harbor/build-41/staging"
+    },
+    {
+      "key": "build-41-rollback",
+      "scope": "project:harbor",
+      "kind": "derived",
+      "content": "Build 41 rollback plan after staging: restore the previous snapshot before replaying queued webhook events.",
+      "source_key": "build-41-staging",
+      "valid_from": "2025-06-01T00:00:00Z"
+    },
+    {
+      "key": "private-phrase",
+      "scope": "project:private",
+      "kind": "source",
+      "content": "Arcadia secret label phrase is orange sparrow.",
+      "source_uri": "private://benchmark"
+    },
+    {
+      "key": "forgotten-password",
+      "scope": "user:maya",
+      "kind": "source",
+      "content": "Maya's temporary hotel Wi-Fi password is orchard-lime-7.",
+      "source_uri": "meeting://maya/travel"
+    }
+  ],
+  "background_collection": {
+    "scope": "user:maya",
+    "count": 128,
+    "template": "Maya's weekly planning notebook entry {index}: recurring review of calendar notes, meeting follow-up, project status, delivery checklist, and team context. No preference or decision is recorded."
+  },
+  "forget_keys": ["forgotten-password"],
+  "queries": [
+    {
+      "id": "current-review-exact",
+      "split": "dev",
+      "category": "exact_fact",
+      "scope": "user:maya",
+      "query": "Maya's design review time is 10:30 AM local time",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current"]
+    },
+    {
+      "id": "current-review-paraphrase",
+      "split": "dev",
+      "category": "natural_language_paraphrase",
+      "scope": "user:maya",
+      "query": "When should Maya schedule a review for the design team?",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current"]
+    },
+    {
+      "id": "review-time-shared-vocabulary",
+      "split": "dev",
+      "category": "shared_vocabulary",
+      "scope": "user:maya",
+      "query": "Maya design review time after school drop-off",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current", "review-note-current"]
+    },
+    {
+      "id": "old-review-history",
+      "split": "dev",
+      "category": "temporal_history",
+      "scope": "user:maya",
+      "query": "What time did Maya prefer for design reviews before March 2025?",
+      "at": "2024-09-01T00:00:00Z",
+      "relevant": ["review-time-old", "review-note-old"]
+    },
+    {
+      "id": "current-review-conflict",
+      "split": "dev",
+      "category": "conflicting_and_superseded_facts",
+      "scope": "user:maya",
+      "query": "After school drop-off changed, what time did Maya choose for design reviews?",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current", "review-note-current"]
+    },
+    {
+      "id": "design-review-duration",
+      "split": "dev",
+      "category": "shared_vocabulary",
+      "scope": "user:maya",
+      "query": "How many minutes does Maya's product design review last?",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-duration", "review-duration-note"]
+    },
+    {
+      "id": "status-report-spanish",
+      "split": "dev",
+      "category": "spanish_query",
+      "scope": "user:maya",
+      "query": "¿Cuándo quiere Maya los informes de estado?",
+      "at": "2025-04-10T00:00:00Z",
+      "relevant": ["status-report", "status-note-es"]
+    },
+    {
+      "id": "status-report-english",
+      "split": "dev",
+      "category": "english_query",
+      "scope": "user:maya",
+      "query": "When should Maya receive status reports?",
+      "at": "2025-04-10T00:00:00Z",
+      "relevant": ["status-report", "status-note-es"]
+    },
+    {
+      "id": "cedar-code-session-reference",
+      "split": "dev",
+      "category": "multi_session_reference",
+      "scope": "project:cedar",
+      "query": "What did Amara call the project code during the May planning session?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": ["cedar-code", "cedar-session-may"]
+    },
+    {
+      "id": "harbor-entity-ambiguity",
+      "split": "dev",
+      "category": "entity_ambiguity",
+      "scope": "project:harbor",
+      "query": "Who owns the Harbor release checklist?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": ["harbor-checklist-owner", "harbor-roles"]
+    },
+    {
+      "id": "atlas-java-backend",
+      "split": "dev",
+      "category": "entity_ambiguity",
+      "scope": "project:atlas",
+      "query": "Which Java version does the Atlas backend use?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": ["atlas-java-backend"]
+    },
+    {
+      "id": "background-distractor-review-time",
+      "split": "dev",
+      "category": "large_irrelevant_background",
+      "scope": "user:maya",
+      "query": "Maya design review time 10:30",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current"]
+    },
+    {
+      "id": "abstain-home-address",
+      "split": "dev",
+      "category": "expected_abstention",
+      "scope": "user:maya",
+      "query": "What is Maya's home mailing address in Oslo?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": []
+    },
+    {
+      "id": "namespace-no-private-phrase",
+      "split": "dev",
+      "category": "cross_namespace_isolation",
+      "scope": "user:maya",
+      "query": "Arcadia secret label phrase orange sparrow",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": []
+    },
+    {
+      "id": "provenance-for-review-time",
+      "split": "heldout",
+      "category": "source_provenance",
+      "scope": "user:maya",
+      "query": "Which March meeting note supports Maya's current design review schedule?",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-note-current", "review-time-current"]
+    },
+    {
+      "id": "current-review-natural-language",
+      "split": "heldout",
+      "category": "natural_language_paraphrase",
+      "scope": "user:maya",
+      "query": "At what hour should Maya meet for a design check-in?",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current"]
+    },
+    {
+      "id": "retention-current-chain",
+      "split": "heldout",
+      "category": "long_supersession_chain",
+      "scope": "project:atlas",
+      "query": "Atlas cache snapshots expire after how many days?",
+      "at": "2025-01-01T00:00:00Z",
+      "relevant": ["retention-7"]
+    },
+    {
+      "id": "retention-historical-chain",
+      "split": "heldout",
+      "category": "long_supersession_chain",
+      "scope": "project:atlas",
+      "query": "How many days did Atlas cache snapshots last in June 2022?",
+      "at": "2022-06-01T00:00:00Z",
+      "relevant": ["retention-21"]
+    },
+    {
+      "id": "beta-follow-up-session",
+      "split": "heldout",
+      "category": "multi_session_reference",
+      "scope": "project:cedar",
+      "query": "What day was the beta move in the June follow-up?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": ["beta-move", "cedar-session-june"]
+    },
+    {
+      "id": "build-rollback-evidence",
+      "split": "heldout",
+      "category": "multi_hop_evidence",
+      "scope": "project:harbor",
+      "query": "What is the rollback plan for build 41 after staging?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": ["build-41-rollback", "build-41-staging"]
+    },
+    {
+      "id": "deleted-memory-abstention",
+      "split": "heldout",
+      "category": "deleted_memories",
+      "scope": "user:maya",
+      "query": "What is Maya's temporary hotel Wi-Fi password?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": []
+    },
+    {
+      "id": "private-scope-lookup",
+      "split": "heldout",
+      "category": "cross_namespace_isolation",
+      "scope": "user:maya",
+      "query": "Arcadia orange sparrow private label",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": []
+    },
+    {
+      "id": "backend-frontend-ambiguity",
+      "split": "heldout",
+      "category": "entity_ambiguity",
+      "scope": "project:atlas",
+      "query": "Which language runs the Atlas admin frontend?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": ["atlas-javascript-frontend"]
+    },
+    {
+      "id": "review-time-current-after-update",
+      "split": "heldout",
+      "category": "temporal_validity",
+      "scope": "user:maya",
+      "query": "What is Maya's current design review time after the March update?",
+      "at": "2025-04-01T00:00:00Z",
+      "relevant": ["review-time-current", "review-note-current"]
+    },
+    {
+      "id": "no-evidence-weekly-review",
+      "split": "heldout",
+      "category": "expected_abstention",
+      "scope": "user:maya",
+      "query": "What was discussed in Maya's weekly planning review?",
+      "at": "2025-06-10T00:00:00Z",
+      "relevant": []
+    }
+  ]
+}
