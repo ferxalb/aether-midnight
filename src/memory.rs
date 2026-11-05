@@ -1,8 +1,13 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::CStr;
+#[cfg(feature = "sqlite-scanstatus")]
+use std::ffi::c_void;
 use std::path::Path;
+use std::ptr;
+use std::time::Instant;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use crate::db::{memory_scope_token, normalize_timestamp, now_utc, open_db};
@@ -21,6 +26,48 @@ const MEMORY_RECALL_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_u
            AND (m.valid_from IS NULL OR m.valid_from<=?3)
            AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY memory_fts.rank LIMIT ?4";
+const MEMORY_RECALL_ROWID_ASC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
+         FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
+         WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
+           AND m.scope=?2 AND m.deleted_at IS NULL
+           AND (m.valid_from IS NULL OR m.valid_from<=?3)
+           AND (m.valid_to IS NULL OR m.valid_to>?3)
+         ORDER BY memory_fts.rowid ASC LIMIT ?4";
+const MEMORY_RECALL_ROWID_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
+         FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
+         WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
+           AND m.scope=?2 AND m.deleted_at IS NULL
+           AND (m.valid_from IS NULL OR m.valid_from<=?3)
+           AND (m.valid_to IS NULL OR m.valid_to>?3)
+         ORDER BY memory_fts.rowid DESC LIMIT ?4";
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) enum RecallCandidateOrder {
+    Ranked,
+    RowIdAscending,
+    RowIdDescending,
+    BalancedRowIdWindows,
+}
+
+impl RecallCandidateOrder {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Ranked => MEMORY_RECALL_SQL,
+            Self::RowIdAscending => MEMORY_RECALL_ROWID_ASC_SQL,
+            Self::RowIdDescending => MEMORY_RECALL_ROWID_DESC_SQL,
+            Self::BalancedRowIdWindows => MEMORY_RECALL_ROWID_ASC_SQL,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ranked => "bm25_rank",
+            Self::RowIdAscending => "rowid_ascending",
+            Self::RowIdDescending => "rowid_descending",
+            Self::BalancedRowIdWindows => "rowid_balanced_windows",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryRecord {
@@ -42,6 +89,111 @@ pub struct MemorySearchResult {
     pub memory: MemoryRecord,
     pub match_reason: String,
     pub score: f64,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct MemoryRecallProfile {
+    pub candidate_strategy: Option<&'static str>,
+    pub phase_wall_ns: BTreeMap<String, u64>,
+    pub phase_cpu_ns: BTreeMap<String, Option<u64>>,
+    pub candidate_limit: usize,
+    pub active_scope_record_count: Option<usize>,
+    pub output_fraction_of_scope: Option<f64>,
+    pub candidate_budget_saturated: bool,
+    pub candidates_returned: usize,
+    pub candidate_rows_deduplicated: usize,
+    pub candidates_hydrated: usize,
+    pub candidates_rejected_by_term_coverage: usize,
+    pub content_bytes_hydrated: usize,
+    pub record_bytes_hydrated: usize,
+    pub result_count: usize,
+    pub result_bytes_serialized: Option<usize>,
+    pub sqlite_cache_hits: Option<u64>,
+    pub sqlite_cache_misses: Option<u64>,
+    pub sqlite_cache_writes: Option<u64>,
+    pub sqlite_cache_spills: Option<u64>,
+    pub sqlite_cache_size_kib: Option<u64>,
+    pub sqlite_cache_used_bytes: Option<u64>,
+    pub sqlite_vm_steps: Option<u64>,
+    pub sqlite_fullscan_steps: Option<u64>,
+    pub sqlite_sort_operations: Option<u64>,
+    pub sqlite_statement_memory_bytes: Option<u64>,
+    pub sqlite_scanstatus_available: bool,
+    pub sqlite_scan_loops: Option<Vec<SqliteScanLoop>>,
+    pub temporal_filter_location: Option<&'static str>,
+    pub temporal_rejections_observable: bool,
+    pub allocation_count: Option<u64>,
+    pub peak_temporary_memory_bytes: Option<u64>,
+    pub unavailable_measurements: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SqliteScanLoop {
+    pub name: String,
+    pub loops: i64,
+    pub visits: i64,
+}
+
+impl MemoryRecallProfile {
+    fn add_phase(&mut self, name: &'static str, wall_ns: u64, cpu_ns: Option<u64>) {
+        *self.phase_wall_ns.entry(name.to_string()).or_default() += wall_ns;
+        let total = self.phase_cpu_ns.entry(name.to_string()).or_insert(Some(0));
+        *total = match (*total, cpu_ns) {
+            (Some(previous), Some(current)) => Some(previous.saturating_add(current)),
+            _ => None,
+        };
+    }
+
+    pub(crate) fn add_benchmark_wall_phase(&mut self, name: &'static str, wall_ns: u64) {
+        *self.phase_wall_ns.entry(name.to_string()).or_default() += wall_ns;
+        self.phase_cpu_ns.entry(name.to_string()).or_insert(None);
+    }
+}
+
+struct ProfileTimer<'a> {
+    profile: &'a mut MemoryRecallProfile,
+    name: &'static str,
+    wall_started: Instant,
+    cpu_started_ns: Option<u64>,
+}
+
+impl<'a> ProfileTimer<'a> {
+    fn start(profile: Option<&'a mut MemoryRecallProfile>, name: &'static str) -> Option<Self> {
+        profile.map(|profile| Self {
+            profile,
+            name,
+            wall_started: Instant::now(),
+            cpu_started_ns: thread_cpu_time_ns(),
+        })
+    }
+
+    fn finish(self) {
+        let wall_ns = self.wall_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let cpu_ns = self
+            .cpu_started_ns
+            .zip(thread_cpu_time_ns())
+            .map(|(started, finished)| finished.saturating_sub(started));
+        self.profile.add_phase(self.name, wall_ns, cpu_ns);
+    }
+}
+
+#[cfg(unix)]
+fn thread_cpu_time_ns() -> Option<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+    (result == 0).then(|| {
+        (time.tv_sec.max(0) as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(time.tv_nsec.max(0) as u64)
+    })
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_time_ns() -> Option<u64> {
+    None
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,6 +308,92 @@ impl MemorySession {
         recall_on(&self.connection, scope, query, at, limit)
     }
 
+    pub(crate) fn recall_profiled_ordered(
+        &self,
+        scope: &str,
+        query: &str,
+        at: Option<&str>,
+        limit: usize,
+        candidate_order: RecallCandidateOrder,
+    ) -> Result<(Vec<MemorySearchResult>, MemoryRecallProfile)> {
+        let mut profile = MemoryRecallProfile {
+            candidate_strategy: Some(candidate_order.label()),
+            temporal_filter_location: Some(
+                "SQLite WHERE predicates; included in candidate-step time",
+            ),
+            temporal_rejections_observable: false,
+            unavailable_measurements: vec![
+                "FTS5 term-posting traversal count is not exposed; SQLite scan-status NVISIT counts plan-loop rows, not internal postings examined",
+                "allocation count is unavailable; the system allocator is not instrumented",
+                "per-query peak temporary memory is unavailable; process RSS is measured by the outer benchmark",
+                "physical index-page reads are unavailable; SQLite cache misses do not imply filesystem reads",
+            ],
+            ..MemoryRecallProfile::default()
+        };
+        let results = recall_on_profiled(
+            &self.connection,
+            scope,
+            query,
+            at,
+            limit,
+            Some(&mut profile),
+            candidate_order,
+        )?;
+        profile.result_count = results.len();
+        let count_started = Instant::now();
+        let active_scope_record_count = self.connection.query_row(
+            "SELECT count(*) FROM memories WHERE scope=?1 AND deleted_at IS NULL",
+            [scope],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        profile.active_scope_record_count = Some(active_scope_record_count);
+        profile.output_fraction_of_scope = (active_scope_record_count > 0)
+            .then(|| profile.candidates_hydrated as f64 / active_scope_record_count as f64);
+        profile.candidate_budget_saturated =
+            profile.candidate_limit > 0 && profile.candidates_hydrated == profile.candidate_limit;
+        profile.add_benchmark_wall_phase(
+            "diagnostic_active_scope_count",
+            count_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
+        profile.sqlite_cache_size_kib = self
+            .connection
+            .pragma_query_value(None, "cache_size", |row| row.get::<_, i64>(0))
+            .ok()
+            .map(|value| {
+                if value < 0 {
+                    value.unsigned_abs()
+                } else {
+                    let page_size = self
+                        .connection
+                        .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+                        .unwrap_or(4096)
+                        .max(1) as u64;
+                    value as u64 * page_size / 1024
+                }
+            });
+        profile.sqlite_cache_used_bytes =
+            sqlite_db_status(&self.connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED);
+        Ok((results, profile))
+    }
+
+    pub(crate) fn set_page_cache_size_kib(&self, cache_size_kib: usize) -> Result<()> {
+        if !(1..=65_536).contains(&cache_size_kib) {
+            bail!("SQLite page cache size must be between 1 and 65536 KiB");
+        }
+        self.connection
+            .pragma_update(None, "cache_size", -(cache_size_kib as i64))?;
+        Ok(())
+    }
+
+    pub(crate) fn shrink_page_cache(&self) -> Result<()> {
+        self.connection.execute_batch("PRAGMA shrink_memory;")?;
+        Ok(())
+    }
+
+    pub(crate) fn page_cache_used_bytes(&self) -> Option<u64> {
+        sqlite_db_status(&self.connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED)
+    }
+
     pub(crate) fn list_memories(&self, scope: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
         list_memories_on(&self.connection, scope, limit)
     }
@@ -165,6 +403,15 @@ impl MemorySession {
     }
 
     pub(crate) fn recall_query_plan(&self, scope: &str, query: &str) -> Result<Vec<String>> {
+        self.recall_query_plan_ordered(scope, query, RecallCandidateOrder::Ranked)
+    }
+
+    pub(crate) fn recall_query_plan_ordered(
+        &self,
+        scope: &str,
+        query: &str,
+        candidate_order: RecallCandidateOrder,
+    ) -> Result<Vec<String>> {
         validate_scope(scope)?;
         let full_terms = normalized_tokens(query);
         let query_terms = informative_terms(&full_terms);
@@ -172,14 +419,25 @@ impl MemorySession {
             return Ok(Vec::new());
         }
         let match_query = memory_match_query(scope, &query_terms, &full_terms);
-        let mut statement = self
-            .connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {MEMORY_RECALL_SQL}"))?;
-        let rows = statement.query_map(params![match_query, scope, now_utc(), 10i64], |row| {
-            row.get(3)
-        })?;
-        rows.collect::<rusqlite::Result<Vec<String>>>()
-            .map_err(Into::into)
+        let orders = if matches!(candidate_order, RecallCandidateOrder::BalancedRowIdWindows) {
+            vec![
+                RecallCandidateOrder::RowIdAscending,
+                RecallCandidateOrder::RowIdDescending,
+            ]
+        } else {
+            vec![candidate_order]
+        };
+        let mut plans = Vec::new();
+        for order in orders {
+            let sql = format!("EXPLAIN QUERY PLAN {}", order.sql());
+            let mut statement = self.connection.prepare(&sql)?;
+            let rows = statement
+                .query_map(params![match_query, scope, now_utc(), 10i64], |row| {
+                    row.get(3)
+                })?;
+            plans.extend(rows.collect::<rusqlite::Result<Vec<String>>>()?);
+        }
+        Ok(plans)
     }
 }
 
@@ -404,6 +662,52 @@ fn recall_on(
     at: Option<&str>,
     limit: usize,
 ) -> Result<Vec<MemorySearchResult>> {
+    recall_on_profiled(
+        conn,
+        scope,
+        query,
+        at,
+        limit,
+        None,
+        configured_candidate_order(),
+    )
+}
+
+fn configured_candidate_order() -> RecallCandidateOrder {
+    #[cfg(feature = "retrieval-experiments")]
+    if let Ok(order) = std::env::var("AETHER_RECALL_EXPERIMENT") {
+        match order.as_str() {
+            "ranked" => return RecallCandidateOrder::Ranked,
+            "rowid_ascending" => return RecallCandidateOrder::RowIdAscending,
+            "rowid_descending" => return RecallCandidateOrder::RowIdDescending,
+            "rowid_balanced_windows" => return RecallCandidateOrder::BalancedRowIdWindows,
+            _ => {}
+        }
+    }
+    RecallCandidateOrder::BalancedRowIdWindows
+}
+
+fn recall_on_profiled(
+    conn: &Connection,
+    scope: &str,
+    query: &str,
+    at: Option<&str>,
+    limit: usize,
+    mut profile: Option<&mut MemoryRecallProfile>,
+    candidate_order: RecallCandidateOrder,
+) -> Result<Vec<MemorySearchResult>> {
+    let scanstatus_enabled = if profile.is_some() {
+        sqlite_scanstatus_enabled(conn)
+    } else {
+        false
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.sqlite_scanstatus_available = scanstatus_enabled;
+    }
+    let total_wall_started = profile.as_ref().map(|_| Instant::now());
+    let total_cpu_started = profile.as_ref().and_then(|_| thread_cpu_time_ns());
+
+    let phase = ProfileTimer::start(profile.as_deref_mut(), "query_validation");
     validate_scope(scope)?;
     if query.trim().is_empty() {
         bail!("recall query cannot be empty");
@@ -415,55 +719,200 @@ fn recall_on(
         .map(normalize_timestamp)
         .transpose()?
         .unwrap_or_else(now_utc);
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+
+    let phase = ProfileTimer::start(profile.as_deref_mut(), "unicode_normalization");
     let full_terms = normalized_tokens(query);
     if full_terms.len() > MAX_MEMORY_QUERY_TERMS {
         bail!("memory recall query contains more than {MAX_MEMORY_QUERY_TERMS} searchable terms");
     }
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+
+    let phase = ProfileTimer::start(profile.as_deref_mut(), "stopword_filtering");
     let query_terms = informative_terms(&full_terms);
     if query_terms.is_empty() {
+        finish_profile_total(
+            profile.as_deref_mut(),
+            total_wall_started,
+            total_cpu_started,
+        );
         return Ok(Vec::new());
     }
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+
+    let candidate_order = if query_terms.len() == 1 {
+        candidate_order
+    } else {
+        RecallCandidateOrder::Ranked
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.candidate_strategy = Some(candidate_order.label());
+    }
+
+    let phase = ProfileTimer::start(profile.as_deref_mut(), "fts_query_construction");
     let match_query = memory_match_query(scope, &query_terms, &full_terms);
     let result_limit = limit.clamp(1, 100);
     let candidate_limit = result_limit
         .saturating_mul(MAX_RERANK_MULTIPLIER)
         .min(MAX_RERANK_CANDIDATES)
         .max(result_limit);
-    let mut stmt = conn.prepare_cached(MEMORY_RECALL_SQL)?;
-    let rows = stmt.query_map(
-        params![match_query, scope, at, candidate_limit as i64],
-        |row| {
-            let memory = MemoryRecord {
-                id: row.get(0)?,
-                scope: row.get(1)?,
-                kind: row.get(2)?,
-                content: row.get(3)?,
-                source_uri: row.get(4)?,
-                source_id: row.get(5)?,
-                supersedes_id: row.get(6)?,
-                created_at: row.get(7)?,
-                observed_at: row.get(8)?,
-                valid_from: row.get(9)?,
-                valid_to: row.get(10)?,
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.candidate_limit = candidate_limit;
+    }
+
+    let cache_before = profile.is_some().then(|| sqlite_cache_snapshot(conn));
+    let mut candidates = Vec::with_capacity(candidate_limit.min(64));
+    let mut candidate_ids = matches!(candidate_order, RecallCandidateOrder::BalancedRowIdWindows)
+        .then(|| HashSet::with_capacity(candidate_limit.min(64)));
+    let (scan_specs, scan_count, ascending_budget) = match candidate_order {
+        RecallCandidateOrder::BalancedRowIdWindows => {
+            let ascending_budget = candidate_limit.div_ceil(2);
+            (
+                [
+                    (RecallCandidateOrder::RowIdAscending, ascending_budget),
+                    (
+                        RecallCandidateOrder::RowIdDescending,
+                        candidate_limit - ascending_budget,
+                    ),
+                ],
+                2,
+                Some(ascending_budget),
+            )
+        }
+        order => ([(order, candidate_limit), (order, 0)], 1, None),
+    };
+    for (scan_index, (order, scan_limit)) in scan_specs.into_iter().take(scan_count).enumerate() {
+        if scan_limit == 0 {
+            continue;
+        }
+        let sql = order.sql();
+        let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_statement_prepare");
+        let mut stmt = conn.prepare_cached(sql)?;
+        if let Some(phase) = phase {
+            phase.finish();
+        }
+        if profile.is_some() {
+            sqlite_reset_statement_profile(conn, sql);
+        }
+
+        let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_parameter_bind");
+        let mut rows = stmt.query(params![&match_query, scope, at, scan_limit as i64])?;
+        if let Some(phase) = phase {
+            phase.finish();
+        }
+
+        let mut scan_rows = 0;
+        loop {
+            let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
+            let next = rows.next();
+            if let Some(phase) = phase {
+                phase.finish();
+            }
+            let row = match next.context("read memory search results")? {
+                Some(row) => row,
+                None => break,
             };
-            let rank: f64 = row.get(11)?;
-            Ok((
-                MemorySearchResult {
-                    memory,
-                    match_reason: "memory_lexical".into(),
-                    score: (20.0 + (-rank * 1_000_000.0).clamp(0.0, 30.0)).clamp(0.0, 50.0),
-                },
-                rank,
-            ))
-        },
-    )?;
-    let candidates = rows
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("read memory search results")?;
+            scan_rows += 1;
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.candidates_returned += 1;
+            }
+
+            let phase = ProfileTimer::start(profile.as_deref_mut(), "candidate_record_hydration");
+            let candidate = (|| -> rusqlite::Result<Option<(MemorySearchResult, f64)>> {
+                let id: i64 = row.get(0)?;
+                if candidate_ids
+                    .as_mut()
+                    .is_some_and(|candidate_ids| !candidate_ids.insert(id))
+                {
+                    return Ok(None);
+                }
+                let memory = MemoryRecord {
+                    id,
+                    scope: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                    source_uri: row.get(4)?,
+                    source_id: row.get(5)?,
+                    supersedes_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    observed_at: row.get(8)?,
+                    valid_from: row.get(9)?,
+                    valid_to: row.get(10)?,
+                };
+                let rank: f64 = row.get(11)?;
+                Ok(Some((
+                    MemorySearchResult {
+                        memory,
+                        match_reason: "memory_lexical".into(),
+                        score: (20.0 + (-rank * 1_000_000.0).clamp(0.0, 30.0)).clamp(0.0, 50.0),
+                    },
+                    rank,
+                )))
+            })();
+            if let Some(phase) = phase {
+                phase.finish();
+            }
+            if let Some(candidate) = candidate.context("hydrate memory search candidate")? {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.candidates_hydrated += 1;
+                    profile.content_bytes_hydrated += candidate.0.memory.content.len();
+                    profile.record_bytes_hydrated += memory_record_bytes(&candidate.0.memory);
+                }
+                candidates.push(candidate);
+            } else if let Some(profile) = profile.as_deref_mut() {
+                profile.candidate_rows_deduplicated += 1;
+            }
+        }
+        drop(rows);
+        drop(stmt);
+        if let Some(profile) = profile.as_deref_mut() {
+            sqlite_statement_profile(conn, sql, profile);
+        }
+        if scan_index == 0 && ascending_budget.is_some_and(|budget| scan_rows < budget) {
+            break;
+        }
+    }
+    if let Some(profile) = profile.as_deref_mut()
+        && let Some(cache_before) = cache_before
+    {
+        let cache_after = sqlite_cache_snapshot(conn);
+        profile.sqlite_cache_hits = cache_after
+            .hits
+            .zip(cache_before.hits)
+            .map(|(after, before)| after.saturating_sub(before));
+        profile.sqlite_cache_misses = cache_after
+            .misses
+            .zip(cache_before.misses)
+            .map(|(after, before)| after.saturating_sub(before));
+        profile.sqlite_cache_writes = cache_after
+            .writes
+            .zip(cache_before.writes)
+            .map(|(after, before)| after.saturating_sub(before));
+        profile.sqlite_cache_spills = cache_after
+            .spills
+            .zip(cache_before.spills)
+            .map(|(after, before)| after.saturating_sub(before));
+    }
+
     let mut ranked = candidates
         .into_iter()
         .filter_map(|(mut result, rank)| {
+            let phase = ProfileTimer::start(profile.as_deref_mut(), "candidate_text_tokenization");
             let content_terms = token_vec(&result.memory.content);
+            if let Some(phase) = phase {
+                phase.finish();
+            }
+
+            let phase = ProfileTimer::start(profile.as_deref_mut(), "lexical_scoring");
             let matched_terms = query_terms
                 .iter()
                 .filter(|term| {
@@ -473,16 +922,25 @@ fn recall_on(
                 })
                 .count();
             let required_matches = MIN_DISTINCT_TERM_MATCHES.min(query_terms.len());
-            if matched_terms < required_matches {
-                return None;
-            }
-            let exact_phrase = contains_contiguous_terms(&content_terms, &full_terms);
+            let rejected_by_term_coverage = matched_terms < required_matches;
+            let exact_phrase = !rejected_by_term_coverage
+                && contains_contiguous_terms(&content_terms, &full_terms);
             if exact_phrase {
                 result.match_reason = "memory_exact_phrase".into();
+            }
+            if let Some(phase) = phase {
+                phase.finish();
+            }
+            if rejected_by_term_coverage {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.candidates_rejected_by_term_coverage += 1;
+                }
+                return None;
             }
             Some((result, exact_phrase, matched_terms, rank))
         })
         .collect::<Vec<_>>();
+    let phase = ProfileTimer::start(profile.as_deref_mut(), "final_sort");
     ranked.sort_by(|left, right| {
         right
             .1
@@ -492,11 +950,248 @@ fn recall_on(
             .then_with(|| right.0.memory.created_at.cmp(&left.0.memory.created_at))
             .then_with(|| right.0.memory.id.cmp(&left.0.memory.id))
     });
-    Ok(ranked
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+    let results = ranked
         .into_iter()
         .take(result_limit)
         .map(|(result, _, _, _)| result)
-        .collect())
+        .collect::<Vec<_>>();
+    finish_profile_total(profile, total_wall_started, total_cpu_started);
+    Ok(results)
+}
+
+fn finish_profile_total(
+    profile: Option<&mut MemoryRecallProfile>,
+    wall_started: Option<Instant>,
+    cpu_started_ns: Option<u64>,
+) {
+    if let (Some(profile), Some(wall_started)) = (profile, wall_started) {
+        let wall_ns = wall_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let cpu_ns = cpu_started_ns
+            .zip(thread_cpu_time_ns())
+            .map(|(started, finished)| finished.saturating_sub(started));
+        profile.add_phase("total", wall_ns, cpu_ns);
+    }
+}
+
+fn memory_record_bytes(memory: &MemoryRecord) -> usize {
+    memory.scope.len()
+        + memory.kind.len()
+        + memory.content.len()
+        + memory.source_uri.as_ref().map_or(0, String::len)
+        + memory.created_at.len()
+        + memory.observed_at.as_ref().map_or(0, String::len)
+        + memory.valid_from.as_ref().map_or(0, String::len)
+        + memory.valid_to.as_ref().map_or(0, String::len)
+}
+
+#[derive(Default)]
+struct SqliteCacheSnapshot {
+    hits: Option<u64>,
+    misses: Option<u64>,
+    writes: Option<u64>,
+    spills: Option<u64>,
+}
+
+fn sqlite_cache_snapshot(connection: &Connection) -> SqliteCacheSnapshot {
+    SqliteCacheSnapshot {
+        hits: sqlite_db_status(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_HIT),
+        misses: sqlite_db_status(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS),
+        writes: sqlite_db_status(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE),
+        spills: sqlite_db_status(connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_SPILL),
+    }
+}
+
+fn sqlite_db_status(connection: &Connection, operation: i32) -> Option<u64> {
+    let mut current = 0;
+    let mut highwater = 0;
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_db_status(
+            connection.handle(),
+            operation,
+            &mut current,
+            &mut highwater,
+            0,
+        )
+    };
+    (result == rusqlite::ffi::SQLITE_OK).then_some(current.max(0) as u64)
+}
+
+#[cfg(feature = "sqlite-scanstatus")]
+fn sqlite_scanstatus_enabled(connection: &Connection) -> bool {
+    let compiled: bool = connection
+        .query_row(
+            "SELECT sqlite_compileoption_used('ENABLE_STMT_SCANSTATUS')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    compiled
+        && connection
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_STMT_SCANSTATUS,
+                true,
+            )
+            .unwrap_or(false)
+}
+
+#[cfg(not(feature = "sqlite-scanstatus"))]
+fn sqlite_scanstatus_enabled(_connection: &Connection) -> bool {
+    false
+}
+
+fn sqlite_statement_profile(connection: &Connection, sql: &str, profile: &mut MemoryRecallProfile) {
+    let statement = unsafe { sqlite_statement_for_sql(connection, sql) };
+    if statement.is_null() {
+        return;
+    }
+    unsafe {
+        let status = |operation| {
+            let value = rusqlite::ffi::sqlite3_stmt_status(statement, operation, 0);
+            (value >= 0).then_some(value as u64)
+        };
+        add_sqlite_counter(
+            &mut profile.sqlite_vm_steps,
+            status(rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP),
+        );
+        add_sqlite_counter(
+            &mut profile.sqlite_fullscan_steps,
+            status(rusqlite::ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP),
+        );
+        add_sqlite_counter(
+            &mut profile.sqlite_sort_operations,
+            status(rusqlite::ffi::SQLITE_STMTSTATUS_SORT),
+        );
+        add_sqlite_counter(
+            &mut profile.sqlite_statement_memory_bytes,
+            status(rusqlite::ffi::SQLITE_STMTSTATUS_MEMUSED),
+        );
+
+        #[cfg(feature = "sqlite-scanstatus")]
+        {
+            let mut loops = Vec::new();
+            let mut index = 0;
+            loop {
+                let mut count = 0i64;
+                let result = rusqlite::ffi::sqlite3_stmt_scanstatus_v2(
+                    statement,
+                    index,
+                    rusqlite::ffi::SQLITE_SCANSTAT_NLOOP,
+                    0,
+                    &mut count as *mut i64 as *mut c_void,
+                );
+                if result != rusqlite::ffi::SQLITE_OK {
+                    if index == 0 {
+                        profile.sqlite_scanstatus_available = false;
+                        profile.sqlite_scan_loops = None;
+                    } else {
+                        merge_scan_loops(&mut profile.sqlite_scan_loops, loops);
+                    }
+                    return;
+                }
+                let mut visits = 0i64;
+                let visits_result = rusqlite::ffi::sqlite3_stmt_scanstatus_v2(
+                    statement,
+                    index,
+                    rusqlite::ffi::SQLITE_SCANSTAT_NVISIT,
+                    0,
+                    &mut visits as *mut i64 as *mut c_void,
+                );
+                let mut name: *const std::ffi::c_char = ptr::null();
+                let name_result = rusqlite::ffi::sqlite3_stmt_scanstatus_v2(
+                    statement,
+                    index,
+                    rusqlite::ffi::SQLITE_SCANSTAT_NAME,
+                    0,
+                    &mut name as *mut *const std::ffi::c_char as *mut c_void,
+                );
+                if visits_result != rusqlite::ffi::SQLITE_OK
+                    || name_result != rusqlite::ffi::SQLITE_OK
+                {
+                    profile.sqlite_scanstatus_available = false;
+                    profile.sqlite_scan_loops = None;
+                    return;
+                }
+                let name = if name.is_null() {
+                    "unknown".to_string()
+                } else {
+                    CStr::from_ptr(name).to_string_lossy().into_owned()
+                };
+                loops.push(SqliteScanLoop {
+                    name,
+                    loops: count,
+                    visits,
+                });
+                index += 1;
+            }
+        }
+        #[cfg(not(feature = "sqlite-scanstatus"))]
+        {
+            profile.sqlite_scanstatus_available = false;
+            profile.sqlite_scan_loops = None;
+        }
+    }
+}
+
+fn add_sqlite_counter(total: &mut Option<u64>, value: Option<u64>) {
+    *total = match (*total, value) {
+        (Some(total), Some(value)) => Some(total.saturating_add(value)),
+        (None, value) => value,
+        (total, None) => total,
+    };
+}
+
+#[cfg(feature = "sqlite-scanstatus")]
+fn merge_scan_loops(total: &mut Option<Vec<SqliteScanLoop>>, incoming: Vec<SqliteScanLoop>) {
+    let total = total.get_or_insert_with(Vec::new);
+    for incoming in incoming {
+        if let Some(existing) = total.iter_mut().find(|entry| entry.name == incoming.name) {
+            existing.loops += incoming.loops;
+            existing.visits += incoming.visits;
+        } else {
+            total.push(incoming);
+        }
+    }
+}
+
+fn sqlite_reset_statement_profile(connection: &Connection, sql: &str) {
+    let statement = unsafe { sqlite_statement_for_sql(connection, sql) };
+    if statement.is_null() {
+        return;
+    }
+    unsafe {
+        for operation in [
+            rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP,
+            rusqlite::ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP,
+            rusqlite::ffi::SQLITE_STMTSTATUS_SORT,
+            rusqlite::ffi::SQLITE_STMTSTATUS_REPREPARE,
+            rusqlite::ffi::SQLITE_STMTSTATUS_RUN,
+        ] {
+            rusqlite::ffi::sqlite3_stmt_status(statement, operation, 1);
+        }
+        #[cfg(feature = "sqlite-scanstatus")]
+        rusqlite::ffi::sqlite3_stmt_scanstatus_reset(statement);
+    }
+}
+
+unsafe fn sqlite_statement_for_sql(
+    connection: &Connection,
+    expected_sql: &str,
+) -> *mut rusqlite::ffi::sqlite3_stmt {
+    let database = unsafe { connection.handle() };
+    let mut statement = unsafe { rusqlite::ffi::sqlite3_next_stmt(database, ptr::null_mut()) };
+    while !statement.is_null() {
+        let actual_sql = unsafe { rusqlite::ffi::sqlite3_sql(statement) };
+        if !actual_sql.is_null()
+            && unsafe { CStr::from_ptr(actual_sql) }.to_bytes() == expected_sql.as_bytes()
+        {
+            return statement;
+        }
+        statement = unsafe { rusqlite::ffi::sqlite3_next_stmt(database, statement) };
+    }
+    ptr::null_mut()
 }
 
 pub fn list_memories(db_path: &Path, scope: &str, limit: usize) -> Result<Vec<MemoryRecord>> {

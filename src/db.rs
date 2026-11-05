@@ -56,6 +56,16 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
+    #[cfg(feature = "retrieval-experiments")]
+    if let Ok(raw_pages) = std::env::var("AETHER_WAL_AUTOCHECKPOINT_PAGES") {
+        let pages = raw_pages.parse::<u32>().with_context(
+            || "AETHER_WAL_AUTOCHECKPOINT_PAGES must be an integer between 1 and 1000000",
+        )?;
+        if !(1..=1_000_000).contains(&pages) {
+            bail!("AETHER_WAL_AUTOCHECKPOINT_PAGES must be between 1 and 1000000");
+        }
+        connection.pragma_update(None, "wal_autocheckpoint", pages)?;
+    }
     connection.pragma_update(None, "temp_store", "FILE")?;
     migrate(&connection)?;
     set_private_db_permissions(path)?;

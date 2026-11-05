@@ -154,6 +154,9 @@ enum Commands {
         /// Comma-separated record counts. Maximum is 100000 to keep the default local run bounded.
         #[arg(long, value_delimiter = ',', default_value = "1000,10000,100000")]
         sizes: Vec<usize>,
+        /// Collect per-phase retrieval timings and SQLite counters for 100 warm recall samples.
+        #[arg(long)]
+        profile_recall: bool,
     },
     #[command(hide = true)]
     FtsEval {
@@ -328,8 +331,14 @@ fn main() -> Result<()> {
             )?;
             print_json(&result)?;
         }
-        Commands::BenchMemory { sizes } => {
-            print_json(&benchmark::run_memory_scaling(&sizes)?)?;
+        Commands::BenchMemory {
+            sizes,
+            profile_recall,
+        } => {
+            print_json(&benchmark::run_memory_scaling_with_profile(
+                &sizes,
+                profile_recall,
+            )?)?;
         }
         Commands::FtsEval {
             repo,

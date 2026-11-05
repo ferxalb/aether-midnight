@@ -17,14 +17,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "benchmark" / "memory_quality_v1.json"
 DEFAULT_BINARY = ROOT / "target" / "release" / "aether-midnight"
+MIN_NOOP_SQLITE_VERSION = (3, 51, 0)
 
 
 def distribution(values):
+    """Summarize latency samples using the evaluator's nearest-index percentiles."""
     ordered = sorted(values)
     if not ordered:
-        return {"sample_count": 0, "p50_ms": None, "p95_ms": None, "p99_ms": None}
+        return {
+            "sample_count": 0,
+            "p50_ms": None,
+            "p95_ms": None,
+            "p99_ms": None,
+            "p99_9_ms": None,
+        }
 
     def percentile(p):
+        """Return the nearest-index percentile from the sorted sample."""
         return ordered[min(math.ceil((len(ordered) - 1) * p), len(ordered) - 1)]
 
     return {
@@ -32,11 +41,13 @@ def distribution(values):
         "p50_ms": percentile(0.50),
         "p95_ms": percentile(0.95),
         "p99_ms": percentile(0.99),
+        "p99_9_ms": percentile(0.999),
         "samples_ms": values,
     }
 
 
 def database_bytes(path):
+    """Return the size of a database and its WAL and SHM sidecar files."""
     return sum(
         candidate.stat().st_size
         for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
@@ -45,6 +56,7 @@ def database_bytes(path):
 
 
 def process_rss_bytes(pid):
+    """Read a process's resident set size in bytes, or return None if unavailable."""
     result = subprocess.run(
         ["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, check=False
     )
@@ -54,8 +66,43 @@ def process_rss_bytes(pid):
         return None
 
 
+def require_wal_checkpoint_noop():
+    """Reject Python SQLite versions that cannot safely inspect WAL progress."""
+    if sqlite3.sqlite_version_info < MIN_NOOP_SQLITE_VERSION:
+        version = ".".join(map(str, sqlite3.sqlite_version_info))
+        minimum = ".".join(map(str, MIN_NOOP_SQLITE_VERSION))
+        raise RuntimeError(
+            f"WAL progress sampling requires Python SQLite {minimum} or newer for "
+            f"wal_checkpoint(NOOP); found {version}"
+        )
+
+
+def wal_checkpoint_noop(connection):
+    """Read WAL progress without checkpointing or changing its policy."""
+    require_wal_checkpoint_noop()
+    try:
+        busy, log_frames, checkpointed_frames = connection.execute(
+            "PRAGMA wal_checkpoint(NOOP)"
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    return {
+        "busy": busy,
+        "log_frames": log_frames,
+        "checkpointed_frames": checkpointed_frames,
+        "uncheckpointed_frames": (
+            max(log_frames - checkpointed_frames, 0)
+            if log_frames >= 0 and checkpointed_frames >= 0
+            else None
+        ),
+    }
+
+
 class McpClient:
+    """Manage a persistent stdio MCP process for benchmark measurements."""
+
     def __init__(self, binary, database):
+        """Start the MCP server using the given binary and database path."""
         self.next_id = 0
         self.request_count = 0
         self.process = subprocess.Popen(
@@ -69,6 +116,7 @@ class McpClient:
         )
 
     def request(self, method, params):
+        """Send one JSON-RPC request and return timing, response, and wire size."""
         self.next_id += 1
         self.request_count += 1
         request = {
@@ -92,6 +140,7 @@ class McpClient:
         return elapsed_ms, response, len(wire_request.encode()) + len(line.encode())
 
     def call(self, name, arguments):
+        """Call an MCP tool and return its decoded result and byte counts."""
         elapsed_ms, response, wire_bytes = self.request(
             "tools/call", {"name": name, "arguments": arguments}
         )
@@ -102,6 +151,7 @@ class McpClient:
         return elapsed_ms, json.loads(text), wire_bytes, len(text.encode())
 
     def close(self):
+        """Stop the MCP process and return its measured CPU usage."""
         if self.process.poll() is None:
             self.process.stdin.write('{"jsonrpc":"2.0","method":"exit"}\n')
             self.process.stdin.flush()
@@ -126,6 +176,7 @@ class McpClient:
 
 
 def fixture_records(fixture):
+    """Expand the frozen fixture with its deterministic background records."""
     records = list(fixture["records"])
     background = fixture["background_collection"]
     records.extend(
@@ -142,6 +193,7 @@ def fixture_records(fixture):
 
 
 def valid_at(memory, at):
+    """Return whether a memory record is valid at the requested timestamp."""
     if at is None:
         return True
     return (memory["valid_from"] is None or memory["valid_from"] <= at) and (
@@ -150,6 +202,7 @@ def valid_at(memory, at):
 
 
 def evaluate_query(query, samples, id_to_key):
+    """Compute retrieval quality and response metrics for one fixture query."""
     relevant = set(query["relevant"])
     results = samples[-1]["results"]
     actual = [id_to_key.get(item["memory"]["id"], f"unknown:{item['memory']['id']}") for item in results]
@@ -215,6 +268,7 @@ def evaluate_query(query, samples, id_to_key):
 
 
 def main():
+    """Run the frozen retrieval evaluation and collect WAL progress samples."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
@@ -225,6 +279,10 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
+    try:
+        require_wal_checkpoint_noop()
+    except RuntimeError as error:
+        parser.error(str(error))
     binary = args.binary.resolve()
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}; run cargo build --release --locked first")
@@ -252,10 +310,13 @@ def main():
     first_tool_ms, _, _, _ = client.call(
         "list_memories", {"scope": "user:maya", "limit": 10}
     )
+    wal_probe = sqlite3.connect(database, isolation_level=None)
 
     key_to_id = {}
     id_to_key = {}
     remember_ms = []
+    remember_wal_samples = []
+    prior_checkpointed_frames = None
     for record in fixture_records(fixture):
         arguments = {
             key: record[key]
@@ -276,8 +337,73 @@ def main():
             arguments["supersedes_id"] = key_to_id[record["supersedes_key"]]
         elapsed, memory, _, _ = client.call("remember", arguments)
         remember_ms.append(elapsed)
+        wal_status = wal_checkpoint_noop(wal_probe)
+        checkpoint_progress = False
+        if wal_status is not None:
+            checkpointed_frames = wal_status["checkpointed_frames"]
+            checkpoint_progress = (
+                prior_checkpointed_frames is not None
+                and checkpointed_frames > prior_checkpointed_frames
+            )
+            prior_checkpointed_frames = checkpointed_frames
+        remember_wal_samples.append(
+            {
+                "sample_index": len(remember_ms),
+                "elapsed_ms": elapsed,
+                "wal_status": wal_status,
+                "checkpoint_progress_observed": checkpoint_progress,
+            }
+        )
         key_to_id[record["key"]] = memory["id"]
         id_to_key[memory["id"]] = record["key"]
+
+    wal_probe_autocheckpoint_pages = wal_probe.execute(
+        "PRAGMA wal_autocheckpoint"
+    ).fetchone()[0]
+    wal_writer_autocheckpoint_pages = int(
+        os.environ.get("AETHER_WAL_AUTOCHECKPOINT_PAGES", "1000")
+    )
+    wal_probe.close()
+    remember_outliers = [sample for sample in remember_wal_samples if sample["elapsed_ms"] >= 4]
+    checkpoint_progress_latencies = [
+        sample["elapsed_ms"]
+        for sample in remember_wal_samples
+        if sample["checkpoint_progress_observed"]
+    ]
+    stable_checkpoint_latencies = [
+        sample["elapsed_ms"]
+        for sample in remember_wal_samples
+        if sample["wal_status"] is not None and not sample["checkpoint_progress_observed"]
+    ]
+    observed_wal_status = [
+        sample["wal_status"]
+        for sample in remember_wal_samples
+        if sample["wal_status"] is not None
+    ]
+    wal_diagnostics = {
+        "probe": "PRAGMA wal_checkpoint(NOOP), sampled after each completed remember call; it does not checkpoint",
+        "writer_autocheckpoint_pages_requested": wal_writer_autocheckpoint_pages,
+        "probe_connection_autocheckpoint_pages": wal_probe_autocheckpoint_pages,
+        "status_available": any(sample["wal_status"] is not None for sample in remember_wal_samples),
+        "maximum_observed_log_frames": max(
+            (status["log_frames"] for status in observed_wal_status if status["log_frames"] >= 0),
+            default=None,
+        ),
+        "maximum_observed_uncheckpointed_frames": max(
+            (
+                status["uncheckpointed_frames"]
+                for status in observed_wal_status
+                if status["uncheckpointed_frames"] is not None
+            ),
+            default=None,
+        ),
+        "checkpoint_progress_sample_count": len(checkpoint_progress_latencies),
+        "latency_with_checkpoint_progress": distribution(checkpoint_progress_latencies),
+        "latency_without_observed_checkpoint_progress": distribution(stable_checkpoint_latencies),
+        "remember_calls_at_least_4ms": len(remember_outliers),
+        "outlier_samples": remember_outliers,
+        "raw_samples": remember_wal_samples,
+    }
 
     forget_ms = []
     for key in fixture["forget_keys"]:
@@ -396,6 +522,7 @@ def main():
             "initialize_wire_bytes": initialize_wire_bytes,
             "first_tool_list_memories_ms": first_tool_ms,
             "individual_remember": distribution(remember_ms),
+            "individual_remember_wal_diagnostics": wal_diagnostics,
             "warm_recall": distribution(recall_ms),
             "list_memories": distribution(list_ms),
             "forget": distribution(forget_ms),

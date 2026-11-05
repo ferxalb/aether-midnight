@@ -1,5 +1,17 @@
 # Performance and memory investigation
 
+## v0.3 high-fan-out recall and write-tail investigation (2026-11-05)
+
+The current follow-up starts from `9d39467b5c5531bb53464b3f1ce4254304ef6077`; the measured implementation is `667cea3ad1cb3c475d5deeaf675f5eb374fcdf09` on `perf/midnight-v03-end-to-end-engine`. The main root cause is now measured: with 25,025 active records in one namespace and 50 bounded candidates, `sqlite_candidate_step` consumed about 26.8 ms p50 in the BM25-ranked query, while row hydration consumed about 0.03 ms and the remaining Rust phases were also small. The FTS query and rank execution dominate this broad one-term case. SQLite scanstatus exposes 50 FTS loop rows and 50 primary-key lookups here; it does not count FTS term postings, so the number of internal postings read remains unknown.
+
+The retained implementation uses two bounded row-ID windows for one-informative-term queries only. On the paired profile run it lowered p95 for the profiled broad query from 29.7 to 8.4 ms; the independent persistent-session scale run measured a 7.43 ms median p95 across three 100-sample runs, versus the 26.51 ms baseline run. The original v0.2 development and held-out query metrics were unchanged. This is approximate candidate selection: it can omit matching records between the windows. The new fixture's English query still misses its Spanish-labeled source because no query token matches; both ranked and balanced paths show that limitation. See the [performance report](performance.md) for complete tables and the committed compact evidence summary.
+
+Two suspected optimizations were rejected. Hydration was under 0.06 ms p99, so a second late-materialization lookup would add work around the measured bottleneck. Increasing the SQLite cache limit from 2 MiB through 16 MiB did not improve query latency; actual page-cache use stayed around 0.8 MiB in that fixture.
+
+The write-tail probe measured 10,027 persistent MCP `remember` calls and sampled `PRAGMA wal_checkpoint(NOOP)` after each response. In the 1,000-page default policy, 23 of 28 calls above 4 ms across three counterbalanced runs coincided with a rise in checkpointed frames. The event group was slower than the no-progress group. This is strong evidence that automatic checkpoint work drives most observed spikes, but commit, checkpoint, filesystem sync, and lock-wait durations were not separately timed. The 256-page threshold increased checkpoint frequency and p95; 4,096 pages raised WAL growth and p99.9. We kept the default and `synchronous=NORMAL` durability setting.
+
+The local release-scale campaign measured persistent broad recall p95 at 1k, 10k, and 100k records, with 100 samples per size. Three repeated 100k runs had p95 between 7.32 and 7.53 ms and p99 between 7.51 and 9.94 ms. One initial 100-sample campaign produced a 40.8 ms p99 that the three repeats did not reproduce; it remains preserved as tail-variability evidence. The 200-query evaluation, macOS-native comparison, late materialization prototype, large-payload memory campaign, multi-process contention test, and explicit transaction/commit timing were not completed in this follow-up.
+
 ## Scope and evidence
 
 The investigation started on the Intel macOS reference host after Activity Monitor showed `aether-midnight` at about 126% CPU during a repeated Linux Kernel index benchmark. The observation identified active CPU work; it did not measure process memory and did not establish a leak.

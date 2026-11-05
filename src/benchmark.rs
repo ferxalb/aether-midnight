@@ -207,7 +207,7 @@ pub fn run(
     let heldout_quality =
         retrieval_suite_quality(&heldout_db, &heldout_repo, &heldout_suite.queries)?;
     let rg = ripgrep_baseline(&repo, &manifest.queries)?;
-    let memory_scaling = memory_scaling(base.path(), &[1_000, 10_000, 100_000])?;
+    let memory_scaling = memory_scaling(base.path(), &[1_000, 10_000, 100_000], false)?;
     let incremental = incremental_samples(&primary_db, &repo, 30)?;
     let partial_context = partial_context_during_index(base.path(), &repo, cold_query, 30)?;
     let stress = stress_cycles_run(base.path(), stress_cycles.max(1))?;
@@ -541,14 +541,18 @@ fn sqlite_file_bytes(path: &Path) -> u64 {
 }
 
 pub fn run_memory_scaling(sizes: &[usize]) -> Result<Value> {
+    run_memory_scaling_with_profile(sizes, false)
+}
+
+pub fn run_memory_scaling_with_profile(sizes: &[usize], profile_recall: bool) -> Result<Value> {
     if sizes.is_empty() || sizes.iter().any(|size| !(4..=100_000).contains(size)) {
         bail!("memory benchmark sizes must be between 4 and 100000 records");
     }
     let base = TempDir::new().context("create isolated memory benchmark directory")?;
-    memory_scaling(base.path(), sizes)
+    memory_scaling(base.path(), sizes, profile_recall)
 }
 
-fn memory_scaling(base: &Path, requested_sizes: &[usize]) -> Result<Value> {
+fn memory_scaling(base: &Path, requested_sizes: &[usize], profile_recall: bool) -> Result<Value> {
     let scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
     let mut workloads = Vec::new();
     for target in requested_sizes.iter().copied() {
@@ -748,6 +752,74 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize]) -> Result<Value> {
             }
             persistent_recall_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         }
+        let mut high_fanout_profile_samples = Vec::new();
+        let mut rowid_newest_profile_samples = Vec::new();
+        let mut rowid_oldest_profile_samples = Vec::new();
+        let mut rowid_balanced_profile_samples = Vec::new();
+        let mut selective_profile_samples = Vec::new();
+        if profile_recall {
+            for (query_class, query, candidate_order, samples) in [
+                (
+                    "high_fanout_ranked",
+                    "namespace",
+                    memory::RecallCandidateOrder::Ranked,
+                    &mut high_fanout_profile_samples,
+                ),
+                (
+                    "high_fanout_rowid_newest",
+                    "namespace",
+                    memory::RecallCandidateOrder::RowIdDescending,
+                    &mut rowid_newest_profile_samples,
+                ),
+                (
+                    "high_fanout_rowid_oldest",
+                    "namespace",
+                    memory::RecallCandidateOrder::RowIdAscending,
+                    &mut rowid_oldest_profile_samples,
+                ),
+                (
+                    "high_fanout_rowid_balanced",
+                    "namespace",
+                    memory::RecallCandidateOrder::BalancedRowIdWindows,
+                    &mut rowid_balanced_profile_samples,
+                ),
+                (
+                    "selective_single_term",
+                    "sourcequality000",
+                    memory::RecallCandidateOrder::BalancedRowIdWindows,
+                    &mut selective_profile_samples,
+                ),
+            ] {
+                for _ in 0..100 {
+                    let (result, mut profile) = memory_session.recall_profiled_ordered(
+                        scopes[0],
+                        query,
+                        None,
+                        10,
+                        candidate_order,
+                    )?;
+                    if query_class.starts_with("high_fanout") && result.is_empty() {
+                        bail!("profiled broad memory recall returned no results at size {target}");
+                    }
+                    if query_class == "selective_single_term" && result.len() != 1 {
+                        bail!(
+                            "profiled selective memory recall expected one result at size {target}"
+                        );
+                    }
+                    let serialization_started = Instant::now();
+                    let serialized = serde_json::to_vec(&result)?;
+                    profile.result_bytes_serialized = Some(serialized.len());
+                    profile.add_benchmark_wall_phase(
+                        "response_serialization",
+                        serialization_started
+                            .elapsed()
+                            .as_nanos()
+                            .min(u64::MAX as u128) as u64,
+                    );
+                    samples.push(serde_json::to_value(&profile)?);
+                }
+            }
+        }
         let mut persistent_delete_ids = Vec::new();
         for index in 0..30 {
             let record = memory_session.remember(
@@ -857,6 +929,26 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize]) -> Result<Value> {
             "delete": distribution(&persistent_delete_ms),
             "recall": distribution(&persistent_recall_ms)
         });
+        let recall_profile = if profile_recall {
+            let page_cache_experiment = profile_page_cache_sizes(&memory_session, scopes[0])?;
+            json!({
+                "enabled":true,
+                "query_plans":{
+                    "ranked":memory_session.recall_query_plan_ordered(scopes[0],"namespace",memory::RecallCandidateOrder::Ranked)?,
+                    "rowid_newest":memory_session.recall_query_plan_ordered(scopes[0],"namespace",memory::RecallCandidateOrder::RowIdDescending)?,
+                    "rowid_oldest":memory_session.recall_query_plan_ordered(scopes[0],"namespace",memory::RecallCandidateOrder::RowIdAscending)?,
+                    "rowid_balanced":memory_session.recall_query_plan_ordered(scopes[0],"namespace",memory::RecallCandidateOrder::BalancedRowIdWindows)?
+                },
+                "high_fanout_ranked":profile_retrieval_samples(&high_fanout_profile_samples),
+                "high_fanout_rowid_newest":profile_retrieval_samples(&rowid_newest_profile_samples),
+                "high_fanout_rowid_oldest":profile_retrieval_samples(&rowid_oldest_profile_samples),
+                "high_fanout_rowid_balanced":profile_retrieval_samples(&rowid_balanced_profile_samples),
+                "selective_single_term":profile_retrieval_samples(&selective_profile_samples),
+                "page_cache_experiment":page_cache_experiment
+            })
+        } else {
+            json!({"enabled":false})
+        };
         let retrieval_quality = json!({"labeled_query_count":quality.len(),"recall_at_1":quality_scores[0]/quality.len().max(1) as f64,
             "recall_at_5":quality_scores[1]/quality.len().max(1) as f64,"recall_at_10":quality_scores[2]/quality.len().max(1) as f64,
             "mrr":mrr/quality.len().max(1) as f64,"found_expected_record_count":quality_hits,"cross_namespace_checks":leakage_checks,
@@ -879,6 +971,7 @@ fn memory_scaling(base: &Path, requested_sizes: &[usize]) -> Result<Value> {
             "current_rss_during_30_store_samples_bytes":distribution_u64(&rss_during_store),
             "store":distribution(&store_ms),"update_by_supersession":distribution(&update_ms),"delete":distribution(&delete_ms),"recall":distribution(&recall_ms),
             "persistent_session":persistent_session,
+            "recall_profile":recall_profile,
             "recall_query_plan":recall_query_plan,
             "process_cpu_seconds_for_workload":workload_cpu_seconds,
             "process_cpu_seconds_per_stored_record":workload_cpu_seconds.map(|seconds|seconds/target.max(1) as f64),
@@ -1368,6 +1461,153 @@ fn distribution_u64(values: &[u64]) -> Value {
         sorted[ix.min(sorted.len() - 1)]
     };
     json!({"p50":percentile(0.50),"p95":percentile(0.95),"p99":percentile(0.99),"n":sorted.len(),"samples_sorted":sorted})
+}
+
+fn profile_retrieval_samples(samples: &[Value]) -> Value {
+    if samples.is_empty() {
+        return json!({"enabled":false});
+    }
+    let phase_names = [
+        "total",
+        "query_validation",
+        "unicode_normalization",
+        "stopword_filtering",
+        "fts_query_construction",
+        "sqlite_statement_prepare",
+        "sqlite_parameter_bind",
+        "sqlite_candidate_step",
+        "candidate_record_hydration",
+        "candidate_text_tokenization",
+        "lexical_scoring",
+        "final_sort",
+        "response_serialization",
+        "diagnostic_active_scope_count",
+    ];
+    let mut phases = serde_json::Map::new();
+    for name in phase_names {
+        let wall_ms = samples
+            .iter()
+            .filter_map(|sample| sample["phase_wall_ns"][name].as_u64())
+            .map(|ns| ns as f64 / 1_000_000.0)
+            .collect::<Vec<_>>();
+        let cpu_ms = samples
+            .iter()
+            .filter_map(|sample| sample["phase_cpu_ns"][name].as_u64())
+            .map(|ns| ns as f64 / 1_000_000.0)
+            .collect::<Vec<_>>();
+        phases.insert(
+            name.to_string(),
+            json!({
+                "wall_ms":distribution(&wall_ms),
+                "cpu_ms":distribution(&cpu_ms)
+            }),
+        );
+    }
+    let mut counters = serde_json::Map::new();
+    for name in [
+        "candidates_returned",
+        "candidate_rows_deduplicated",
+        "candidates_hydrated",
+        "candidates_rejected_by_term_coverage",
+        "content_bytes_hydrated",
+        "record_bytes_hydrated",
+        "sqlite_cache_hits",
+        "sqlite_cache_misses",
+        "sqlite_cache_writes",
+        "sqlite_cache_spills",
+        "sqlite_cache_size_kib",
+        "sqlite_cache_used_bytes",
+        "sqlite_vm_steps",
+        "sqlite_fullscan_steps",
+        "sqlite_sort_operations",
+        "sqlite_statement_memory_bytes",
+    ] {
+        let values = samples
+            .iter()
+            .filter_map(|sample| sample[name].as_u64())
+            .collect::<Vec<_>>();
+        counters.insert(name.to_string(), distribution_u64(&values));
+    }
+    json!({
+        "enabled":true,
+        "sample_count":samples.len(),
+        "candidate_strategy":samples[0]["candidate_strategy"],
+        "candidate_limit":samples[0]["candidate_limit"],
+        "active_scope_record_count":samples[0]["active_scope_record_count"],
+        "output_fraction_of_scope":samples[0]["output_fraction_of_scope"],
+        "candidate_budget_saturated":samples[0]["candidate_budget_saturated"],
+        "temporal_filter_location":samples[0]["temporal_filter_location"],
+        "temporal_rejections_observable":samples[0]["temporal_rejections_observable"],
+        "sqlite_scanstatus_available":samples[0]["sqlite_scanstatus_available"],
+        "sqlite_scanstatus_semantics":"NVISIT counts SQLite query-plan loop rows. It does not expose the number of internal FTS5 term postings examined.",
+        "sqlite_scan_loops":samples[0]["sqlite_scan_loops"],
+        "unavailable_measurements":samples[0]["unavailable_measurements"],
+        "phases":phases,
+        "counters":counters,
+        "raw_samples":samples
+    })
+}
+
+fn profile_page_cache_sizes(memory_session: &memory::MemorySession, scope: &str) -> Result<Value> {
+    let cache_sizes_kib = [2048usize, 8192, 4096, 16_384, 16_384, 4096, 8192, 2048];
+    let mut groups = Vec::with_capacity(cache_sizes_kib.len());
+    let mut expected_ids: Option<Vec<i64>> = None;
+    for (run_index, cache_size_kib) in cache_sizes_kib.into_iter().enumerate() {
+        memory_session.shrink_page_cache()?;
+        memory_session.set_page_cache_size_kib(cache_size_kib)?;
+        for _ in 0..10 {
+            let warm = memory_session.recall(scope, "namespace", None, 10)?;
+            if warm.is_empty() {
+                bail!("page-cache screen returned no broad recall results");
+            }
+        }
+        let mut latency_ms = Vec::with_capacity(100);
+        let mut observed_ids = None;
+        for _ in 0..100 {
+            let started = Instant::now();
+            let results = memory_session.recall(scope, "namespace", None, 10)?;
+            if results.is_empty() {
+                bail!("page-cache screen returned no broad recall results");
+            }
+            latency_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            observed_ids = Some(
+                results
+                    .iter()
+                    .map(|result| result.memory.id)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let observed_ids = observed_ids.unwrap_or_default();
+        let result_ids_stable = expected_ids
+            .as_ref()
+            .is_none_or(|expected| expected == &observed_ids);
+        if !result_ids_stable {
+            bail!("page-cache configuration changed deterministic recall results");
+        }
+        expected_ids.get_or_insert_with(|| observed_ids.clone());
+        groups.push(json!({
+            "run_index":run_index+1,
+            "round":if run_index<4 {1}else{2},
+            "cache_size_kib":cache_size_kib,
+            "warmup_queries":10,
+            "warm_recall":distribution(&latency_ms),
+            "sqlite_cache_used_bytes_after_run":memory_session.page_cache_used_bytes(),
+            "process_rss_bytes_after_run":current_rss_bytes(),
+            "result_ids_stable":result_ids_stable
+        }));
+    }
+    memory_session.shrink_page_cache()?;
+    memory_session.set_page_cache_size_kib(2048)?;
+    Ok(json!({
+        "workload":"broad single-term same-namespace recall",
+        "sample_count_per_group":100,
+        "query_limit":10,
+        "run_order":"2048,8192,4096,16384 KiB, then the reverse group order",
+        "warm_state":"10 warm-up recalls after PRAGMA shrink_memory; the host OS page cache was not flushed",
+        "database_result_ids_stable":true,
+        "default_cache_restored_kib":2048,
+        "groups":groups
+    }))
 }
 
 fn distribution_f64(values: &[f64]) -> Value {

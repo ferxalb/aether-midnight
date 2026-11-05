@@ -22,6 +22,8 @@ Memories are never inferred from conversations or stored automatically. Call `re
 
 `forget` immediately soft-deletes the row and removes its FTS postings in one SQLite statement/trigger path. Recall and listing filter forgotten rows, and the operation is namespace-scoped. The row's content remains in SQLite until `compact` clears forgotten content, optimizes FTS, checkpoints/truncates the WAL, and vacuums the database. This is logical deletion followed by database compaction, not a guarantee of forensic erasure: SQLite page reuse, filesystem snapshots, backups, and storage-device behavior can retain prior bytes. Midnight does not claim secure erasure. Forget does not implicitly delete facts that link to the forgotten source; callers should forget each derived record they intend to suppress. Provenance references can therefore point to a forgotten source by design, while normal recall/listing excludes that source.
 
+The bounded one-term recall path applies the exact namespace, non-deleted, and validity-time SQL predicates to both candidate windows before loading results. It changes which matching records may be sampled; it does not widen namespace access or bypass deletion and temporal filters. A namespace remains a retrieval boundary, not an authentication mechanism.
+
 Code and memories have separate tables, APIs, and indexes. Code queries require one repo/worktree scope; memory queries require one exact namespace. No default operation merges them.
 
 ## Operational limits

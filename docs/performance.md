@@ -232,3 +232,60 @@ The previous macOS report also summarized FTS5 and lifecycle memory results. The
 | 20 lifecycle cycles | RSS 28,827,648 bytes before and 28,884,992 bytes after; endpoint delta 57,344 bytes |
 
 The prior report stated that the four tokenizer queries had Recall@5 and MRR 1.00 for both tokenizers and that cancellation remained partial. These historical claims were not revalidated against their original raw vectors in this run.
+
+## v0.3 memory retrieval and WAL follow-up (2026-11-05)
+
+This campaign starts at baseline `9d39467b5c5531bb53464b3f1ce4254304ef6077` and measures candidate code at `667cea3ad1cb3c475d5deeaf675f5eb374fcdf09` on `perf/midnight-v03-end-to-end-engine`. It ran on Linux 6.18.57 x86_64, an AMD EPYC 9V74 VM with 3 visible vCPUs and 10,452,459,520 bytes of reported RAM, on an overlay filesystem over virtual `vda` storage whose backing medium is unknown. Rust was `1.99.1`; bundled SQLite was `3.54.1`. No OS page-cache flush was attempted. The release binary used the normal optimized, stripped profile. Phase profiling used an optimized, debug-symbol build and `SQLITE_ENABLE_STMT_SCANSTATUS`.
+
+### Broad-query results
+
+The benchmark stores 100,000 records across four namespaces; the measured namespace has 25,025 active records. It runs the warm `namespace` one-term query with a result limit of 10. Baseline and candidate are both 100-sample persistent-session runs. The candidate figures below summarize three separate 100-sample campaigns.
+
+| 100k broad recall | p50 ms | p95 ms | p99 ms | Samples |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline, BM25 rank ordering | 23.725 | 26.508 | 28.368 | 100 |
+| Candidate, balanced row-ID windows, median of three runs | 6.892 | 7.434 | 8.409 | 100 per run |
+
+Across the candidate runs, p50 ranged from 6.764–7.016 ms, p95 from 7.324–7.530 ms, and p99 from 7.511–9.938 ms. An initial full-scale run had a single 40.8 ms p99; three repeat runs did not reproduce that outlier. The repeated result meets the proposed 100k p95 ≤15 ms and p99 ≤25 ms targets on this host, with the first outlier retained as a warning about tail variability.
+
+The non-stripped, phase-profiled run collected 100 samples per strategy on the same database. BM25 ordering measured 27.010 / 29.723 / 32.231 ms p50/p95/p99, while balanced row-ID windows measured 7.144 / 8.439 / 16.164 ms. SQLite candidate stepping accounted for 26.846 / 29.541 / 32.066 ms of the ranked path and 6.963 / 8.226 / 15.955 ms of the candidate path. Hydration stayed below 0.06 ms p99 in both. This confirms that FTS query execution dominates this workload; full-record hydration and the Rust reranker are small contributors.
+
+Balanced selection takes up to 25 matching rows from each end of row-ID order when the first window fills. It de-duplicates overlaps before extracting record content and keeps the existing exact namespace, deletion, temporal, phrase, term-coverage, BM25, and stable tie-break checks. Selective one-term queries stop after the first window when it returns fewer than 25 rows; the profiled selective query returned one candidate in 0.828 / 0.980 / 1.075 ms p50/p95/p99. Multi-term queries retain BM25 rank ordering. This is a bounded sample, so a relevant one-term match between the windows can be omitted.
+
+`EXPLAIN QUERY PLAN` showed FTS5 row-ID virtual-table scans (`INDEX 64:rM2` and `INDEX 192:rM2`) plus primary-key memory lookups, with no temporary sort B-tree. Scanstatus reported two FTS loops and 50 plan-loop rows for the balanced strategy, versus one loop and 50 rows for ranked ordering. Statement VM steps were 1,330 versus 1,315; page-cache misses were 162 versus 565. FTS5 does not expose the internal number of term postings visited, so scanstatus rows must not be interpreted as posting counts. The eight-group 2/4/8/16 MiB cache screen did not improve recall materially; the database used about 0.8 MiB in all groups and the process RSS stayed about 15.6 MiB. No larger default cache was adopted.
+
+The normal release scaling run measured persistent recall at 1k records p50/p95/p99 0.459 / 0.710 / 0.796 ms, at 10k 1.080 / 1.377 / 1.472 ms, and at 100k 7.476 / 9.621 / 40.781 ms in that run. The 100k tail was the single outlier described above; the separate three-run series is the reportable repeated result. Database size after measured operations was 446,464 / 2,691,072 / 25,559,040 bytes at 1k / 10k / 100k. The mixed 1k-to-100k campaign's sampled cumulative process peak was 10,260,480 bytes; three isolated 100k runs were 9,478,144–9,744,384 bytes. These are RSS observations, not allocator live-heap measurements.
+
+### Retrieval quality
+
+The production default uses balanced windows only for queries with one informative term. On the unchanged 14-query v0.2 development split, the candidate exactly matched the baseline: Recall@1/5/10 0.500 / 0.958 / 0.958, Precision@5 0.317, MRR 0.875, nDCG@10 0.879, evidence completeness 0.950, false-positive rate 0, and namespace leaks 0. On the 11-query held-out split, metrics also matched exactly: Recall@1/5/10 0.625 / 1.000 / 1.000, Precision@5 0.300, MRR 0.917, nDCG@10 0.922, completeness 1.000, temporal accuracy 1.000, false-positive rate 0.333 (one of three negative queries), and namespace leaks 0.
+
+One supplemental broad-term development query was added before trying the candidate strategies. It asks for `status` and labels an English report plus a Spanish source that contains no shared `status` token. Both baseline and candidate returned the English report at rank 1 and missed the Spanish evidence, so Recall@10 remained 0.5 and Precision@5 remained 0.2. The candidate changed which irrelevant background rows filled the rest of the result list. Its MCP query p95 was 2.166 ms versus 9.193 ms for ranked ordering. This case shows a lexical cross-language limitation; it does not justify a semantic retrieval claim. The full 15-query supplemental development result was Recall@1/5/10 0.500 / 0.923 / 0.923, Precision@5 0.308, MRR 0.885, nDCG@10 0.859, completeness 0.909, temporal accuracy 1.000, no negative-query false positives, and zero namespace leaks.
+
+The fixture remains small (25 original queries plus one supplemental development case), with no confidence intervals. Precision@5 uses a fixed denominator of five, so a query with fewer than five relevant records has a lower maximum score. The candidate did not raise quality metrics, and the existing held-out false-positive limitation remains.
+
+The persistent MCP evaluator also measured 10,027 `remember` calls per development/held-out run. Across the two runs, remember p50/p95/p99 ranged 0.085–0.087 / 0.213–0.253 / 1.977–2.565 ms, while `forget` (n=31) p50/p95/p99 ranged 0.043–0.065 / 0.075–0.114 / 0.267–0.278 ms. Process CPU was 1.30–1.37 seconds for about 10,165 requests, and RSS before close was 9.22–9.42 MB. The database plus WAL/SHM measured 10,482,616 bytes before close and 5,369,856 bytes after close. These are local Linux fixture results and do not replace the separate macOS evidence above.
+
+### WAL checkpoint investigation
+
+The MCP evaluator measured 10,027 individual `remember` requests per run and read `PRAGMA wal_checkpoint(NOOP)` after each completed response. `NOOP` reports WAL progress without performing a checkpoint. The default writer threshold was 1,000 pages. In three counterbalanced runs, median per-run p50/p95/p99/p99.9 was 0.097 / 0.278 / 1.962 / 3.159 ms; p99 stayed below the proposed 4 ms target. There were 106 observed checkpoint-progress events per 10,027 calls, and the largest observed uncheckpointed WAL was 999 frames. Of 28 calls above 4 ms across the three runs, 23 coincided with an increase in checkpointed frames after that request. Checkpoint-progress requests had a much higher latency distribution than requests with no observed progress, while the first local campaign also recorded rare 14–20 ms outliers.
+
+The evaluator compared 256-, 1,000-, and 4,096-page thresholds in counterbalanced three-run campaigns. At 256 pages, median p95 rose to 0.509 ms and checkpoint events increased to 411, while median p99 improved to 1.550 ms and uncheckpointed WAL stayed at or below 255 frames. At 4,096 pages, median p95/p99 fell to 0.194 / 0.354 ms because fewer than 1% of calls coincided with checkpoint progress, but p99.9 rose to 6.524 ms, checkpoint-event p50 was 6.263 ms, and uncheckpointed WAL reached 4,095 frames. The default was retained because it meets p95/p99 goals without the increased frequency of 256 pages or the larger WAL and long checkpoint tails at 4,096 pages.
+
+The end-to-end correlation supports automatic checkpoint work as a major contributor to the write tail, but this campaign did not separately time transaction commit, checkpoint, synchronization, or lock wait. It does not prove checkpoint I/O is the only cause. The durability configuration remains WAL with `synchronous=NORMAL`; no durability setting was weakened. `AETHER_WAL_AUTOCHECKPOINT_PAGES` is an experimental-build-only knob for these disposable fixture runs and is not a production setting.
+
+Compact committed measurements are in [`memory-retrieval-v03-20261105.json`](../benchmark/evidence/memory-retrieval-v03-20261105.json). Full local sample arrays remain under the git-ignored `benchmark/runs/v03-20261105/`. Reproduction commands:
+
+```sh
+cargo build --release --locked
+target/release/aether-midnight bench-memory --sizes 1000,10000,100000
+LIBSQLITE3_FLAGS=SQLITE_ENABLE_STMT_SCANSTATUS cargo build --profile profiling \
+  --features sqlite-scanstatus,retrieval-experiments --locked
+target/profiling/aether-midnight bench-memory --sizes 100000 --profile-recall
+python3 scripts/evaluate_memory_retrieval.py --fixture benchmark/memory_quality_single_term_v1.json \
+  --split dev --repeats 3 --output /tmp/memory-retrieval-v03-dev.json
+```
+
+The WAL probe uses Python's `sqlite3` module and requires its linked SQLite library to be at least 3.51.0. Earlier versions can interpret the unknown `NOOP` checkpoint mode as `PASSIVE`; the evaluator rejects them before collecting measurements.
+
+For the WAL experiment, build with `--features retrieval-experiments`, then run the same evaluator with `AETHER_WAL_AUTOCHECKPOINT_PAGES=256`, `1000`, and `4096`. Each run creates its own disposable database. The existing Windows/macOS campaigns, full 200-query evaluation, large-payload stress, multi-process contention, long-reader checkpoint starvation, and separate internal commit timing remain unmeasured.
