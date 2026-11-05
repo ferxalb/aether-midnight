@@ -21,6 +21,7 @@ MIN_NOOP_SQLITE_VERSION = (3, 51, 0)
 
 
 def distribution(values):
+    """Summarize latency samples using the evaluator's nearest-index percentiles."""
     ordered = sorted(values)
     if not ordered:
         return {
@@ -32,6 +33,7 @@ def distribution(values):
         }
 
     def percentile(p):
+        """Return the nearest-index percentile from the sorted sample."""
         return ordered[min(math.ceil((len(ordered) - 1) * p), len(ordered) - 1)]
 
     return {
@@ -45,6 +47,7 @@ def distribution(values):
 
 
 def database_bytes(path):
+    """Return the size of a database and its WAL and SHM sidecar files."""
     return sum(
         candidate.stat().st_size
         for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
@@ -53,6 +56,7 @@ def database_bytes(path):
 
 
 def process_rss_bytes(pid):
+    """Read a process's resident set size in bytes, or return None if unavailable."""
     result = subprocess.run(
         ["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, check=False
     )
@@ -63,6 +67,7 @@ def process_rss_bytes(pid):
 
 
 def require_wal_checkpoint_noop():
+    """Reject Python SQLite versions that cannot safely inspect WAL progress."""
     if sqlite3.sqlite_version_info < MIN_NOOP_SQLITE_VERSION:
         version = ".".join(map(str, sqlite3.sqlite_version_info))
         minimum = ".".join(map(str, MIN_NOOP_SQLITE_VERSION))
@@ -94,7 +99,10 @@ def wal_checkpoint_noop(connection):
 
 
 class McpClient:
+    """Manage a persistent stdio MCP process for benchmark measurements."""
+
     def __init__(self, binary, database):
+        """Start the MCP server using the given binary and database path."""
         self.next_id = 0
         self.request_count = 0
         self.process = subprocess.Popen(
@@ -108,6 +116,7 @@ class McpClient:
         )
 
     def request(self, method, params):
+        """Send one JSON-RPC request and return timing, response, and wire size."""
         self.next_id += 1
         self.request_count += 1
         request = {
@@ -131,6 +140,7 @@ class McpClient:
         return elapsed_ms, response, len(wire_request.encode()) + len(line.encode())
 
     def call(self, name, arguments):
+        """Call an MCP tool and return its decoded result and byte counts."""
         elapsed_ms, response, wire_bytes = self.request(
             "tools/call", {"name": name, "arguments": arguments}
         )
@@ -141,6 +151,7 @@ class McpClient:
         return elapsed_ms, json.loads(text), wire_bytes, len(text.encode())
 
     def close(self):
+        """Stop the MCP process and return its measured CPU usage."""
         if self.process.poll() is None:
             self.process.stdin.write('{"jsonrpc":"2.0","method":"exit"}\n')
             self.process.stdin.flush()
@@ -165,6 +176,7 @@ class McpClient:
 
 
 def fixture_records(fixture):
+    """Expand the frozen fixture with its deterministic background records."""
     records = list(fixture["records"])
     background = fixture["background_collection"]
     records.extend(
@@ -181,6 +193,7 @@ def fixture_records(fixture):
 
 
 def valid_at(memory, at):
+    """Return whether a memory record is valid at the requested timestamp."""
     if at is None:
         return True
     return (memory["valid_from"] is None or memory["valid_from"] <= at) and (
@@ -189,6 +202,7 @@ def valid_at(memory, at):
 
 
 def evaluate_query(query, samples, id_to_key):
+    """Compute retrieval quality and response metrics for one fixture query."""
     relevant = set(query["relevant"])
     results = samples[-1]["results"]
     actual = [id_to_key.get(item["memory"]["id"], f"unknown:{item['memory']['id']}") for item in results]
@@ -254,6 +268,7 @@ def evaluate_query(query, samples, id_to_key):
 
 
 def main():
+    """Run the frozen retrieval evaluation and collect WAL progress samples."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
