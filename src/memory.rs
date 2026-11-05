@@ -23,15 +23,18 @@ const MIN_DISTINCT_TERM_MATCHES: usize = 2;
 const MAX_STAGED_CLASS_TERMS: usize = 6;
 /// Matches counted before a single-term query is considered for the non-discriminative path.
 const BROAD_TERM_PROBE_MATCHES: usize = 2048;
-const MEMORY_STAGE_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
-         FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
-         WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
-           AND m.scope=?2 AND m.deleted_at IS NULL
-           AND (m.valid_from IS NULL OR m.valid_from<=?3)
-           AND (m.valid_to IS NULL OR m.valid_to>?3)
-         ORDER BY memory_fts.rank, m.observed_at DESC, m.valid_from DESC, m.content,
-                  m.source_uri, m.kind, m.source_id, m.supersedes_id, m.id
-         LIMIT ?4";
+/// Top-N by `(rank, rowid DESC)` entirely inside the FTS5 columns: no `memories` join for rows
+/// that lose, and equal scores resolve to the most recently remembered row, independent of
+/// content. Winners are then `LEFT JOIN`ed for namespace, deletion, and validity filters; an
+/// ineligible winner yields NULL columns so the caller can tell filtering from exhaustion.
+const MEMORY_RANKED_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,f.rank
+         FROM (SELECT rowid AS rid,rank FROM memory_fts
+               WHERE memory_fts MATCH ?1 AND rank MATCH 'bm25(0.0,1.0)'
+               ORDER BY rank,rowid DESC LIMIT ?4) f
+         LEFT JOIN memories m ON m.id=f.rid AND m.scope=?2 AND m.deleted_at IS NULL
+              AND (m.valid_from IS NULL OR m.valid_from<=?3)
+              AND (m.valid_to IS NULL OR m.valid_to>?3)
+         ORDER BY f.rank,f.rid DESC";
 const MEMORY_RECENCY_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,-CAST(m.id AS REAL)
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1
@@ -75,7 +78,7 @@ pub(crate) enum RecallCandidateOrder {
 impl RecallCandidateOrder {
     fn sql(self) -> &'static str {
         match self {
-            Self::Staged => MEMORY_STAGE_SQL,
+            Self::Staged => MEMORY_RANKED_SQL,
             Self::Ranked => MEMORY_RECALL_SQL,
             Self::RowIdAscending => MEMORY_RECALL_ROWID_ASC_SQL,
             Self::RowIdDescending => MEMORY_RECALL_ROWID_DESC_SQL,
@@ -1243,10 +1246,61 @@ fn classify_candidate(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_stage(
-    conn: &Connection,
+fn hydrate_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
+    Ok(MemoryRecord {
+        id: row.get(0)?,
+        scope: row.get(1)?,
+        kind: row.get(2)?,
+        content: row.get(3)?,
+        source_uri: row.get(4)?,
+        source_id: row.get(5)?,
+        supersedes_id: row.get(6)?,
+        created_at: row.get(7)?,
+        observed_at: row.get(8)?,
+        valid_from: row.get(9)?,
+        valid_to: row.get(10)?,
+    })
+}
+
+fn stage_candidate(
+    memory: MemoryRecord,
+    rank: f64,
     kind: StageKind,
+    classification: (bool, usize),
+) -> RankedCandidate {
+    let (exact_phrase, matched_terms) = classification;
+    let score = match kind {
+        StageKind::Ranked => (20.0 + (-rank * 1_000_000.0).clamp(0.0, 30.0)).clamp(0.0, 50.0),
+        StageKind::Recency => 20.0,
+    };
+    (
+        MemorySearchResult {
+            memory,
+            match_reason: if exact_phrase {
+                "memory_exact_phrase".into()
+            } else {
+                "memory_lexical".into()
+            },
+            score,
+            candidate_coverage: CandidateCoverage::Complete,
+        },
+        exact_phrase,
+        matched_terms,
+        rank,
+    )
+}
+
+/// Collect up to `want` new rows from one FTS5 stage.
+///
+/// Rows arrive in the total order `(rank, rowid DESC)`, so the first `want` eligible rows in that
+/// order are exactly the stage's top rows and exact BM25 ties are broken toward the most recently
+/// remembered row regardless of insertion batching or content. `fetch` widens only when winners
+/// were filtered out (other namespaces, expiry) or rejected by Rust-side term coverage.
+///
+/// Returns true when eligible rows were left unread.
+#[allow(clippy::too_many_arguments)]
+fn run_ranked_stage(
+    conn: &Connection,
     match_query: &str,
     scope: &str,
     at: &str,
@@ -1257,18 +1311,83 @@ fn run_stage(
     collected: &mut Vec<RankedCandidate>,
     mut profile: Option<&mut MemoryRecallProfile>,
 ) -> Result<bool> {
-    let sql = match kind {
-        StageKind::Ranked => MEMORY_STAGE_SQL,
-        StageKind::Recency => MEMORY_RECENCY_SQL,
-    };
-    // At most `seen.len()` fetched rows can be duplicates of earlier stages.
-    let mut fetch = want + seen.len();
+    // Duplicates of earlier stages and a few filtered rows are absorbed without a second pass.
+    let mut fetch = want + seen.len() + 8;
     loop {
         let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
-        let mut statement = conn.prepare_cached(sql)?;
+        let mut statement = conn.prepare_cached(MEMORY_RANKED_SQL)?;
         let mut rows = statement.query(params![match_query, scope, at, fetch as i64])?;
-        let mut fetched = 0usize;
-        let mut rejected = 0usize;
+        let (mut fetched, mut rejected) = (0usize, 0usize);
+        let mut accepted: Vec<RankedCandidate> = Vec::new();
+        while let Some(row) = rows.next().context("read memory search results")? {
+            fetched += 1;
+            let Some(id) = row.get::<_, Option<i64>>(0)? else {
+                continue; // filtered by namespace, deletion, or validity
+            };
+            if seen.contains(&id) || accepted.len() > want {
+                continue;
+            }
+            let memory = hydrate_memory(row)?;
+            let rank: f64 = row.get(11)?;
+            match classify_candidate(&memory.content, query_terms, full_terms) {
+                Some(classification) => accepted.push(stage_candidate(
+                    memory,
+                    rank,
+                    StageKind::Ranked,
+                    classification,
+                )),
+                None => rejected += 1,
+            }
+        }
+        drop(rows);
+        if let Some(phase) = phase {
+            phase.finish();
+        }
+        let exhausted = fetched < fetch;
+        if accepted.len() >= want || exhausted {
+            let overflow = accepted.len() > want;
+            accepted.truncate(want);
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.candidates_returned += fetched;
+                profile.candidates_rejected_by_term_coverage += rejected;
+                profile.candidates_hydrated += accepted.len();
+                for candidate in &accepted {
+                    profile.content_bytes_hydrated += candidate.0.memory.content.len();
+                    profile.record_bytes_hydrated += memory_record_bytes(&candidate.0.memory);
+                }
+            }
+            let more = overflow || (!exhausted && accepted.len() >= want);
+            for candidate in accepted {
+                seen.insert(candidate.0.memory.id);
+                collected.push(candidate);
+            }
+            return Ok(more);
+        }
+        fetch = fetch.saturating_mul(4);
+    }
+}
+
+/// Newest-first window for the opt-in `BroadTermPolicy::Recent`. Returns true when more
+/// eligible rows existed than were returned.
+#[allow(clippy::too_many_arguments)]
+fn run_recency_stage(
+    conn: &Connection,
+    match_query: &str,
+    scope: &str,
+    at: &str,
+    want: usize,
+    seen: &mut HashSet<i64>,
+    query_terms: &[String],
+    full_terms: &[String],
+    collected: &mut Vec<RankedCandidate>,
+    mut profile: Option<&mut MemoryRecallProfile>,
+) -> Result<bool> {
+    let mut fetch = want + seen.len() + 1;
+    loop {
+        let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
+        let mut statement = conn.prepare_cached(MEMORY_RECENCY_SQL)?;
+        let mut rows = statement.query(params![match_query, scope, at, fetch as i64])?;
+        let (mut fetched, mut rejected) = (0usize, 0usize);
         let mut accepted: Vec<RankedCandidate> = Vec::new();
         while let Some(row) = rows.next().context("read memory search results")? {
             fetched += 1;
@@ -1276,61 +1395,29 @@ fn run_stage(
             if seen.contains(&id) {
                 continue;
             }
-            let memory = MemoryRecord {
-                id,
-                scope: row.get(1)?,
-                kind: row.get(2)?,
-                content: row.get(3)?,
-                source_uri: row.get(4)?,
-                source_id: row.get(5)?,
-                supersedes_id: row.get(6)?,
-                created_at: row.get(7)?,
-                observed_at: row.get(8)?,
-                valid_from: row.get(9)?,
-                valid_to: row.get(10)?,
-            };
+            let memory = hydrate_memory(row)?;
             let rank: f64 = row.get(11)?;
-            let Some((exact_phrase, matched_terms)) =
-                classify_candidate(&memory.content, query_terms, full_terms)
-            else {
-                rejected += 1;
-                continue;
-            };
-            let score = match kind {
-                StageKind::Ranked => {
-                    (20.0 + (-rank * 1_000_000.0).clamp(0.0, 30.0)).clamp(0.0, 50.0)
-                }
-                StageKind::Recency => 20.0,
-            };
-            accepted.push((
-                MemorySearchResult {
+            match classify_candidate(&memory.content, query_terms, full_terms) {
+                Some(classification) => accepted.push(stage_candidate(
                     memory,
-                    match_reason: if exact_phrase {
-                        "memory_exact_phrase".into()
-                    } else {
-                        "memory_lexical".into()
-                    },
-                    score,
-                    candidate_coverage: CandidateCoverage::Complete,
-                },
-                exact_phrase,
-                matched_terms,
-                rank,
-            ));
+                    rank,
+                    StageKind::Recency,
+                    classification,
+                )),
+                None => rejected += 1,
+            }
         }
         drop(rows);
         if let Some(phase) = phase {
             phase.finish();
         }
-        if let Some(profile) = profile.as_deref_mut() {
-            profile.candidates_rejected_by_term_coverage += rejected;
-        }
-        let truncated = fetched == fetch;
-        if accepted.len() >= want || !truncated {
+        let exhausted = fetched < fetch;
+        if accepted.len() > want || exhausted {
             let overflow = accepted.len() > want;
             accepted.truncate(want);
             if let Some(profile) = profile.as_deref_mut() {
                 profile.candidates_returned += fetched;
+                profile.candidates_rejected_by_term_coverage += rejected;
                 profile.candidates_hydrated += accepted.len();
                 for candidate in &accepted {
                     profile.content_bytes_hydrated += candidate.0.memory.content.len();
@@ -1341,9 +1428,8 @@ fn run_stage(
                 seen.insert(candidate.0.memory.id);
                 collected.push(candidate);
             }
-            return Ok(truncated || overflow);
+            return Ok(overflow);
         }
-        // Rows rejected by Rust-side term coverage crowded the window; widen and retry.
         fetch = fetch.saturating_mul(2);
     }
 }
@@ -1447,19 +1533,32 @@ fn recall_staged(
         } else {
             limit - collected.len()
         };
-        let truncated = run_stage(
-            conn,
-            kind,
-            &match_query,
-            scope,
-            at,
-            want,
-            &mut seen,
-            query_terms,
-            full_terms,
-            &mut collected,
-            profile.as_deref_mut(),
-        )?;
+        let truncated = match kind {
+            StageKind::Ranked => run_ranked_stage(
+                conn,
+                &match_query,
+                scope,
+                at,
+                want,
+                &mut seen,
+                query_terms,
+                full_terms,
+                &mut collected,
+                profile.as_deref_mut(),
+            )?,
+            StageKind::Recency => run_recency_stage(
+                conn,
+                &match_query,
+                scope,
+                at,
+                want,
+                &mut seen,
+                query_terms,
+                full_terms,
+                &mut collected,
+                profile.as_deref_mut(),
+            )?,
+        };
         if truncated {
             every_stage_complete = false;
             recency_truncated |= kind == StageKind::Recency;

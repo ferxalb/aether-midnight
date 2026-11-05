@@ -1762,36 +1762,48 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
                 memory::RecallCandidateOrder::Ranked,
             ),
         };
-        for label in ["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"] {
+        // Interleave strategies per sample and rotate their order so that page-cache and
+        // allocator state is shared symmetrically instead of favoring whichever runs last.
+        let labels = ["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"];
+        for label in labels {
             for _ in 0..3 {
                 run(&session, label)?;
             }
-            let mut wall_ms = Vec::with_capacity(samples);
-            let cpu_started = code::process_cpu_seconds();
-            let mut last = Vec::new();
-            for _ in 0..samples {
+        }
+        let mut wall: Vec<Vec<f64>> = vec![Vec::with_capacity(samples); labels.len()];
+        let mut cpu = vec![0.0f64; labels.len()];
+        let mut last: Vec<Vec<memory::MemorySearchResult>> = vec![Vec::new(); labels.len()];
+        for sample in 0..samples {
+            for offset in 0..labels.len() {
+                let index = (sample + offset) % labels.len();
+                let cpu_started = code::process_cpu_seconds();
                 let started = Instant::now();
-                last = run(&session, label)?;
-                wall_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                last[index] = run(&session, labels[index])?;
+                wall[index].push(started.elapsed().as_secs_f64() * 1000.0);
+                if let (Some(end), Some(start)) = (code::process_cpu_seconds(), cpu_started) {
+                    cpu[index] += (end - start) * 1000.0;
+                }
             }
-            let cpu_ms = code::process_cpu_seconds()
-                .zip(cpu_started)
-                .map(|(end, start)| (end - start) * 1000.0 / samples as f64);
-            let coverage = last
+        }
+        for (index, label) in labels.iter().enumerate() {
+            let coverage = last[index]
                 .first()
                 .map(|result| format!("{:?}", result.candidate_coverage))
                 .unwrap_or_else(|| "NoResults".into());
-            let mut entry = distribution(&wall_ms);
+            let mut entry = distribution(&wall[index]);
             if let Some(object) = entry.as_object_mut() {
                 object.remove("samples_ms");
-                object.insert("cpu_ms_per_query".into(), cpu_ms.into());
+                object.insert(
+                    "cpu_ms_per_query".into(),
+                    (cpu[index] / samples as f64).into(),
+                );
                 object.insert("coverage".into(), coverage.clone().into());
-                object.insert("result_count".into(), last.len().into());
+                object.insert("result_count".into(), last[index].len().into());
             }
-            strategies.insert(label.into(), entry);
+            strategies.insert((*label).into(), entry);
             top_ids.push((
-                label.into(),
-                last.iter().map(|result| result.memory.id).collect(),
+                (*label).into(),
+                last[index].iter().map(|result| result.memory.id).collect(),
                 coverage,
             ));
         }

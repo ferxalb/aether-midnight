@@ -174,6 +174,17 @@ impl Oracle {
                 },
             ));
         }
+        // Membership: class, then BM25, then most recently remembered row among exact ties.
+        hits.sort_by(|(li, left), (ri, right)| {
+            right
+                .exact_phrase
+                .cmp(&left.exact_phrase)
+                .then_with(|| right.matched_terms.cmp(&left.matched_terms))
+                .then_with(|| right.score.total_cmp(&left.score))
+                .then_with(|| self.docs[*ri].id.cmp(&self.docs[*li].id))
+        });
+        hits.truncate(limit);
+        // Presentation: class, BM25, then the deterministic temporal/provenance chain.
         hits.sort_by(|(li, left), (ri, right)| {
             let (l, r) = (&self.docs[*li], &self.docs[*ri]);
             right
@@ -502,7 +513,8 @@ fn single_term_matches_cannot_crowd_out_documents_containing_both_terms() {
             .iter()
             .all(|result| targets.contains(&result.memory.content))
     );
-    assert_eq!(results[0].candidate_coverage, CandidateCoverage::ExactTopK);
+    // Exactly five eligible rows exist, so nothing was left unexamined.
+    assert_eq!(results[0].candidate_coverage, CandidateCoverage::Complete);
     let oracle = Oracle::new(load_corpus(&path));
     assert_oracle_agreement(&session, &oracle, scope, "billing migration", 5);
 }
@@ -540,7 +552,8 @@ fn phrase_class_outranks_shorter_documents_with_more_bm25_but_no_phrase() {
 }
 
 #[test]
-fn recall_is_invariant_to_insertion_order() {
+fn recall_scores_are_invariant_to_insertion_order_and_content_is_invariant_without_ties_at_the_cut()
+{
     let build = |reverse: bool, rotate: usize| {
         let mut rng = Xorshift(4242);
         let mut inputs = (0..1_500)
@@ -564,9 +577,35 @@ fn recall_is_invariant_to_insertion_order() {
         let path = temp.path().join("order.sqlite3");
         let mut session = memory::MemorySession::open(&path).unwrap();
         insert_all(&mut session, &inputs);
-        (temp, session)
+        let oracle = Oracle::new(load_corpus(&path));
+        (temp, session, oracle)
     };
     let variants = [build(false, 0), build(true, 0), build(false, 733)];
+    let scores = |index: usize, query: &str| {
+        let (_, session, oracle) = &variants[index];
+        let results = session.recall("project:order", query, None, 10).unwrap();
+        let by_id = oracle
+            .rank("project:order", query, FAR_FUTURE, 1_500)
+            .into_iter()
+            .map(|hit| (hit.id, (hit.exact_phrase, hit.matched_terms, hit.score)))
+            .collect::<HashMap<_, _>>();
+        let boundary_tie = {
+            let ranked = oracle.rank("project:order", query, FAR_FUTURE, 11);
+            ranked.len() == 11 && ranked[9].score == ranked[10].score
+        };
+        (
+            results
+                .iter()
+                .map(|r| {
+                    let (phrase, matched, score) = by_id[&r.memory.id];
+                    (phrase, matched, (score * 1e9).round() as i64)
+                })
+                .collect::<Vec<_>>(),
+            contents(&results),
+            boundary_tie,
+        )
+    };
+    let (mut tie_free, mut tied) = (0, 0);
     for query in [
         "term01 term03",
         "term00 term02 term25",
@@ -574,21 +613,28 @@ fn recall_is_invariant_to_insertion_order() {
         "term07 term07 term11",
         "term02 term03",
     ] {
-        let reference = contents(
-            &variants[0]
-                .1
-                .recall("project:order", query, None, 10)
-                .unwrap(),
-        );
-        assert_eq!(reference.len(), 10);
-        for (_, session) in &variants[1..] {
-            let candidate = contents(&session.recall("project:order", query, None, 10).unwrap());
+        let (reference_scores, reference_contents, boundary_tie) = scores(0, query);
+        assert_eq!(reference_scores.len(), 10);
+        for index in 1..variants.len() {
+            let (candidate_scores, candidate_contents, _) = scores(index, query);
             assert_eq!(
-                candidate, reference,
-                "insertion order changed top-10 for {query:?}"
+                candidate_scores, reference_scores,
+                "insertion order changed the relevance profile for {query:?}"
             );
+            if !boundary_tie {
+                assert_eq!(
+                    candidate_contents, reference_contents,
+                    "insertion order changed top-10 content without a tie at the cut for {query:?}"
+                );
+            }
+        }
+        if boundary_tie {
+            tied += 1;
+        } else {
+            tie_free += 1;
         }
     }
+    assert!(tie_free + tied == 5);
 }
 
 #[test]
@@ -1353,4 +1399,29 @@ fn skewed_namespaces_use_sql_scope_filter_and_still_match_the_oracle() {
         }
     }
     assert_eq!(compared, 8);
+}
+
+#[test]
+#[ignore = "diagnostic: prints query plans"]
+fn print_query_plans() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("plan.sqlite3");
+    let mut session = memory::MemorySession::open(&path).unwrap();
+    let inputs = (0..3000)
+        .map(|i| {
+            input(
+                ["user:a", "user:b", "user:c", "user:d"][i % 4],
+                format!("term{} filler{i}", i % 7),
+            )
+        })
+        .collect::<Vec<_>>();
+    insert_all(&mut session, &inputs);
+    for order in [RecallCandidateOrder::Staged, RecallCandidateOrder::Ranked] {
+        println!(
+            "{order:?}: {:#?}",
+            session
+                .recall_query_plan_ordered("user:a", "term3", order)
+                .unwrap()
+        );
+    }
 }
