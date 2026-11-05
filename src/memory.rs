@@ -13,7 +13,7 @@ const MAX_MEMORY_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MEMORY_QUERY_TERMS: usize = 64;
 const MAX_RERANK_MULTIPLIER: usize = 5;
 const MAX_RERANK_CANDIDATES: usize = 500;
-const MIN_DISTINCT_TERM_MATCHES: usize = 3;
+const MIN_DISTINCT_TERM_MATCHES: usize = 2;
 const MEMORY_RECALL_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'

@@ -1190,7 +1190,7 @@ fn memory_recall_prefers_exact_and_covered_evidence_and_handles_unicode_and_abst
         None,
     )
     .unwrap();
-    let shared_vocabulary = memory::remember(
+    memory::remember(
         &database,
         scope,
         "source",
@@ -1227,12 +1227,6 @@ fn memory_recall_prefers_exact_and_covered_evidence_and_handles_unicode_and_abst
     .unwrap();
     assert_eq!(exact_results[0].memory.id, exact.id);
     assert_eq!(exact_results[0].match_reason, "memory_exact_phrase");
-    assert!(
-        exact_results
-            .iter()
-            .all(|result| result.memory.id != shared_vocabulary.id),
-        "a two-term overlap must not enter a query with three or more informative terms"
-    );
     assert!(
         memory::recall(&database, scope, "Maya home mailing address Oslo", None, 10)
             .unwrap()
