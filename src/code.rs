@@ -1384,19 +1384,34 @@ fn flush_batch(
     }
     timers.metadata_writes += metadata_start.elapsed().as_secs_f64() * 1000.0;
     let mut notified_batch_write = false;
+    let mut file_stmt = tx.prepare_cached(
+        "INSERT INTO code_files(repo_id,worktree_id,rel_path,content_hash,language,size_bytes,modified_ns,indexed_generation,parse_error)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(repo_id,worktree_id,rel_path) DO UPDATE SET content_hash=excluded.content_hash,
+           language=excluded.language,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,
+           indexed_generation=excluded.indexed_generation,parse_error=excluded.parse_error
+         RETURNING id",
+    )?;
+    let mut symbol_stmt = tx.prepare_cached(
+        "INSERT INTO code_symbols(file_id,name,kind,line_start,line_end,byte_start,byte_end)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+    )?;
     for file in pending.drain(..) {
         let metadata_start = Instant::now();
-        let file_id = tx
-            .query_row(
-                "INSERT INTO code_files(repo_id,worktree_id,rel_path,content_hash,language,size_bytes,modified_ns,indexed_generation,parse_error)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
-                 ON CONFLICT(repo_id,worktree_id,rel_path) DO UPDATE SET content_hash=excluded.content_hash,
-                   language=excluded.language,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,
-                   indexed_generation=excluded.indexed_generation,parse_error=excluded.parse_error
-                 RETURNING id",
-                params![repo_id, worktree_id, file.rel_path, file.hash, file.language, file.size as i64, file.modified_ns, generation as i64, file.parse_error],
-                |row| row.get::<_, i64>(0),
-            )?;
+        let file_id = file_stmt.query_row(
+            params![
+                repo_id,
+                worktree_id,
+                file.rel_path,
+                file.hash,
+                file.language,
+                file.size as i64,
+                file.modified_ns,
+                generation as i64,
+                file.parse_error
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
         timers.metadata_writes += metadata_start.elapsed().as_secs_f64() * 1000.0;
         let payload_started = Instant::now();
         let mut searchable = file.text.clone();
@@ -1421,25 +1436,21 @@ fn flush_batch(
             tx.prepare_cached("DELETE FROM code_symbols WHERE file_id=?1")?
                 .execute([file_id])?;
         }
-        {
-            let mut symbol_stmt = tx.prepare(
-                "INSERT INTO code_symbols(file_id,name,kind,line_start,line_end,byte_start,byte_end)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            )?;
-            for symbol in file.symbols {
-                symbol_stmt.execute(params![
-                    file_id,
-                    symbol.name,
-                    symbol.kind,
-                    symbol.line_start,
-                    symbol.line_end,
-                    symbol.byte_start as i64,
-                    symbol.byte_end as i64
-                ])?;
-            }
+        for symbol in file.symbols {
+            symbol_stmt.execute(params![
+                file_id,
+                symbol.name,
+                symbol.kind,
+                symbol.line_start,
+                symbol.line_end,
+                symbol.byte_start as i64,
+                symbol.byte_end as i64
+            ])?;
         }
         timers.symbol_writes += symbol_started.elapsed().as_secs_f64() * 1000.0;
     }
+    drop(symbol_stmt);
+    drop(file_stmt);
     timers.index_writing += write_start.elapsed().as_secs_f64() * 1000.0;
     let commit_start = Instant::now();
     tx.commit()?;

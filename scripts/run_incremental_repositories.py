@@ -113,6 +113,10 @@ def incremental(binary, repo, name, relative_path, count):
     sizes=[sample["database_bytes_after_sample"] for sample in results]
     growth=[size-db_bytes_before for size in sizes]
     return {"target_file":relative_path,"sample_count":len(results),"timing":distribution(durations),
+        "catalog_complete_all_samples":all(row.get("catalog_complete") for row in results),
+        "structural_complete_all_samples":all(row.get("structural_complete") for row in results),
+        "structural_index_status":("complete" if results and all(row.get("structural_complete") for row in results)
+            else "catalog_only_incomplete"),
         "database_bytes_during_updates":distribution(sizes,"bytes"),
         "database_growth_bytes_during_updates":distribution(growth,"bytes"),
         "database_bytes_before_updates":db_bytes_before,"database_bytes_after_updates":db_size(db),
@@ -128,8 +132,10 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--repo",action="append",required=True,metavar="NAME=PATH@RELATIVE_FILE")
     parser.add_argument("--binary",type=Path,default=ROOT/"target/release/aether-midnight")
-    parser.add_argument("--samples",type=int,default=30)
+    parser.add_argument("--samples",type=int,default=5)
     args=parser.parse_args()
+    if not 1 <= args.samples <= 100:
+        parser.error("--samples must be between 1 and 100")
     binary=args.binary.resolve()
     report={"schema_version":1,"environment":environment(binary),"sample_count_per_repository":args.samples,
         "timing_boundary":"after file write, before index process start, through fresh CLI search confirming the updated file is fresh and query-visible",

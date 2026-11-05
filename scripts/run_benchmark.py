@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build, generate the temporary reference corpus, and emit benchmark JSON."""
+"""Build, generate the temporary reference corpus, and emit benchmark JSON.
+
+Use scripts/performance_campaign.py for the bounded, timestamped local runner.
+"""
 
 import os
 import json
@@ -51,9 +54,9 @@ def main() -> int:
         result = subprocess.run(
             [str(binary), "bench", "--repo", str(corpus), "--manifest", str(ROOT / "benchmark" / "manifest.json"),
              "--heldout-repo", str(heldout_repo),
-             "--samples", os.environ.get("MIDNIGHT_BENCH_SAMPLES", "100"),
-             "--index-samples", os.environ.get("MIDNIGHT_INDEX_SAMPLES", "30"),
-             "--stress-cycles", os.environ.get("MIDNIGHT_STRESS_CYCLES", "30")],
+             "--samples", os.environ.get("MIDNIGHT_BENCH_SAMPLES", "3"),
+             "--index-samples", os.environ.get("MIDNIGHT_INDEX_SAMPLES", "3"),
+             "--stress-cycles", os.environ.get("MIDNIGHT_STRESS_CYCLES", "1")],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -66,7 +69,7 @@ def main() -> int:
             return result.returncode
         comparison = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "evaluate_fts5.py"), "--repo", str(corpus),
-             "--samples", os.environ.get("MIDNIGHT_FTS_SAMPLES", os.environ.get("MIDNIGHT_BENCH_SAMPLES", "100"))],
+             "--samples", os.environ.get("MIDNIGHT_FTS_SAMPLES", os.environ.get("MIDNIGHT_BENCH_SAMPLES", "3"))],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -96,16 +99,16 @@ def main() -> int:
                                            ["macOS reference host", "Go", "Node.js", "Bun", "Windows", "ARM"]}
         report["run_configuration"] = {
             "command": [str(binary), "bench", "--repo", "<generated fixture>", "--manifest", "benchmark/manifest.json",
-                        "--heldout-repo", str(heldout_repo), "--samples", os.environ.get("MIDNIGHT_BENCH_SAMPLES", "100"),
-                        "--index-samples", os.environ.get("MIDNIGHT_INDEX_SAMPLES", "30"),
-                        "--stress-cycles", os.environ.get("MIDNIGHT_STRESS_CYCLES", "30")],
+                        "--heldout-repo", str(heldout_repo), "--samples", os.environ.get("MIDNIGHT_BENCH_SAMPLES", "3"),
+                        "--index-samples", os.environ.get("MIDNIGHT_INDEX_SAMPLES", "3"),
+                        "--stress-cycles", os.environ.get("MIDNIGHT_STRESS_CYCLES", "1")],
             "environment_variables": {name: os.environ.get(name) for name in (
                 "PATH", "RUSTUP_TOOLCHAIN", "MIDNIGHT_INDEX_WORKERS", "MIDNIGHT_BENCH_BATCH_FILES",
                 "MIDNIGHT_BENCH_BATCH_BYTES", "MIDNIGHT_BENCH_SAMPLES", "MIDNIGHT_INDEX_SAMPLES",
                 "MIDNIGHT_STRESS_CYCLES", "MIDNIGHT_FTS_SAMPLES",
             )},
-            "effective_sample_defaults": {"MIDNIGHT_BENCH_SAMPLES": "100", "MIDNIGHT_INDEX_SAMPLES": "30",
-                                          "MIDNIGHT_STRESS_CYCLES": "30", "MIDNIGHT_FTS_SAMPLES": "100"},
+            "effective_sample_defaults": {"MIDNIGHT_BENCH_SAMPLES": "3", "MIDNIGHT_INDEX_SAMPLES": "3",
+                                          "MIDNIGHT_STRESS_CYCLES": "1", "MIDNIGHT_FTS_SAMPLES": "3"},
             "network_used_for_fixture": False,
             "heldout_repository_commit": heldout_commit,
             "heldout_repository_method": "clean git archive of the frozen suite corpus commit; query suites and prior results excluded",

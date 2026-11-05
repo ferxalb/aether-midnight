@@ -19,6 +19,52 @@ fn run_index(database: &Path, repo: &Path) -> code::IndexReport {
 }
 
 #[test]
+fn indexing_reuses_batch_statements_across_catalog_and_symbol_rows() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("batch.sqlite3");
+    let repo = new_repo(&temp, "batch-repo");
+    for index in 0..513 {
+        fs::write(
+            repo.join("src").join(format!("{index:04}.rs")),
+            format!("pub fn batch_symbol_{index:04}() {{}}\n"),
+        )
+        .unwrap();
+    }
+
+    let first = run_index(&database, &repo);
+    assert!(first.catalog_complete);
+    assert!(first.structural_complete);
+    assert_eq!(first.eligible_files, 513);
+    assert!(
+        code::search_code(&database, &repo, "batch_symbol_0512", 5)
+            .unwrap()
+            .iter()
+            .any(|result| result.path == "src/0512.rs" && result.freshness == "fresh")
+    );
+
+    fs::write(
+        repo.join("src/0000.rs"),
+        "pub fn reindexed_symbol_0000() {}\n",
+    )
+    .unwrap();
+    let second = run_index(&database, &repo);
+    assert!(second.catalog_complete);
+    assert!(second.structural_complete);
+    assert!(second.generation > first.generation);
+    assert!(
+        code::search_code(&database, &repo, "reindexed_symbol_0000", 5)
+            .unwrap()
+            .iter()
+            .any(|result| result.path == "src/0000.rs" && result.freshness == "fresh")
+    );
+    assert!(
+        code::search_code(&database, &repo, "batch_symbol_0000", 5)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn migrations_and_interrupted_transaction_recover() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("db.sqlite3");

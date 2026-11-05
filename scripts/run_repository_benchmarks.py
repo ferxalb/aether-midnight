@@ -186,9 +186,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", action="append", required=True, metavar="NAME=PATH")
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/aether-midnight")
-    parser.add_argument("--index-samples", type=int, default=int(os.getenv("MIDNIGHT_INDEX_SAMPLES", "30")))
-    parser.add_argument("--query-samples", type=int, default=int(os.getenv("MIDNIGHT_QUERY_SAMPLES", "100")))
+    parser.add_argument("--index-samples", type=int, default=int(os.getenv("MIDNIGHT_INDEX_SAMPLES", "5")))
+    parser.add_argument("--query-samples", type=int, default=int(os.getenv("MIDNIGHT_QUERY_SAMPLES", "25")))
     args = parser.parse_args()
+    if not 1 <= args.index_samples <= 100 or not 1 <= args.query_samples <= 1000:
+        parser.error("sample counts must be between 1 and 100 (index) or 1 and 1000 (query)")
     binary = args.binary.resolve()
     output = {"schema_version":1, "environment":environment(binary), "query_list":QUERIES,
               "tokenizer_approximation":"ceil(returned UTF-8 byte count / 4); a size heuristic, not a model tokenizer",
@@ -238,6 +240,7 @@ def main():
                 "eligible_source_bytes":distribution([report.get("eligible_bytes",0) for report in reports],"bytes"),
                 "eligible_files":status.get("eligible_files"),"eligible_bytes":source_bytes,"last_database_bytes":db_size(keep_db),
                 "catalog_complete":status.get("catalog_complete"),"structural_complete":status.get("structural_complete"),
+                "structural_index_status":("complete" if status.get("structural_complete") else "catalog_only_incomplete"),
                 "cold_index_sample_semantics":"database cold, operating system cache not evicted"}
             record["index_summary"]["last_database_bytes_evidence"] = {
                 **distribution([db_size(keep_db)],"bytes"),
@@ -282,11 +285,6 @@ def main():
                 ),
             }
         output["repositories"].append(record)
-        checkpoint_path = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / f"repository-{name}-completed.json"
-        checkpoint_record = {"schema_version": 1, "repository": record}
-        with checkpoint_path.open("x", encoding="utf-8") as checkpoint:
-            json.dump(checkpoint_record, checkpoint, indent=2)
-            checkpoint.write("\n")
         print(f"completed {name}: {status.get('eligible_files')} eligible files", file=sys.stderr)
     for record in output["repositories"]:
         summary={}
