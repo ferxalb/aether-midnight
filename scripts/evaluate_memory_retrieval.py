@@ -62,8 +62,19 @@ def process_rss_bytes(pid):
         return None
 
 
+def require_wal_checkpoint_noop():
+    if sqlite3.sqlite_version_info < MIN_NOOP_SQLITE_VERSION:
+        version = ".".join(map(str, sqlite3.sqlite_version_info))
+        minimum = ".".join(map(str, MIN_NOOP_SQLITE_VERSION))
+        raise RuntimeError(
+            f"WAL progress sampling requires Python SQLite {minimum} or newer for "
+            f"wal_checkpoint(NOOP); found {version}"
+        )
+
+
 def wal_checkpoint_noop(connection):
     """Read WAL progress without checkpointing or changing its policy."""
+    require_wal_checkpoint_noop()
     try:
         busy, log_frames, checkpointed_frames = connection.execute(
             "PRAGMA wal_checkpoint(NOOP)"
@@ -253,11 +264,10 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
-    if sqlite3.sqlite_version_info < MIN_NOOP_SQLITE_VERSION:
-        parser.error(
-            "Python sqlite3 requires SQLite >= 3.51.0 for non-checkpointing "
-            f"PRAGMA wal_checkpoint(NOOP); found {sqlite3.sqlite_version}"
-        )
+    try:
+        require_wal_checkpoint_noop()
+    except RuntimeError as error:
+        parser.error(str(error))
     binary = args.binary.resolve()
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}; run cargo build --release --locked first")
