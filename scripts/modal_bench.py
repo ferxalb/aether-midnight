@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import platform
@@ -24,6 +25,48 @@ TIERS = {
 # Current Modal Sandbox non-preemptible rates, USD per physical core-second and GiB-second.
 CPU_USD_PER_CORE_SECOND = 0.00003942
 MEMORY_USD_PER_GIB_SECOND = 0.00000667
+
+
+def source_fingerprint() -> dict[str, object]:
+    paths = [ROOT / "src", ROOT / "scripts", ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "benchmark" / "manifest.json"]
+    files = []
+    for path in paths:
+        if path.is_dir():
+            files.extend(
+                candidate
+                for candidate in path.rglob("*")
+                if candidate.is_file() and "__pycache__" not in candidate.parts and candidate.suffix != ".pyc"
+            )
+        elif path.is_file():
+            files.append(path)
+    digest = hashlib.sha256()
+    for path in sorted(set(files)):
+        relative = path.relative_to(ROOT).as_posix().encode()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+
+    def git(args: list[str]) -> bytes:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(ROOT), *args], capture_output=True, check=False
+            ).stdout
+        except OSError:
+            return b""
+
+    status = git(["status", "--porcelain", "-z", "--untracked-files=all"])
+    diff = git(["diff", "HEAD", "--binary"])
+    return {
+        "commit": git(["rev-parse", "HEAD"]).decode().strip() or "unknown",
+        "branch": git(["branch", "--show-current"]).decode().strip() or "unknown",
+        "dirty": bool(status),
+        "status_entries": [entry.decode("utf-8", errors="replace") for entry in status.split(b"\0") if entry],
+        "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "uploaded_source_tree_sha256": digest.hexdigest(),
+        "uploaded_paths": [path.relative_to(ROOT).as_posix() for path in sorted(set(files))],
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +110,24 @@ def sample_count(args: argparse.Namespace) -> int:
     return {"smoke": 1, "standard": 5, "stress": 30}[args.mode]
 
 
+def prior_run_reservations(output_root: Path) -> tuple[float, list[str]]:
+    reserved = 0.0
+    artifacts = []
+    if not output_root.exists():
+        return reserved, artifacts
+    for path in sorted(output_root.glob("*/result.json")):
+        try:
+            result = json.loads(path.read_text())
+            plan = result.get("plan", {})
+            amount = plan.get("current_run_reservation_usd", plan.get("max_estimated_total_usd"))
+            if isinstance(amount, (int, float)) and amount > 0:
+                reserved += float(amount)
+                artifacts.append(str(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return reserved, artifacts
+
+
 def campaign_plan(args: argparse.Namespace) -> dict[str, object]:
     seconds = args.container_timeout_s
     tiers = []
@@ -88,7 +149,9 @@ def campaign_plan(args: argparse.Namespace) -> dict[str, object]:
             }
         )
         compute_estimate += cpu_cost + memory_cost
-    worst_case = compute_estimate + args.image_build_reserve_usd
+    current_reservation = compute_estimate + args.image_build_reserve_usd
+    prior_reservations, prior_artifacts = prior_run_reservations(args.output_root)
+    worst_case = prior_reservations + current_reservation
     return {
         "modal_sandbox_rates_usd": {
             "cpu_per_physical_core_second": CPU_USD_PER_CORE_SECOND,
@@ -102,6 +165,9 @@ def campaign_plan(args: argparse.Namespace) -> dict[str, object]:
         "tiers": tiers,
         "max_estimated_sandbox_compute_usd": round(compute_estimate, 6),
         "image_build_and_control_plane_reserve_usd": args.image_build_reserve_usd,
+        "current_run_reservation_usd": round(current_reservation, 6),
+        "prior_campaign_reservations_usd": round(prior_reservations, 6),
+        "prior_run_artifacts_counted": prior_artifacts,
         "max_estimated_total_usd": round(worst_case, 6),
         "configured_budget_usd": args.budget_usd,
         "within_budget": worst_case <= args.budget_usd,
@@ -128,7 +194,7 @@ def make_image(modal):
     )
     image = image.run_commands(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal",
-        "bash -lc 'source /root/.cargo/env && rustc --version && cargo build --release --locked'",
+        "bash -lc 'cd /opt/midnight && source /root/.cargo/env && rustc --version && cargo build --release --locked'",
     )
     return image
 
@@ -189,10 +255,17 @@ def run_modal(args: argparse.Namespace, plan: dict[str, object], run_dir: Path) 
                 cpu=(tier["cpu_cores"], tier["cpu_limit_cores"]),
                 memory=(tier["memory_mib"], tier["memory_limit_mib"]),
                 timeout=args.container_timeout_s,
-                idle_timeout=30,
+                idle_timeout=args.container_timeout_s,
                 workdir="/opt/midnight",
                 block_network=True,
-                env={"MIDNIGHT_MODAL_TIER": tier["name"]},
+                env={
+                    "MIDNIGHT_MODAL_TIER": tier["name"],
+                    "MIDNIGHT_SOURCE_COMMIT": str(plan["source"]["commit"]),
+                    "MIDNIGHT_SOURCE_BRANCH": str(plan["source"]["branch"]),
+                    "MIDNIGHT_SOURCE_DIRTY": str(plan["source"]["dirty"]).lower(),
+                    "MIDNIGHT_SOURCE_DIFF_SHA256": str(plan["source"]["diff_sha256"]),
+                    "MIDNIGHT_SOURCE_TREE_SHA256": str(plan["source"]["uploaded_source_tree_sha256"]),
+                },
             )
             sandbox.wait()
             return_code = sandbox.returncode
@@ -211,6 +284,31 @@ def run_modal(args: argparse.Namespace, plan: dict[str, object], run_dir: Path) 
                     record["remote_result"] = json.loads(stdout.splitlines()[-1])
                 except (json.JSONDecodeError, IndexError):
                     record["remote_result_parse_error"] = "sandbox stdout did not end in one JSON document"
+            remote_result = record.get("remote_result")
+            remote_manifest = (
+                remote_result.get("manifest", {}) if isinstance(remote_result, dict) else {}
+            )
+            if return_code == 0 and remote_manifest.get("status") == "completed":
+                record["measurement_status"] = "completed"
+            else:
+                record["measurement_status"] = "failed"
+                record["measurement_error"] = (
+                    record.get("remote_result_parse_error")
+                    or remote_manifest.get("failure")
+                    or f"worker returned {return_code} or did not complete its campaign"
+                )
+            results.append(record)
+            save_result(run_dir, plan, results)
+        except Exception as error:
+            record.update(
+                {
+                    "status": "failed_before_or_during_launch",
+                    "measurement_status": "failed",
+                    "error_type": type(error).__name__,
+                    "measurement_error": str(error),
+                    "finished_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+            )
             results.append(record)
             save_result(run_dir, plan, results)
         finally:
@@ -224,10 +322,17 @@ def run_modal(args: argparse.Namespace, plan: dict[str, object], run_dir: Path) 
 
 def save_result(run_dir: Path, plan: dict[str, object], tiers: list[dict[str, object]]) -> None:
     status = "running"
-    if any(item.get("status") == "failed_before_or_during_launch" for item in tiers):
+    has_failure = any(item.get("measurement_status") == "failed" for item in tiers) or any(
+        item.get("status") == "failed_before_or_during_launch" for item in tiers
+    )
+    if tiers and len(tiers) == len(plan["tiers"]):
+        status = (
+            "completed_with_failures"
+            if has_failure
+            else "completed"
+        )
+    elif has_failure:
         status = "failed"
-    elif tiers and len(tiers) == len(plan["tiers"]):
-        status = "completed" if all(item.get("returncode") == 0 for item in tiers) else "completed_with_failures"
     value = {
         "schema_version": 1,
         "status": status,
@@ -259,6 +364,8 @@ def main() -> int:
         print(json.dumps(plan, indent=2))
         return 0
 
+    plan["source"] = source_fingerprint()
+
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{timestamp}_{args.mode}_{uuid.uuid4().hex[:8]}"
     run_dir = args.output_root / run_id
@@ -282,8 +389,41 @@ def main() -> int:
         print(f"Run artifact: {run_dir}", file=sys.stderr)
         return 1
     save_result(run_dir, plan, result["tiers"])
-    print(json.dumps({"run_dir": str(run_dir), "plan": plan, "tiers": result["tiers"]}, indent=2))
-    return 0 if all(item.get("returncode") == 0 for item in result["tiers"]) else 2
+    concise_tiers = []
+    for item in result["tiers"]:
+        summary = item.get("remote_result", {}).get("summary", {})
+        concise_tiers.append(
+            {
+                "tier": item.get("tier", {}).get("name"),
+                "measurement_status": item.get("measurement_status", item.get("status")),
+                "returncode": item.get("returncode"),
+                "worker_screen": [
+                    {
+                        "workers": row.get("worker_count"),
+                        "index_p50_ms": row.get("full_index_wall", {}).get("p50_ms"),
+                        "rss_p50_bytes": row.get("resident_highwater", {}).get("p50_bytes"),
+                        "catalog_complete": row.get("catalog_complete_all_samples"),
+                        "structural_complete": row.get("structural_complete_all_samples"),
+                    }
+                    for row in summary.get("worker_screen", [])
+                ],
+                "error": item.get("measurement_error"),
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "run_dir": str(run_dir),
+                "status": "completed"
+                if all(item.get("measurement_status") == "completed" for item in result["tiers"])
+                else "completed_with_failures",
+                "max_estimated_total_usd": plan["max_estimated_total_usd"],
+                "tiers": concise_tiers,
+            },
+            indent=2,
+        )
+    )
+    return 0 if all(item.get("measurement_status") == "completed" for item in result["tiers"]) else 2
 
 
 if __name__ == "__main__":

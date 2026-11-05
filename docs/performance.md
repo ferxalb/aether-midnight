@@ -1,6 +1,6 @@
 # Performance contract and benchmark results
 
-This page describes the latest Linux-only measurement run. Raw sorted samples and host metadata are in the JSON files linked below. The committed benchmark targets and gates are unchanged.
+This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md) and [the investigation](performance-investigation.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
 ## Host and method
 
@@ -18,22 +18,30 @@ Percentiles use the benchmark’s sorted nearest-index rule: `ceil((n - 1) × p)
 
 ## Reproduce
 
-From the repository root, using the recorded Linux host and Rust toolchain:
+For a low-impact local smoke run, build the current release binary and write a unique artifact under `benchmark/runs/`:
 
 ```sh
-source "$HOME/.cargo/env"
 cargo build --release --locked
-MIDNIGHT_BENCH_SAMPLES=100 MIDNIGHT_INDEX_SAMPLES=30 MIDNIGHT_STRESS_CYCLES=30 python3 scripts/run_benchmark.py > benchmark/results.json
+python3 scripts/performance_campaign.py --mode smoke --workers 1,2,4,6 \
+  --update-workers 4 --interval-ms 50 --max-duration-s 600
 ```
 
-The real repositories were shallow-cloned from these URLs; their checked-out commit SHAs are recorded in the raw file:
+For the supported Modal resource tiers and cost guard, see the [Modal benchmark guide](modal-benchmark-guide.md). For native macOS measurements, see the [macOS benchmark guide](macos-benchmark-guide.md).
+
+The legacy real-repository runners default to five index samples and 25 query samples. For one isolated comparison, preserve output under a unique directory rather than redirecting over a committed JSON file:
 
 ```sh
 git clone --depth 1 https://github.com/torvalds/linux.git /tmp/aether-repos/linux
 git clone --depth 1 https://github.com/microsoft/vscode.git /tmp/aether-repos/vscode
-MIDNIGHT_INDEX_SAMPLES=30 MIDNIGHT_QUERY_SAMPLES=100 python3 scripts/run_repository_benchmarks.py --repo linux=/tmp/aether-repos/linux --repo vscode=/tmp/aether-repos/vscode > benchmark/real-repositories.json
-MIDNIGHT_INCREMENTAL_SAMPLES=30 python3 scripts/run_incremental_repositories.py --samples 30 --repo linux=/tmp/aether-repos/linux@init/main.c --repo vscode=/tmp/aether-repos/vscode@src/vs/code/electron-main/app.ts > benchmark/incremental-repositories.json
+RUN_DIR=$(mktemp -d benchmark/runs/linux-real.XXXXXX)
+python3 scripts/run_repository_benchmarks.py --index-samples 5 --query-samples 25 \
+  --repo linux=/tmp/aether-repos/linux --repo vscode=/tmp/aether-repos/vscode > "$RUN_DIR/real-repositories.json"
+python3 scripts/run_incremental_repositories.py --samples 5 \
+  --repo linux=/tmp/aether-repos/linux@init/main.c \
+  --repo vscode=/tmp/aether-repos/vscode@src/vs/code/electron-main/app.ts > "$RUN_DIR/incremental-repositories.json"
 ```
+
+These legacy real-repository scripts have narrower instrumentation than the new process/cgroup telemetry campaign. The timestamped campaign is the recommended general workflow.
 
 Network access was available and used to fetch Rust dependencies and the two repositories. The measurement commands do not contact a service. No test suite or clippy run is part of this benchmark task.
 
@@ -126,9 +134,9 @@ The 30 open/index/update/search/status/close stress cycles measured p50/p95/p99 
 
 ## Pending verification
 
-These items are out of scope for this Linux run and are **pending (not run)**:
+These items are **pending (not run)** for the historical Linux run. A separate current Intel macOS reference campaign is documented in the [native comparison](performance-comparison.md):
 
-- macOS reference host: pending (not run)
+- Apple Silicon macOS: pending (not run)
 - Go: pending (not run)
 - Node.js: pending (not run)
 - Bun: pending (not run)
@@ -139,7 +147,7 @@ The first synthetic run used the inherited environment collector, which invoked 
 
 ## Historical summary retained from the previous report
 
-The previous documentation reported these macOS summary values. They are retained here as historical evidence; the original sample arrays and `benchmark/results.json` were not present in this checkout, so p99/raw samples cannot be reconstructed. The macOS reference host was not run in the current Linux task and is pending above.
+The previous documentation reported these older macOS summary values. They are retained here as historical evidence; the original sample arrays and `benchmark/results.json` were not present in this checkout, so p99/raw samples cannot be reconstructed. The new Intel macOS results are separate and available in the [comparison](performance-comparison.md).
 
 | Historical metric | Previously reported result |
 | --- | --- |

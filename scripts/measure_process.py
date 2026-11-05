@@ -320,6 +320,7 @@ def run_measured(
     stdin_text: str | None,
     stdin_hold_ms: int,
     watched_paths: list[str],
+    timeout_s: float | None,
 ) -> dict[str, object]:
     system = platform.system()
     if system not in ("Darwin", "Linux"):
@@ -332,6 +333,7 @@ def run_measured(
     samples: list[dict[str, object]] = []
     watched_peaks: dict[str, int] = {}
     started = time.perf_counter()
+    timed_out = False
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         child = subprocess.Popen(
             command,
@@ -348,6 +350,10 @@ def run_measured(
         last_rollup = 0.0
         while child.poll() is None:
             elapsed = time.perf_counter() - started
+            if timeout_s is not None and elapsed >= timeout_s:
+                timed_out = True
+                child.kill()
+                break
             if not stdin_closed and elapsed * 1000 >= stdin_hold_ms and child.stdin is not None:
                 child.stdin.close()
                 stdin_closed = True
@@ -436,14 +442,14 @@ def run_measured(
     else:
         cpu_source = "sampled process CPU counter; peak counter value"
     maxrss_source = "getrusage(RUSAGE_CHILDREN).ru_maxrss; one isolated direct child"
-    process_highwater = child_maxrss
-    for name in ("vmhwm_bytes", "lifetime_max_phys_footprint_bytes"):
-        if peaks.get(name) is not None:
-            process_highwater = max(process_highwater or 0, peaks[name])
+    resident_highwater = child_maxrss
+    if peaks.get("vmhwm_bytes") is not None:
+        resident_highwater = max(resident_highwater or 0, peaks["vmhwm_bytes"])
 
     return {
         "command": command,
         "returncode": returncode,
+        "timed_out": timed_out,
         "elapsed_ms": elapsed_s * 1000,
         "process_scope": "direct child only; wrapper excluded; descendants are not aggregated",
         "sampling_interval_ms": interval_ms,
@@ -451,7 +457,10 @@ def run_measured(
         "samples": samples,
         "watched_file_peak_sizes_bytes": watched_peaks,
         "sampled_peaks": peaks,
-        "process_highwater_bytes": process_highwater,
+        "resident_highwater_bytes": resident_highwater,
+        "sampled_kernel_lifetime_max_phys_footprint_bytes": peaks.get(
+            "lifetime_max_phys_footprint_bytes"
+        ),
         "ru_maxrss_bytes": child_maxrss,
         "ru_maxrss_status": maxrss_source,
         "cpu_seconds": cpu_ns / 1_000_000_000,
@@ -470,6 +479,7 @@ def main() -> int:
     parser.add_argument("--interval-ms", type=int, default=50)
     parser.add_argument("--stdin-text")
     parser.add_argument("--stdin-hold-ms", type=int, default=0)
+    parser.add_argument("--timeout-s", type=float)
     parser.add_argument("--watch-path", action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -480,9 +490,16 @@ def main() -> int:
         parser.error("--interval-ms must be positive")
     if args.stdin_hold_ms < 0:
         parser.error("--stdin-hold-ms cannot be negative")
+    if args.timeout_s is not None and args.timeout_s <= 0:
+        parser.error("--timeout-s must be positive")
     try:
         measurement = run_measured(
-            command, args.interval_ms, args.stdin_text, args.stdin_hold_ms, args.watch_path
+            command,
+            args.interval_ms,
+            args.stdin_text,
+            args.stdin_hold_ms,
+            args.watch_path,
+            args.timeout_s,
         )
     except Exception as error:
         json.dump({"measurement_error": f"{type(error).__name__}: {error}"}, sys.stdout)

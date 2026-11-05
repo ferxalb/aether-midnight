@@ -11,7 +11,9 @@ import math
 import os
 import platform
 import plistlib
+import select
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,16 @@ MEASURER = ROOT / "scripts" / "measure_process.py"
 MANIFEST = ROOT / "benchmark" / "manifest.json"
 MODES = {"smoke": 1, "standard": 5, "stress": 30}
 MIB = 1024 * 1024
+CAMPAIGN_DEADLINE: float | None = None
+
+
+def remaining_budget() -> float | None:
+    if CAMPAIGN_DEADLINE is None:
+        return None
+    remaining = CAMPAIGN_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("campaign exceeded its configured maximum duration")
+    return remaining
 
 
 def command_output(args: list[str], timeout: float = 5.0) -> str | None:
@@ -140,7 +152,7 @@ def machine_snapshot() -> dict[str, object]:
         "memory_bytes": memory_bytes,
         "cpu_features": cpu_features,
         "filesystem_and_storage": filesystem,
-        "system_state_before_campaign": pressure,
+        "system_state": pressure,
         "storage_cache_note": (
             "Filesystem cache is not evicted; initial index uses a new SQLite database, not a cold OS cache."
         ),
@@ -149,6 +161,47 @@ def machine_snapshot() -> dict[str, object]:
 
 def get_git(root: Path, *args: str) -> str | None:
     return command_output(["git", "-C", str(root), *args])
+
+
+def git_worktree_snapshot() -> dict[str, object]:
+    try:
+        status_result = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "-z", "--untracked-files=all"],
+            capture_output=True,
+            check=False,
+        )
+        diff_result = subprocess.run(
+            ["git", "-C", str(ROOT), "diff", "HEAD", "--binary"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        status_result = diff_result = None
+    if (
+        status_result is None
+        or diff_result is None
+        or status_result.returncode != 0
+        or diff_result.returncode != 0
+    ):
+        return {
+            "dirty": os.environ.get("MIDNIGHT_SOURCE_DIRTY") == "true",
+            "status_entries": [],
+            "status_sha256": None,
+            "diff_from_head_sha256": os.environ.get("MIDNIGHT_SOURCE_DIFF_SHA256"),
+            "snapshot_sha256": os.environ.get("MIDNIGHT_SOURCE_TREE_SHA256"),
+            "limitations": "source repository metadata is unavailable in this image; local source fingerprint was passed by the launcher",
+        }
+    status = status_result.stdout
+    diff = diff_result.stdout
+    combined = hashlib.sha256(status + b"\0" + diff).hexdigest()
+    return {
+        "dirty": bool(status),
+        "status_entries": [entry.decode("utf-8", errors="replace") for entry in status.split(b"\0") if entry],
+        "status_sha256": hashlib.sha256(status).hexdigest(),
+        "diff_from_head_sha256": hashlib.sha256(diff).hexdigest(),
+        "snapshot_sha256": combined,
+        "limitations": "untracked file contents are represented by status names unless staged; binary SHA-256 and source commit are recorded separately",
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -184,6 +237,35 @@ def database_bytes(path: Path) -> int:
     )
 
 
+def parse_error_diagnostics(database: Path, limit: int = 100) -> dict[str, object]:
+    """Return bounded, per-file parser failure evidence from an index database."""
+    if limit < 1:
+        raise ValueError("parse-error diagnostic limit must be positive")
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=2.0)
+        try:
+            count = int(
+                connection.execute("SELECT COUNT(*) FROM code_files WHERE parse_error != 0").fetchone()[0]
+            )
+            paths = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT rel_path FROM code_files WHERE parse_error != 0 ORDER BY rel_path LIMIT ?",
+                    (limit,),
+                )
+            ]
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        return {"available": False, "error": str(error)}
+    return {
+        "available": True,
+        "parse_error_files": count,
+        "reported_paths": paths,
+        "truncated": count > len(paths),
+    }
+
+
 def measured(
     binary: Path,
     args: list[str],
@@ -200,6 +282,9 @@ def measured(
         "--interval-ms",
         str(interval_ms),
     ]
+    timeout = remaining_budget()
+    if timeout is not None:
+        wrapped.extend(["--timeout-s", str(timeout)])
     if stdin_text is not None:
         wrapped.extend(["--stdin-text", stdin_text])
     if stdin_hold_ms > 0:
@@ -207,13 +292,17 @@ def measured(
     for path in watch_paths or []:
         wrapped.extend(["--watch-path", str(path)])
     wrapped.extend(["--", *command])
-    completed = subprocess.run(
-        wrapped,
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            wrapped,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=timeout + 5 if timeout is not None else None,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError(f"measured child exceeded campaign duration: {command}") from error
     if completed.returncode:
         raise RuntimeError(
             f"measurement wrapper exited {completed.returncode}: {completed.stderr[-2000:]}"
@@ -221,6 +310,8 @@ def measured(
     result = json.loads(completed.stdout)
     if result.get("measurement_error"):
         raise RuntimeError(result["measurement_error"])
+    if result.get("timed_out"):
+        raise TimeoutError(f"measured child exceeded campaign duration: {command}")
     result["command"] = command
     return result
 
@@ -246,10 +337,16 @@ def run_watched_process(
     command: list[str], db: Path, env: dict[str, str], interval_ms: int
 ) -> dict[str, object]:
     start = time.perf_counter()
+    timeout = remaining_budget()
+    timed_out = False
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     watched = [db, Path(f"{db}-wal"), Path(f"{db}-shm")]
     peaks = {str(path): 0 for path in watched}
     while process.poll() is None:
+        if timeout is not None and time.perf_counter() - start >= timeout:
+            timed_out = True
+            process.kill()
+            break
         for path in watched:
             try:
                 peaks[str(path)] = max(peaks[str(path)], path.stat().st_size)
@@ -264,10 +361,221 @@ def run_watched_process(
             pass
     return {
         "returncode": process.returncode,
+        "timed_out": timed_out,
         "elapsed_ms": (time.perf_counter() - start) * 1000,
         "stdout": stdout_bytes.decode("utf-8", errors="replace"),
         "stderr_tail": stderr_bytes.decode("utf-8", errors="replace")[-4000:],
         "watched_file_peak_sizes_bytes": peaks,
+    }
+
+
+def run_mcp_session(
+    binary: Path,
+    db: Path,
+    repo: Path,
+    query: str,
+    expected_paths: list[str],
+    repeat_count: int,
+    idle_ms: int,
+    interval_ms: int,
+) -> dict[str, object]:
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    from measure_process import MacSampler, read_linux_process
+
+    command = [str(binary), "--db", str(db), "mcp"]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    pending = bytearray()
+
+    def send(value: dict[str, object]) -> None:
+        process.stdin.write((json.dumps(value, separators=(",", ":")) + "\n").encode())
+        process.stdin.flush()
+
+    def read_message(timeout_s: float = 20.0) -> dict[str, object]:
+        campaign_timeout = remaining_budget()
+        if campaign_timeout is not None:
+            timeout_s = min(timeout_s, campaign_timeout)
+        deadline = time.monotonic() + timeout_s
+        while b"\n" not in pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("MCP response timed out")
+            readable, _, _ = select.select([process.stdout.fileno()], [], [], remaining)
+            if not readable:
+                raise TimeoutError("MCP response timed out")
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError("MCP process exited before replying")
+            pending.extend(chunk)
+        line, _, rest = pending.partition(b"\n")
+        pending[:] = rest
+        return json.loads(line)
+
+    started = time.perf_counter()
+    samples = []
+    try:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "performance-idle", "version": "1"},
+                },
+            }
+        )
+        initialized = read_message()
+        if initialized.get("id") != 1 or "result" not in initialized:
+            raise RuntimeError("MCP initialize returned no JSON-RPC result")
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_code",
+                    "arguments": {"repo_path": str(repo), "query": query, "limit": 5},
+                },
+            }
+        )
+        first_call_started = time.perf_counter()
+        first_call = read_message()
+        if first_call.get("id") != 2 or "result" not in first_call:
+            raise RuntimeError("MCP first search call returned no JSON-RPC result")
+        first_search_ms = (time.perf_counter() - first_call_started) * 1000
+        initialize_and_first_search_ms = (time.perf_counter() - started) * 1000
+
+        def search_paths(message: dict[str, object]) -> list[str]:
+            try:
+                content = message["result"]["content"]
+                text = next(item["text"] for item in content if isinstance(item, dict) and "text" in item)
+                payload = json.loads(text)
+                return [row["path"] for row in payload.get("results", []) if row.get("path")]
+            except (KeyError, TypeError, StopIteration, json.JSONDecodeError):
+                return []
+
+        first_paths = search_paths(first_call)
+        warm_requests = []
+        process_samples = []
+        sampler = MacSampler() if platform.system() == "Darwin" else None
+
+        def sample_process(elapsed_s: float, rollup: bool = False) -> dict[str, object]:
+            if sampler is not None:
+                return sampler.sample(process.pid, elapsed_s)
+            return read_linux_process(process.pid, elapsed_s, rollup)
+
+        process_samples.append(sample_process(time.perf_counter() - started, True))
+        for request_number in range(repeat_count):
+            request_id = request_number + 3
+            call_started = time.perf_counter()
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_code",
+                        "arguments": {"repo_path": str(repo), "query": query, "limit": 5},
+                    },
+                }
+            )
+            response = read_message()
+            elapsed_ms = (time.perf_counter() - call_started) * 1000
+            if response.get("id") != request_id or "result" not in response:
+                raise RuntimeError("MCP warm search call returned no JSON-RPC result")
+            paths = search_paths(response)
+            warm_requests.append(
+                {
+                    "request_id": request_id,
+                    "elapsed_ms": elapsed_ms,
+                    "result_count": len(paths),
+                    "top_paths": paths,
+                    "expected_hit": not expected_paths or bool(set(paths) & set(expected_paths)),
+                }
+            )
+            process_samples.append(sample_process(time.perf_counter() - started, False))
+
+        idle_started = time.perf_counter()
+        last_rollup = -1.0
+        idle_samples = []
+        while (time.perf_counter() - idle_started) * 1000 < idle_ms:
+            if remaining_budget() is not None and remaining_budget() <= 0:
+                raise TimeoutError("campaign exceeded its configured maximum duration")
+            elapsed = time.perf_counter() - idle_started
+            if sampler is not None:
+                sample = sampler.sample(process.pid, elapsed)
+            else:
+                sample = read_linux_process(process.pid, elapsed, elapsed - last_rollup >= 0.25)
+                if elapsed - last_rollup >= 0.25:
+                    last_rollup = elapsed
+            if len(sample) > 1:
+                idle_samples.append(sample)
+                process_samples.append(sample)
+            time.sleep(max(interval_ms, 1) / 1000)
+        idle_elapsed = time.perf_counter() - idle_started
+        idle_cpu_values = [
+            int(sample["cpu_time_ns"])
+            for sample in idle_samples
+            if isinstance(sample.get("cpu_time_ns"), int)
+        ]
+        cpu_delta_ns = max(0, idle_cpu_values[-1] - idle_cpu_values[0]) if len(idle_cpu_values) >= 2 else 0
+        process.stdin.close()
+        returncode = process.wait(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+    rss_values = [
+        int(sample[key])
+        for sample in process_samples
+        for key in ("rss_bytes", "vmhwm_bytes")
+        if isinstance(sample.get(key), int)
+    ]
+    footprint_values = [
+        int(sample[key])
+        for sample in process_samples
+        for key in ("phys_footprint_bytes", "lifetime_max_phys_footprint_bytes")
+        if isinstance(sample.get(key), int)
+    ]
+    return {
+        "command": command,
+        "returncode": returncode,
+        "process_scope": "direct MCP child only; harness excluded; child tree not aggregated",
+        "initialize_and_first_search_ms": initialize_and_first_search_ms,
+        "first_search_tool_latency_ms": first_search_ms,
+        "first_search_paths": first_paths,
+        "first_search_expected_hit": not expected_paths or bool(set(first_paths) & set(expected_paths)),
+        "warm_requests": warm_requests,
+        "warm_search_latency": distribution(
+            [float(item["elapsed_ms"]) for item in warm_requests], "ms"
+        ),
+        "all_warm_requests_expected_hit": bool(warm_requests)
+        and all(item["expected_hit"] for item in warm_requests),
+        "idle_interval_ms": idle_elapsed * 1000,
+        "sampling_interval_ms": interval_ms,
+        "sample_count": len(process_samples),
+        "cpu_seconds_during_idle": cpu_delta_ns / 1_000_000_000,
+        "idle_cpu_percent_one_core": 100 * cpu_delta_ns / 1_000_000_000 / max(idle_elapsed, 1e-9),
+        "resident_sampled_peak_bytes": max(rss_values) if rss_values else None,
+        "phys_footprint_sampled_peak_bytes": max(footprint_values) if footprint_values else None,
+        "mcp_initialized": True,
+        "first_search_response_received": True,
+        "process_samples": process_samples,
+        "idle_samples": idle_samples,
     }
 
 
@@ -287,7 +595,7 @@ def expected_query_quality(binary: Path, db: Path, repo: Path, env: dict[str, st
     search_samples = []
     for query in suite:
         times = []
-        observed: list[str] = []
+        observed_samples: list[list[str]] = []
         for _ in range(repeats):
             result = measured(
                 binary,
@@ -300,13 +608,28 @@ def expected_query_quality(binary: Path, db: Path, repo: Path, env: dict[str, st
                 raise RuntimeError(f"search failed for {query['id']}: {result['stderr_tail']}")
             response = parse_json_stdout(result)
             paths = [row.get("path") for row in response.get("results", [])]
-            observed = paths
+            observed_samples.append(paths)
             times.append(float(result["elapsed_ms"]))
         relevant = set(query["relevant_paths"])
-        ranks = [rank for rank, path in enumerate(observed, 1) if path in relevant]
-        for cutoff in recalls:
-            recalls[cutoff].append(len([rank for rank in ranks if rank <= cutoff]) / max(len(relevant), 1))
-        reciprocal_ranks.append(1.0 / min(ranks) if ranks else 0.0)
+        per_sample = []
+        for observed in observed_samples:
+            ranks = [rank for rank, path in enumerate(observed, 1) if path in relevant]
+            for cutoff in recalls:
+                recalls[cutoff].append(
+                    len([rank for rank in ranks if rank <= cutoff]) / max(len(relevant), 1)
+                )
+            reciprocal_ranks.append(1.0 / min(ranks) if ranks else 0.0)
+            per_sample.append(
+                {
+                    "top10_paths": observed,
+                    "found_expected": bool(ranks),
+                    "reciprocal_rank": 1.0 / min(ranks) if ranks else 0.0,
+                    "recall_at_1": len([rank for rank in ranks if rank <= 1]) / max(len(relevant), 1),
+                    "recall_at_5": len([rank for rank in ranks if rank <= 5]) / max(len(relevant), 1),
+                    "recall_at_10": len([rank for rank in ranks if rank <= 10]) / max(len(relevant), 1),
+                }
+            )
+        observed = observed_samples[-1] if observed_samples else []
         search_samples.extend(times)
         details.append(
             {
@@ -314,8 +637,8 @@ def expected_query_quality(binary: Path, db: Path, repo: Path, env: dict[str, st
                 "query": query["query"],
                 "expected_paths": sorted(relevant),
                 "top10_paths": observed,
-                "found_expected": bool(ranks),
-                "reciprocal_rank": 1.0 / min(ranks) if ranks else 0.0,
+                "all_samples_found_expected": all(item["found_expected"] for item in per_sample),
+                "samples": per_sample,
                 "elapsed_ms": distribution(times, "ms"),
             }
         )
@@ -377,6 +700,53 @@ def summary_for_index(samples: list[dict[str, object]], source_bytes: int) -> di
         "successful_samples": sum(1 for sample in samples if sample.get("returncode") == 0),
         "failed_samples": sum(1 for sample in samples if sample.get("returncode") != 0),
     }
+    for key, unit in (
+        ("pss_bytes", "bytes"),
+        ("pss_anon_bytes", "bytes"),
+        ("pss_file_bytes", "bytes"),
+        ("anonymous_bytes", "bytes"),
+        ("private_clean_bytes", "bytes"),
+        ("private_dirty_bytes", "bytes"),
+        ("process_swap_bytes", "bytes"),
+        ("thread_count", "threads"),
+        ("context_switches", "switches"),
+        ("minor_faults", "faults"),
+        ("page_faults", "faults"),
+        ("pageins", "pages"),
+        ("disk_read_bytes", "bytes"),
+        ("disk_write_bytes", "bytes"),
+        ("logical_writes", "bytes"),
+        ("cgroup_memory_current_bytes", "bytes"),
+    ):
+        values = [
+            int(sample["sampled_peaks"][key])
+            for sample in samples
+            if isinstance(sample.get("sampled_peaks"), dict)
+            and isinstance(sample["sampled_peaks"].get(key), int)
+        ]
+        result[f"sampled_peak_{key}"] = distribution(values, unit)
+    cgroup_peaks = []
+    for sample in samples:
+        after = sample.get("cgroup_after")
+        if isinstance(after, dict):
+            value = after.get("memory_peak")
+            if isinstance(value, str) and value.isdigit():
+                cgroup_peaks.append(int(value))
+    result["cgroup_memory_peak"] = distribution(cgroup_peaks, "bytes")
+    result["wal_peak_bytes"] = distribution(
+        [
+            max(
+                (
+                    int(size)
+                    for path, size in sample.get("watched_file_peak_sizes_bytes", {}).items()
+                    if path.endswith("-wal")
+                ),
+                default=0,
+            )
+            for sample in samples
+        ],
+        "bytes",
+    )
     return result
 
 
@@ -406,8 +776,16 @@ def run_campaign(args: argparse.Namespace) -> Path:
     if args.interval_ms <= 0 or args.max_duration_s <= 0:
         raise RuntimeError("sampling interval and maximum duration must be positive")
 
-    commit = get_git(ROOT, "rev-parse", "HEAD") or "unknown"
-    branch = get_git(ROOT, "branch", "--show-current") or "unknown"
+    commit = (
+        get_git(ROOT, "rev-parse", "HEAD")
+        or os.environ.get("MIDNIGHT_SOURCE_COMMIT")
+        or "unknown"
+    )
+    branch = (
+        get_git(ROOT, "branch", "--show-current")
+        or os.environ.get("MIDNIGHT_SOURCE_BRANCH")
+        or "unknown"
+    )
     started = dt.datetime.now(dt.timezone.utc)
     run_id = f"{started.strftime('%Y%m%dT%H%M%SZ')}_{commit[:12]}_{args.mode}_{uuid.uuid4().hex[:8]}"
     args.output_root.mkdir(parents=True, exist_ok=True)
@@ -433,6 +811,8 @@ def run_campaign(args: argparse.Namespace) -> Path:
         environment.pop("MIDNIGHT_BENCH_BATCH_FILES", None)
         environment.pop("MIDNIGHT_BENCH_BATCH_BYTES", None)
         deadline = time.monotonic() + args.max_duration_s
+        global CAMPAIGN_DEADLINE
+        CAMPAIGN_DEADLINE = deadline
         result: dict[str, object] = {
             "schema_version": 1,
             "run_id": run_id,
@@ -452,6 +832,7 @@ def run_campaign(args: argparse.Namespace) -> Path:
             "environment": {
                 "commit": commit,
                 "branch": branch,
+                "worktree": git_worktree_snapshot(),
                 "rustc": command_output(["rustc", "--version"]),
                 "cargo": command_output(["cargo", "--version"]),
                 "python": sys.version,
@@ -602,6 +983,8 @@ def run_campaign(args: argparse.Namespace) -> Path:
                         )
                     }
                     sample["database_bytes"] = database_bytes(db)
+                    if sample.get("structural_complete") is not True and db.is_file():
+                        sample["parse_error_diagnostics"] = parse_error_diagnostics(db)
                     sample["database_peak_components_bytes"] = sample.get("watched_file_peak_sizes_bytes", {})
                     sample["_database_path"] = str(db)
                     sample["resident_highwater_bytes"] = (
@@ -635,6 +1018,7 @@ def run_campaign(args: argparse.Namespace) -> Path:
                                 "sample": sample_index,
                                 "eligible_files": sample.get("eligible_files"),
                                 "phase_timings_ms": sample.get("phase_timings_ms"),
+                                "parse_error_diagnostics": sample.get("parse_error_diagnostics"),
                             }
                         )
                     group_samples.append(sample)
@@ -688,8 +1072,8 @@ def run_campaign(args: argparse.Namespace) -> Path:
                         sample["result_count"] = len(response.get("results", []))
                         sample["grounded"] = all(row.get("path") for row in response.get("results", []))
                     warm_samples.append(sample)
-            result["measurements"]["warm_retrieval"] = {
-                "definition": "fresh CLI process, completed index and warm SQLite/filesystem state",
+            result["measurements"]["warm_cli_search"] = {
+                "definition": "fresh CLI process search against a completed index; includes process startup",
                 "wall": distribution([float(sample["elapsed_ms"]) for sample in warm_samples], "ms"),
                 "raw_samples": warm_samples,
             }
@@ -755,74 +1139,55 @@ def run_campaign(args: argparse.Namespace) -> Path:
                 "raw_samples": mcp_samples,
             }
 
-            mcp_idle_samples = []
+            mcp_session_samples = []
             if selected_db is not None:
-                initialize_request = "\n".join(
-                    [
-                        json.dumps(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "initialize",
-                                "params": {
-                                    "protocolVersion": "2025-11-25",
-                                    "capabilities": {},
-                                    "clientInfo": {"name": "performance-idle", "version": "1"},
-                                },
-                            }
-                        ),
-                        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-                        "",
-                    ]
-                )
                 for _ in range(samples_per_config):
-                    sample = measured(
+                    sample = run_mcp_session(
                         binary,
-                        ["--db", str(selected_db), "mcp"],
-                        environment,
-                        initialize_request,
+                        selected_db,
+                        corpus,
+                        queries[0]["query"],
+                        queries[0].get("relevant_paths", []),
+                        samples_per_config,
+                        2000,
                         args.interval_ms,
-                        stdin_hold_ms=2000,
                     )
-                    responses = []
-                    if sample["returncode"] == 0:
-                        try:
-                            responses = [json.loads(line) for line in sample["stdout"].splitlines() if line.strip()]
-                            sample["initialized"] = any(
-                                item.get("id") == 1 and "result" in item for item in responses
-                            )
-                        except json.JSONDecodeError as error:
-                            sample["protocol_parse_error"] = str(error)
-                    sample["idle_hold_ms"] = 2000
-                    sample["idle_cpu_percent_one_core"] = (
-                        100 * float(sample["cpu_seconds"]) / max(float(sample["elapsed_ms"]) / 1000, 1e-9)
-                    )
-                    sample["resident_highwater_bytes"] = (
-                        sample.get("sampled_peaks", {}).get("vmhwm_bytes")
-                        or sample.get("ru_maxrss_bytes")
-                    )
-                    sample["phys_footprint_highwater_bytes"] = sample.get("sampled_peaks", {}).get(
-                        "lifetime_max_phys_footprint_bytes"
-                    )
-                    mcp_idle_samples.append(sample)
-            result["measurements"]["mcp_idle_session"] = {
-                "definition": "initialized MCP process kept alive with stdin open and no requests for 2 seconds",
-                "idle_cpu_percent_one_core": distribution(
-                    [float(sample["idle_cpu_percent_one_core"]) for sample in mcp_idle_samples], "percent"
-                ),
-                "resident_highwater_bytes": distribution(
-                    [int(sample["resident_highwater_bytes"]) for sample in mcp_idle_samples if sample.get("resident_highwater_bytes")],
-                    "bytes",
-                ),
-                "mac_phys_footprint_highwater_bytes": distribution(
-                    [int(sample["phys_footprint_highwater_bytes"]) for sample in mcp_idle_samples if sample.get("phys_footprint_highwater_bytes")],
-                    "bytes",
-                ),
-                "all_samples_initialized": bool(mcp_idle_samples)
-                and all(sample.get("initialized") for sample in mcp_idle_samples),
-                "raw_samples": mcp_idle_samples,
+                    mcp_session_samples.append(sample)
+            warm_session_samples = [
+                float(request["elapsed_ms"])
+                for sample in mcp_session_samples
+                for request in sample.get("warm_requests", [])
+            ]
+            result["measurements"]["warm_retrieval"] = {
+                "definition": "sequential search_code calls in one initialized MCP process against the same complete index and warm OS/database state",
+                "wall": distribution(warm_session_samples, "ms"),
+                "all_samples_expected_hit": bool(mcp_session_samples)
+                and all(sample.get("all_warm_requests_expected_hit") for sample in mcp_session_samples),
+                "raw_samples": mcp_session_samples,
             }
-
+            result["measurements"]["mcp_session"] = {
+                "definition": "one MCP process per sample: initialize, first grounded search, repeated warm searches, then 2 seconds without requests",
+                "first_useful_context": distribution(
+                    [float(sample["initialize_and_first_search_ms"]) for sample in mcp_session_samples], "ms"
+                ),
+                "first_search_tool_latency": distribution(
+                    [float(sample["first_search_tool_latency_ms"]) for sample in mcp_session_samples], "ms"
+                ),
+                "idle_cpu_percent_one_core": distribution(
+                    [float(sample["idle_cpu_percent_one_core"]) for sample in mcp_session_samples], "percent"
+                ),
+                "resident_sampled_peak_bytes": distribution(
+                    [int(sample["resident_sampled_peak_bytes"]) for sample in mcp_session_samples if sample.get("resident_sampled_peak_bytes")],
+                    "bytes",
+                ),
+                "phys_footprint_sampled_peak_bytes": distribution(
+                    [int(sample["phys_footprint_sampled_peak_bytes"]) for sample in mcp_session_samples if sample.get("phys_footprint_sampled_peak_bytes")],
+                    "bytes",
+                ),
+                "all_first_searches_expected_hit": bool(mcp_session_samples)
+                and all(sample.get("first_search_expected_hit") for sample in mcp_session_samples),
+                "raw_samples": mcp_session_samples,
+            }
             incremental = {"status": "skipped: benchmark does not modify a caller-provided repository"}
             if root is None and selected_db is not None:
                 target = corpus / "src" / "00000.rs"
@@ -922,7 +1287,7 @@ def run_campaign(args: argparse.Namespace) -> Path:
         result["status"] = "completed_with_failures" if result["failures"] else "completed"
         result["finished_at_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
         result["elapsed_campaign_s"] = time.monotonic() - (deadline - args.max_duration_s)
-        result["system_state_after_campaign"] = machine_snapshot().get("system_state_before_campaign")
+        result["system_state_after_campaign"] = machine_snapshot().get("system_state")
         save_json(run_dir / "manifest.json", result)
         save_json(run_dir / "summary.json", {
             "run_id": run_id,
@@ -939,10 +1304,15 @@ def run_campaign(args: argparse.Namespace) -> Path:
             ],
             "startup": result["measurements"].get("startup", {}).get("wall"),
             "first_useful_context": result["measurements"].get("first_useful_context", {}).get("wall"),
+            "mcp_first_useful_context": result["measurements"].get("mcp_session", {}).get("first_useful_context"),
             "retrieval_quality": result["measurements"].get("retrieval_quality"),
             "warm_retrieval": result["measurements"].get("warm_retrieval", {}).get("wall"),
+            "warm_cli_search_including_startup": result["measurements"].get("warm_cli_search", {}).get("wall"),
             "incremental_update": result["measurements"].get("incremental_update"),
             "mcp_round_trip": result["measurements"].get("mcp_round_trip", {}).get("wall"),
+            "mcp_idle_cpu_percent_one_core": result["measurements"].get("mcp_session", {}).get("idle_cpu_percent_one_core"),
+            "mcp_idle_resident_highwater_bytes": result["measurements"].get("mcp_session", {}).get("resident_sampled_peak_bytes"),
+            "mcp_idle_phys_footprint_highwater_bytes": result["measurements"].get("mcp_session", {}).get("phys_footprint_sampled_peak_bytes"),
             "failures": result["failures"],
         })
         return run_dir

@@ -27,15 +27,15 @@ See [API and tools](docs/api.md), [architecture](docs/architecture.md), and [pri
 
 ## Performance evidence
 
-Targets, reproduction instructions, machine details, measured percentiles, and resource limits are in [performance and benchmarks](docs/performance.md). Run `python3 scripts/run_benchmark.py > benchmark/results.json` to regenerate the exact 10,000-file / 100 MiB fixture in a temporary directory and capture the raw measurements. The real-repository and `rg`/CLI/MCP comparison is in [benchmark/real-repositories.json](benchmark/real-repositories.json); incremental visibility results are in [benchmark/incremental-repositories.json](benchmark/incremental-repositories.json). Neither command evicts the OS file cache; results apply to the machine recorded in each file.
+Targets, reproduction instructions, machine details, measured percentiles, and resource limits are in [performance and benchmarks](docs/performance.md). Run `python3 scripts/performance_campaign.py --mode smoke` for a bounded local fixture campaign; it writes immutable, timestamped raw artifacts under `benchmark/runs/` and leaves committed benchmark history intact. See the [native macOS guide](docs/macos-benchmark-guide.md), [Modal CPU guide](docs/modal-benchmark-guide.md), [investigation](docs/performance-investigation.md), and [before/after comparison](docs/performance-comparison.md). The historical real-repository results remain in `benchmark/real-repositories.json` and `benchmark/incremental-repositories.json`.
 
 ## Supported-platform status
 
-Rust stable is the implementation target. The latest benchmark run measured the release build on Linux x86_64. Node.js, Go, and Bun examples were not verified in the latest run. See [platform matrix](docs/platforms.md) and its pending verification list.
+Rust stable is the implementation target. The current local measurements include Linux x86_64 historical results and a native Intel macOS release run. Apple Silicon and the Node.js, Go, and Bun examples remain unverified. See the [platform matrix](docs/platforms.md).
 
 ### Pending verification
 
-- macOS reference host: pending (not run)
+- Apple Silicon macOS: pending (not run)
 - Go: pending (not run)
 - Node.js: pending (not run)
 - Bun: pending (not run)
