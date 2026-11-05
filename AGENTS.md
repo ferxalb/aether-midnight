@@ -29,6 +29,10 @@ Recent commits use concise subjects, often with Conventional Commit prefixes suc
 
 Midnight stores explicit memories and index metadata locally. Changes to storage, retention, path exclusions, or indexing limits should be reflected in the relevant privacy, architecture, API, or performance docs. Do not add secrets, private repositories, or generated benchmark data to commits.
 
+## Public Benchmark Privacy
+
+Treat benchmark, profiling, diagnostic, and campaign output as private by default. Before tracking or sharing it, remove personal or third-party host and account identifiers, machine and runtime fingerprints, local absolute paths and usernames, environment-variable values, credentials, provider project or run identifiers, and billing, cost, or reservation records. Keep unredacted raw runs in ignored local storage. Public reports may include workload definitions, aggregate measurements, sample counts, and non-identifying platform categories only. Review the staged diff and the resulting JSON or Markdown for these fields before committing; do not copy raw output into issues, pull requests, documentation, or chat reports.
+
 ## The Projects Future
 
 The Projects are evolving very quickly. Don't limit yourself—if there are major changes to the core, don't restrict it, but stay on the same track; let it happen and allow it, and edit these rules, which may change as the project progresses, and edit your rules whenever necessary.
