@@ -2,6 +2,7 @@
 """Evaluate frozen, model-free memory retrieval cases through a persistent MCP process."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -56,6 +57,7 @@ def process_rss_bytes(pid):
 class McpClient:
     def __init__(self, binary, database):
         self.next_id = 0
+        self.request_count = 0
         self.process = subprocess.Popen(
             [str(binary), "--db", str(database), "mcp"],
             cwd=ROOT,
@@ -68,6 +70,7 @@ class McpClient:
 
     def request(self, method, params):
         self.next_id += 1
+        self.request_count += 1
         request = {
             "jsonrpc": "2.0",
             "id": self.next_id,
@@ -103,10 +106,23 @@ class McpClient:
             self.process.stdin.write('{"jsonrpc":"2.0","method":"exit"}\n')
             self.process.stdin.flush()
             self.process.stdin.close()
-        return_code = self.process.wait(timeout=10)
+        usage = None
+        if self.process.returncode is None and hasattr(os, "wait4"):
+            _, status, usage = os.wait4(self.process.pid, 0)
+            self.process.returncode = os.waitstatus_to_exitcode(status)
+        else:
+            self.process.wait(timeout=10)
+        return_code = self.process.returncode
         if return_code:
             error = self.process.stderr.read()
             raise RuntimeError(f"MCP server returned {return_code}: {error}")
+        if usage is None:
+            return {"cpu_user_seconds": None, "cpu_system_seconds": None, "cpu_total_seconds": None}
+        return {
+            "cpu_user_seconds": usage.ru_utime,
+            "cpu_system_seconds": usage.ru_stime,
+            "cpu_total_seconds": usage.ru_utime + usage.ru_stime,
+        }
 
 
 def fixture_records(fixture):
@@ -154,6 +170,13 @@ def evaluate_query(query, samples, id_to_key):
         for item in results
         if not valid_at(item["memory"], query.get("at"))
     ]
+    temporal_category = query["category"] in {
+        "temporal_history",
+        "conflicting_and_superseded_facts",
+        "long_supersession_chain",
+        "temporal_validity",
+    }
+    temporal_expected = bool(relevant) and relevant <= set(actual[:10]) if relevant else not actual
     content_bytes = sum(len(item["memory"]["content"].encode()) for item in results)
     return {
         "id": query["id"],
@@ -174,6 +197,9 @@ def evaluate_query(query, samples, id_to_key):
         "abstained": len(results) == 0,
         "false_positive": not relevant and bool(results),
         "invalid_temporal_results": invalid_temporal,
+        "temporal_correct_at_10": (
+            temporal_expected and not invalid_temporal if temporal_category else None
+        ),
         "namespace_leaks": [
             item["memory"]["scope"]
             for item in results
@@ -191,6 +217,8 @@ def evaluate_query(query, samples, id_to_key):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
+    parser.add_argument("--fixture", type=Path, default=FIXTURE)
+    parser.add_argument("--source-commit")
     parser.add_argument("--split", choices=("dev", "heldout", "all"), default="dev")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output", type=Path)
@@ -201,7 +229,8 @@ def main():
     if not binary.is_file():
         parser.error(f"binary does not exist: {binary}; run cargo build --release --locked first")
 
-    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    fixture_path = args.fixture.resolve()
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     queries = [
         query
         for query in fixture["queries"]
@@ -311,25 +340,44 @@ def main():
 
     rss_before_close = process_rss_bytes(client.process.pid)
     bytes_before_close = database_bytes(database)
-    client.close()
+    cpu_usage = client.close()
     bytes_after_close = database_bytes(database)
-    sqlite_version = sqlite3.connect(database).execute("select sqlite_version()").fetchone()[0]
-    try:
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-        ).strip()
-    except subprocess.CalledProcessError:
-        commit = None
+    python_sqlite_version = sqlite3.connect(database).execute("select sqlite_version()").fetchone()[0]
+    diagnostics = subprocess.run(
+        [str(binary), "--db", str(database), "diagnose"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    engine_diagnostics = json.loads(diagnostics.stdout)
+    if args.source_commit:
+        commit = args.source_commit
+    else:
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ).strip()
+        except subprocess.CalledProcessError:
+            commit = None
 
     positive_rows = [row for row in quality_rows if row["relevant"]]
     negative_rows = [row for row in quality_rows if not row["relevant"]]
+    temporal_rows = [row for row in quality_rows if row["temporal_correct_at_10"] is not None]
     total_relevant = sum(len(row["relevant"]) for row in positive_rows)
     found_at_10 = sum(row["found_relevant_count_at_10"] for row in positive_rows)
+    temporal_result_count = sum(row["returned_count"] for row in temporal_rows)
+    temporal_invalid_count = sum(len(row["invalid_temporal_results"]) for row in temporal_rows)
+    try:
+        fixture_name = fixture_path.relative_to(ROOT).as_posix()
+    except ValueError:
+        fixture_name = str(fixture_path)
     results = {
         "schema_version": 1,
         "baseline_commit": commit,
+        "source_commit": commit,
         "suite": args.split,
-        "fixture": FIXTURE.relative_to(ROOT).as_posix(),
+        "fixture": fixture_name,
         "fixture_frozen_at": fixture["frozen_at"],
         "query_count": len(queries),
         "memory_count": len(key_to_id),
@@ -337,8 +385,10 @@ def main():
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),
-            "sqlite_version_for_artifact_read": sqlite_version,
+            "engine_sqlite_version": engine_diagnostics["sqlite_version"],
+            "python_sqlite_version_for_artifact_read": python_sqlite_version,
             "binary": str(binary),
+            "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         },
         "persistent_mcp": {
             "startup_through_initialize_ms": startup_initialize_ms,
@@ -351,6 +401,13 @@ def main():
             "forget": distribution(forget_ms),
             "response_bytes": distribution(response_bytes),
             "rss_before_close_bytes": rss_before_close,
+            "mcp_request_count": client.request_count,
+            "cpu_usage": cpu_usage,
+            "cpu_seconds_per_request": (
+                cpu_usage["cpu_total_seconds"] / client.request_count
+                if cpu_usage["cpu_total_seconds"] is not None and client.request_count
+                else None
+            ),
             "db_wal_shm_bytes_before_close": bytes_before_close,
             "db_wal_shm_bytes_after_close": bytes_after_close,
         },
@@ -367,6 +424,10 @@ def main():
             "false_positive_queries": [row["id"] for row in negative_rows if row["false_positive"]],
             "false_positive_rate": sum(row["false_positive"] for row in negative_rows) / max(len(negative_rows), 1),
             "temporal_invalid_result_count": sum(len(row["invalid_temporal_results"]) for row in quality_rows),
+            "temporal_query_count": len(temporal_rows),
+            "temporal_accuracy_at_10": sum(row["temporal_correct_at_10"] for row in temporal_rows) / max(len(temporal_rows), 1),
+            "stale_fact_retrieval_count": temporal_invalid_count,
+            "stale_fact_retrieval_rate": temporal_invalid_count / max(temporal_result_count, 1),
             "namespace_leak_count": sum(len(row["namespace_leaks"]) for row in quality_rows),
             "query_latency": distribution([row["latency"]["p50_ms"] for row in quality_rows]),
             "estimated_content_tokens_average": sum(row["estimated_content_tokens"] for row in quality_rows) / max(len(quality_rows), 1),
