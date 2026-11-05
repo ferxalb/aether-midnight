@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import re
 import subprocess
 import tempfile
@@ -22,20 +23,32 @@ def distribution(values, unit="ms"):
 
 
 def environment(binary):
-    cpu = subprocess.run(["lscpu","-p=MODELNAME"],text=True,capture_output=True,check=True).stdout
-    cpu = next((line for line in cpu.splitlines() if line and not line.startswith("#")),None)
-    ram = int(re.search(r"^MemTotal:\s+(\d+)",Path("/proc/meminfo").read_text(),re.M).group(1))*1024
-    disk = subprocess.run(["lsblk","-dn","-o","NAME,ROTA,TYPE,TRAN,MODEL"],text=True,capture_output=True).stdout.strip()
-    fs = subprocess.run(["findmnt","-n","-o","SOURCE,FSTYPE,TARGET","--target",str(ROOT)],text=True,capture_output=True).stdout.strip()
+    if platform.system() == "Darwin":
+        cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], text=True, capture_output=True, check=True).stdout.strip()
+        ram = int(subprocess.run(["sysctl", "-n", "hw.memsize"], text=True, capture_output=True, check=True).stdout.strip())
+        disk = subprocess.run(["diskutil", "info", "/"], text=True, capture_output=True, check=True).stdout
+        fs = next((line.strip() for line in disk.splitlines() if "File System Personality:" in line), None)
+        fs = fs or "unavailable from diskutil info /"
+        kernel = platform.release()
+    else:
+        cpu = subprocess.run(["lscpu","-p=MODELNAME"],text=True,capture_output=True,check=True).stdout
+        cpu = next((line for line in cpu.splitlines() if line and not line.startswith("#")),None)
+        ram = int(re.search(r"^MemTotal:\s+(\d+)",Path("/proc/meminfo").read_text(),re.M).group(1))*1024
+        disk = subprocess.run(["lsblk","-dn","-o","NAME,ROTA,TYPE,TRAN,MODEL"],text=True,capture_output=True).stdout.strip()
+        fs = subprocess.run(["findmnt","-n","-o","SOURCE,FSTYPE,TARGET","--target",str(ROOT)],text=True,capture_output=True).stdout.strip()
+        kernel = os.uname().release
     sqlite_db = tempfile.NamedTemporaryFile(delete=False).name
     try:
         diag = json.loads(subprocess.run([str(binary),"--db",sqlite_db,"diagnose"],text=True,capture_output=True,check=True).stdout)
     finally:
         Path(sqlite_db).unlink(missing_ok=True)
-    return {"os":"linux","arch":os.uname().machine,"cpu_model":cpu,"logical_cores":os.cpu_count(),"ram_bytes":ram,
-        "disk_type_report":disk,"filesystem_mount":fs,"kernel":os.uname().release,
+    storage_limit = ("diskutil reports an internal solid-state APFS data volume; exact SSD model is unavailable"
+                     if platform.system() == "Darwin"
+                     else "VM reports virtio block device; physical backing media cannot be identified")
+    return {"os":platform.system().lower(),"arch":platform.machine(),"cpu_model":cpu,"logical_cores":os.cpu_count(),"ram_bytes":ram,
+        "disk_type_report":disk,"filesystem_mount":fs,"kernel":kernel,
         "rustc":subprocess.run(["rustc","--version"],text=True,capture_output=True,check=True).stdout.strip(),
-        "sqlite_version":diag["sqlite_version"],"storage_media_limit":"VM reports virtio block device; physical backing media cannot be identified"}
+        "sqlite_version":diag["sqlite_version"],"storage_media_limit":storage_limit}
 
 
 def db_size(db):

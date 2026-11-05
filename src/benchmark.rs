@@ -200,6 +200,29 @@ pub fn run(
     let incremental = incremental_samples(&primary_db, &repo, 30)?;
     let partial_context = partial_context_during_index(base.path(), &repo, cold_query, 30)?;
     let stress = stress_cycles_run(base.path(), stress_cycles.max(1))?;
+    let normalized_ru_maxrss_bytes =
+        code::peak_rss_bytes().context("read normalized process peak RSS")?;
+    let memory_sampled_rss_peak = memory_scaling["workloads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|workload| workload["max_sampled_rss_bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let stress_sampled_rss_peak = stress["rss_samples_bytes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .max()
+        .unwrap_or(0);
+    let max_sampled_rss_bytes = memory_sampled_rss_peak.max(stress_sampled_rss_peak);
+    let peak_process_rss_bytes = normalized_ru_maxrss_bytes.max(max_sampled_rss_bytes);
+    if peak_process_rss_bytes < max_sampled_rss_bytes {
+        bail!(
+            "process peak RSS {peak_process_rss_bytes} bytes is below sampled RSS {max_sampled_rss_bytes} bytes"
+        );
+    }
 
     let source_bytes = primary_status.eligible_bytes.max(1);
     let index_bytes = code::database_bytes(&primary_db);
@@ -270,8 +293,11 @@ pub fn run(
         },
         "memory_scaling":memory_scaling,
         "resources":{
-            "peak_process_rss_bytes":code::peak_rss_bytes(),
-            "peak_process_rss_status":"anecdotal; one process-wide high-water observation",
+            "peak_process_rss_bytes":peak_process_rss_bytes,
+            "normalized_ru_maxrss_bytes":normalized_ru_maxrss_bytes,
+            "max_sampled_rss_bytes":max_sampled_rss_bytes,
+            "peak_rss_ge_every_sampled_rss":true,
+            "peak_process_rss_status":"maximum of normalized getrusage high-water and sampled current RSS; asserted against every sampled RSS",
             "allocator_live_heap_bytes":Value::Null,
             "memory_mapped_pages_bytes":Value::Null,
             "rss_measurement_scope":"benchmark process only; peak high-water mark",
@@ -634,6 +660,20 @@ fn memory_scaling(base: &Path) -> Result<Value> {
         code::wal_checkpoint(&db_path)?;
         let db_bytes_after_ops = code::database_bytes(&db_path);
         let current_rss = current_rss_bytes();
+        let normalized_ru_maxrss_bytes =
+            code::peak_rss_bytes().context("read normalized process peak RSS")?;
+        let max_sampled_rss = rss_during_store
+            .iter()
+            .copied()
+            .chain(current_rss)
+            .max()
+            .unwrap_or(0);
+        let peak_rss = normalized_ru_maxrss_bytes.max(max_sampled_rss);
+        if peak_rss < max_sampled_rss {
+            bail!(
+                "normalized process peak RSS {peak_rss} bytes is below sampled RSS {max_sampled_rss} bytes"
+            );
+        }
         sizes.push(json!({"memory_count":target,"namespace_count":scopes.len(),"namespaces":scopes,
             "setup_ms":setup_ms,"setup_sample_count":1,"setup_status":"anecdotal","records_loaded":target,"db_bytes_before_measured_ops":db_bytes_before_ops,
             "db_bytes_after_measured_ops":db_bytes_after_ops,"db_growth_bytes_during_operations":db_bytes_after_ops.saturating_sub(db_bytes_before_ops),
@@ -643,7 +683,9 @@ fn memory_scaling(base: &Path) -> Result<Value> {
             "current_rss_during_30_store_samples_bytes":distribution_u64(&rss_during_store),
             "store":distribution(&store_ms),"update_by_supersession":distribution(&update_ms),"delete":distribution(&delete_ms),"recall":distribution(&recall_ms),
             "current_rss_bytes_after_workload":current_rss,"current_rss_after_workload_status":"anecdotal; one observation",
-            "process_peak_rss_bytes":code::peak_rss_bytes(),"process_peak_rss_status":"anecdotal; process-wide cumulative high-water across all sizes",
+            "process_peak_rss_bytes":peak_rss,"process_peak_rss_status":"max of normalized process getrusage high-water and sampled current RSS; process-wide cumulative across sizes",
+            "normalized_ru_maxrss_bytes":normalized_ru_maxrss_bytes,
+            "max_sampled_rss_bytes":max_sampled_rss,"peak_rss_ge_every_sampled_rss":true,
             "retrieval_quality":{"labeled_query_count":quality.len(),"recall_at_1":quality_scores[0]/quality.len().max(1) as f64,
                 "recall_at_5":quality_scores[1]/quality.len().max(1) as f64,"recall_at_10":quality_scores[2]/quality.len().max(1) as f64,
                 "mrr":mrr/quality.len().max(1) as f64,"found_expected_record_count":quality_hits,"cross_namespace_checks":leakage_checks,
@@ -654,7 +696,7 @@ fn memory_scaling(base: &Path) -> Result<Value> {
                 "queries":quality_rows,"cross_namespace_leaks":0,"cross_namespace_isolation":"pass","cross_namespace_checks_raw":leakage_rows}}));
     }
     Ok(json!({"memory_records_include_source_and_derived_across_four_namespaces":true,"workloads":sizes,
-        "rss_method":"current process resident set from ps after workload; process peak resident set via getrusage high-water value; peak is cumulative across sizes"}))
+        "rss_method":"current RSS sampled with ps; getrusage ru_maxrss normalized to bytes; reported peak is max(getrusage peak, every sampled RSS) and asserted against all samples; peak is cumulative across sizes"}))
 }
 
 
