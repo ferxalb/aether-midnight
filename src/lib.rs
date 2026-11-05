@@ -12,4 +12,6 @@ pub const INDEX_FORMAT_VERSION: u32 = 2;
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 
 #[cfg(test)]
+mod retrieval_tests;
+#[cfg(test)]
 mod tests;

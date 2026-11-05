@@ -19,6 +19,26 @@ const MAX_MEMORY_QUERY_TERMS: usize = 64;
 const MAX_RERANK_MULTIPLIER: usize = 5;
 const MAX_RERANK_CANDIDATES: usize = 500;
 const MIN_DISTINCT_TERM_MATCHES: usize = 2;
+/// Largest informative-term count for which every "at least m of n" class is its own stage.
+const MAX_STAGED_CLASS_TERMS: usize = 6;
+/// Matches counted before a single-term query is considered for the non-discriminative path.
+const BROAD_TERM_PROBE_MATCHES: usize = 2048;
+const MEMORY_STAGE_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
+         FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
+         WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
+           AND m.scope=?2 AND m.deleted_at IS NULL
+           AND (m.valid_from IS NULL OR m.valid_from<=?3)
+           AND (m.valid_to IS NULL OR m.valid_to>?3)
+         ORDER BY memory_fts.rank, m.observed_at DESC, m.valid_from DESC, m.content,
+                  m.source_uri, m.kind, m.source_id, m.supersedes_id, m.id
+         LIMIT ?4";
+const MEMORY_RECENCY_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,-CAST(m.id AS REAL)
+         FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
+         WHERE memory_fts MATCH ?1
+           AND m.scope=?2 AND m.deleted_at IS NULL
+           AND (m.valid_from IS NULL OR m.valid_from<=?3)
+           AND (m.valid_to IS NULL OR m.valid_to>?3)
+         ORDER BY memory_fts.rowid DESC LIMIT ?4";
 const MEMORY_RECALL_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
@@ -43,6 +63,9 @@ const MEMORY_RECALL_ROWID_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) enum RecallCandidateOrder {
+    /// Production: class-staged exact top-k (see `recall_staged`).
+    Staged,
+    /// v0.3.1 single-statement BM25 window, kept for paired A/B measurement.
     Ranked,
     RowIdAscending,
     RowIdDescending,
@@ -52,6 +75,7 @@ pub(crate) enum RecallCandidateOrder {
 impl RecallCandidateOrder {
     fn sql(self) -> &'static str {
         match self {
+            Self::Staged => MEMORY_STAGE_SQL,
             Self::Ranked => MEMORY_RECALL_SQL,
             Self::RowIdAscending => MEMORY_RECALL_ROWID_ASC_SQL,
             Self::RowIdDescending => MEMORY_RECALL_ROWID_DESC_SQL,
@@ -61,6 +85,7 @@ impl RecallCandidateOrder {
 
     fn label(self) -> &'static str {
         match self {
+            Self::Staged => "staged_exact_bm25",
             Self::Ranked => "bm25_rank",
             Self::RowIdAscending => "rowid_ascending",
             Self::RowIdDescending => "rowid_descending",
@@ -74,8 +99,15 @@ impl RecallCandidateOrder {
 pub enum CandidateCoverage {
     /// Every row matching the lexical query and SQL filters was considered.
     Complete,
+    /// The returned list is the exact top-k of all eligible rows under the documented
+    /// ordering (phrase, distinct-term coverage, BM25, deterministic tie-breaks), but
+    /// lower-priority classes were not enumerated once the result limit was filled.
+    ExactTopK,
     /// Only the top bounded FTS5 BM25 candidate window was reranked.
     Bm25TopK,
+    /// The single query term occurs in at least half of the namespace and carries no
+    /// BM25 weight; the newest matching rows were returned instead of ranking all of them.
+    RecencyWindow,
     /// Candidates came from bounded row-ID windows and may omit interior rows.
     RowIdSample,
 }
@@ -687,6 +719,7 @@ fn configured_candidate_order() -> RecallCandidateOrder {
     #[cfg(feature = "retrieval-experiments")]
     if let Ok(order) = std::env::var("AETHER_RECALL_EXPERIMENT") {
         match order.as_str() {
+            "staged" => return RecallCandidateOrder::Staged,
             "ranked" => return RecallCandidateOrder::Ranked,
             "rowid_ascending" => return RecallCandidateOrder::RowIdAscending,
             "rowid_descending" => return RecallCandidateOrder::RowIdDescending,
@@ -694,7 +727,7 @@ fn configured_candidate_order() -> RecallCandidateOrder {
             _ => {}
         }
     }
-    RecallCandidateOrder::Ranked
+    RecallCandidateOrder::Staged
 }
 
 fn recall_on_profiled(
@@ -756,6 +789,23 @@ fn recall_on_profiled(
         phase.finish();
     }
 
+    if matches!(candidate_order, RecallCandidateOrder::Staged) {
+        let results = recall_staged(
+            conn,
+            scope,
+            &at,
+            &full_terms,
+            &query_terms,
+            limit.clamp(1, 100),
+            profile.as_deref_mut(),
+        )?;
+        finish_profile_total(
+            profile.as_deref_mut(),
+            total_wall_started,
+            total_cpu_started,
+        );
+        return Ok(results);
+    }
     let candidate_order = if query_terms.len() == 1 {
         candidate_order
     } else {
@@ -964,26 +1014,7 @@ fn recall_on_profiled(
         })
         .collect::<Vec<_>>();
     let phase = ProfileTimer::start(profile.as_deref_mut(), "final_sort");
-    ranked.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| left.3.total_cmp(&right.3))
-            .then_with(|| right.0.memory.observed_at.cmp(&left.0.memory.observed_at))
-            .then_with(|| right.0.memory.valid_from.cmp(&left.0.memory.valid_from))
-            .then_with(|| left.0.memory.content.cmp(&right.0.memory.content))
-            .then_with(|| left.0.memory.source_uri.cmp(&right.0.memory.source_uri))
-            .then_with(|| left.0.memory.kind.cmp(&right.0.memory.kind))
-            .then_with(|| left.0.memory.source_id.cmp(&right.0.memory.source_id))
-            .then_with(|| {
-                left.0
-                    .memory
-                    .supersedes_id
-                    .cmp(&right.0.memory.supersedes_id)
-            })
-            .then_with(|| left.0.memory.id.cmp(&right.0.memory.id))
-    });
+    ranked.sort_by(compare_ranked_candidates);
     if let Some(phase) = phase {
         phase.finish();
     }
@@ -997,6 +1028,387 @@ fn recall_on_profiled(
         .collect::<Vec<_>>();
     finish_profile_total(profile, total_wall_started, total_cpu_started);
     Ok(results)
+}
+
+type RankedCandidate = (MemorySearchResult, bool, usize, f64);
+
+/// Final deterministic ordering: exact phrase, distinct-term coverage, lexical rank,
+/// then temporal and provenance fields, ending in the row ID.
+fn compare_ranked_candidates(
+    left: &RankedCandidate,
+    right: &RankedCandidate,
+) -> std::cmp::Ordering {
+    right
+        .1
+        .cmp(&left.1)
+        .then_with(|| right.2.cmp(&left.2))
+        .then_with(|| left.3.total_cmp(&right.3))
+        .then_with(|| right.0.memory.observed_at.cmp(&left.0.memory.observed_at))
+        .then_with(|| right.0.memory.valid_from.cmp(&left.0.memory.valid_from))
+        .then_with(|| left.0.memory.content.cmp(&right.0.memory.content))
+        .then_with(|| left.0.memory.source_uri.cmp(&right.0.memory.source_uri))
+        .then_with(|| left.0.memory.kind.cmp(&right.0.memory.kind))
+        .then_with(|| left.0.memory.source_id.cmp(&right.0.memory.source_id))
+        .then_with(|| {
+            left.0
+                .memory
+                .supersedes_id
+                .cmp(&right.0.memory.supersedes_id)
+        })
+        .then_with(|| left.0.memory.id.cmp(&right.0.memory.id))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageKind {
+    /// FTS5 BM25 order with deterministic tie-breaks.
+    Ranked,
+    /// Newest row IDs first; used only for non-discriminative single terms.
+    Recency,
+}
+
+fn scoped_match(scope: &str, content_expr: &str) -> String {
+    format!(
+        "scope_token : \"{}\" AND content : ({content_expr})",
+        memory_scope_token(scope)
+    )
+}
+
+fn all_terms_expr(terms: &[&str]) -> String {
+    terms
+        .iter()
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn term_subsets<'a>(terms: &[&'a str], size: usize) -> Vec<Vec<&'a str>> {
+    fn walk<'a>(
+        terms: &[&'a str],
+        start: usize,
+        size: usize,
+        current: &mut Vec<&'a str>,
+        out: &mut Vec<Vec<&'a str>>,
+    ) {
+        if current.len() == size {
+            out.push(current.clone());
+            return;
+        }
+        for index in start..terms.len() {
+            current.push(terms[index]);
+            walk(terms, index + 1, size, current, out);
+            current.pop();
+        }
+    }
+    let mut out = Vec::new();
+    walk(terms, 0, size, &mut Vec::new(), &mut out);
+    out
+}
+
+/// Rows containing at least `size` of the terms. Every term appears in the same number of
+/// subsets, so BM25 over this expression is a uniform multiple of BM25 over the terms.
+fn at_least_expr(terms: &[&str], size: usize) -> String {
+    term_subsets(terms, size)
+        .iter()
+        .map(|subset| format!("({})", all_terms_expr(subset)))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// Linear-size expression for "at least two distinct terms" used beyond the staged limit.
+fn pair_chain_expr(terms: &[&str]) -> String {
+    (0..terms.len() - 1)
+        .map(|index| {
+            let rest = terms[index + 1..]
+                .iter()
+                .map(|term| format!("\"{term}\""))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            format!("(\"{}\" AND ({rest}))", terms[index])
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn count_matches_up_to(conn: &Connection, match_query: &str, cap: usize) -> Result<usize> {
+    let count: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM (SELECT 1 FROM memory_fts WHERE memory_fts MATCH ?1 LIMIT ?2)",
+        )?
+        .query_row(params![match_query, cap as i64], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+/// A single term found in at least half of a namespace has no positive BM25 weight, so ranking
+/// every match only orders noise. Small namespaces are never classified this way.
+fn is_non_discriminative_term(conn: &Connection, scope: &str, term_match: &str) -> Result<bool> {
+    if count_matches_up_to(conn, term_match, BROAD_TERM_PROBE_MATCHES)? < BROAD_TERM_PROBE_MATCHES {
+        return Ok(false);
+    }
+    let active: i64 = conn
+        .prepare_cached("SELECT count(*) FROM memories WHERE scope=?1 AND deleted_at IS NULL")?
+        .query_row([scope], |row| row.get(0))?;
+    let threshold = (active as usize).div_ceil(2).max(BROAD_TERM_PROBE_MATCHES);
+    Ok(count_matches_up_to(conn, term_match, threshold)? >= threshold)
+}
+
+fn classify_candidate(
+    content: &str,
+    query_terms: &[String],
+    full_terms: &[String],
+) -> Option<(bool, usize)> {
+    let content_terms = token_vec(content);
+    let matched_terms = query_terms
+        .iter()
+        .filter(|term| {
+            content_terms
+                .iter()
+                .any(|content_term| content_term == *term)
+        })
+        .count();
+    if matched_terms < MIN_DISTINCT_TERM_MATCHES.min(query_terms.len()) {
+        return None;
+    }
+    Some((
+        contains_contiguous_terms(&content_terms, full_terms),
+        matched_terms,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_stage(
+    conn: &Connection,
+    kind: StageKind,
+    match_query: &str,
+    scope: &str,
+    at: &str,
+    want: usize,
+    seen: &mut HashSet<i64>,
+    query_terms: &[String],
+    full_terms: &[String],
+    collected: &mut Vec<RankedCandidate>,
+    mut profile: Option<&mut MemoryRecallProfile>,
+) -> Result<bool> {
+    let sql = match kind {
+        StageKind::Ranked => MEMORY_STAGE_SQL,
+        StageKind::Recency => MEMORY_RECENCY_SQL,
+    };
+    // At most `seen.len()` fetched rows can be duplicates of earlier stages.
+    let mut fetch = want + seen.len();
+    loop {
+        let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
+        let mut statement = conn.prepare_cached(sql)?;
+        let mut rows = statement.query(params![match_query, scope, at, fetch as i64])?;
+        let mut fetched = 0usize;
+        let mut rejected = 0usize;
+        let mut accepted: Vec<RankedCandidate> = Vec::new();
+        while let Some(row) = rows.next().context("read memory search results")? {
+            fetched += 1;
+            let id: i64 = row.get(0)?;
+            if seen.contains(&id) {
+                continue;
+            }
+            let memory = MemoryRecord {
+                id,
+                scope: row.get(1)?,
+                kind: row.get(2)?,
+                content: row.get(3)?,
+                source_uri: row.get(4)?,
+                source_id: row.get(5)?,
+                supersedes_id: row.get(6)?,
+                created_at: row.get(7)?,
+                observed_at: row.get(8)?,
+                valid_from: row.get(9)?,
+                valid_to: row.get(10)?,
+            };
+            let rank: f64 = row.get(11)?;
+            let Some((exact_phrase, matched_terms)) =
+                classify_candidate(&memory.content, query_terms, full_terms)
+            else {
+                rejected += 1;
+                continue;
+            };
+            let score = match kind {
+                StageKind::Ranked => {
+                    (20.0 + (-rank * 1_000_000.0).clamp(0.0, 30.0)).clamp(0.0, 50.0)
+                }
+                StageKind::Recency => 20.0,
+            };
+            accepted.push((
+                MemorySearchResult {
+                    memory,
+                    match_reason: if exact_phrase {
+                        "memory_exact_phrase".into()
+                    } else {
+                        "memory_lexical".into()
+                    },
+                    score,
+                    candidate_coverage: CandidateCoverage::Complete,
+                },
+                exact_phrase,
+                matched_terms,
+                rank,
+            ));
+        }
+        drop(rows);
+        if let Some(phase) = phase {
+            phase.finish();
+        }
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.candidates_rejected_by_term_coverage += rejected;
+        }
+        let truncated = fetched == fetch;
+        if accepted.len() >= want || !truncated {
+            let overflow = accepted.len() > want;
+            accepted.truncate(want);
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.candidates_returned += fetched;
+                profile.candidates_hydrated += accepted.len();
+                for candidate in &accepted {
+                    profile.content_bytes_hydrated += candidate.0.memory.content.len();
+                    profile.record_bytes_hydrated += memory_record_bytes(&candidate.0.memory);
+                }
+            }
+            for candidate in accepted {
+                seen.insert(candidate.0.memory.id);
+                collected.push(candidate);
+            }
+            return Ok(truncated || overflow);
+        }
+        // Rows rejected by Rust-side term coverage crowded the window; widen and retry.
+        fetch = fetch.saturating_mul(2);
+    }
+}
+
+/// Class-staged exact top-k retrieval.
+///
+/// Results are ordered by (exact phrase, distinct informative terms matched, BM25, tie-breaks).
+/// Because the class dominates BM25, classes are enumerated best-first with FTS5 AND/phrase
+/// queries and enumeration stops as soon as `limit` rows are collected. BM25 only orders rows
+/// *within* a class, where the stage expression yields a score that is a uniform multiple of the
+/// BM25 of the query terms. Every collected row therefore outranks every row not enumerated.
+fn recall_staged(
+    conn: &Connection,
+    scope: &str,
+    at: &str,
+    full_terms: &[String],
+    query_terms: &[String],
+    limit: usize,
+    mut profile: Option<&mut MemoryRecallProfile>,
+) -> Result<Vec<MemorySearchResult>> {
+    let phase = ProfileTimer::start(profile.as_deref_mut(), "fts_query_construction");
+    let terms = query_terms.iter().map(String::as_str).collect::<Vec<_>>();
+    let term_count = terms.len();
+    let mut stages: Vec<(String, StageKind, usize)> = Vec::new();
+    let mut bounded_window = false;
+    let mut recency_stage = false;
+    if full_terms.len() > 1 {
+        let phrase = format!("\"{}\"", full_terms.join(" "));
+        stages.push((
+            scoped_match(scope, &format!("{phrase} AND {}", all_terms_expr(&terms))),
+            StageKind::Ranked,
+            limit,
+        ));
+    }
+    if term_count == 1 {
+        let term_match = scoped_match(scope, &all_terms_expr(&terms));
+        if is_non_discriminative_term(conn, scope, &term_match)? {
+            recency_stage = true;
+            stages.push((term_match, StageKind::Recency, limit));
+        } else {
+            stages.push((term_match, StageKind::Ranked, limit));
+        }
+    } else {
+        stages.push((
+            scoped_match(scope, &all_terms_expr(&terms)),
+            StageKind::Ranked,
+            limit,
+        ));
+        if term_count <= MAX_STAGED_CLASS_TERMS {
+            for size in (MIN_DISTINCT_TERM_MATCHES..term_count).rev() {
+                stages.push((
+                    scoped_match(scope, &at_least_expr(&terms, size)),
+                    StageKind::Ranked,
+                    limit,
+                ));
+            }
+        } else {
+            bounded_window = true;
+            stages.push((
+                scoped_match(scope, &pair_chain_expr(&terms)),
+                StageKind::Ranked,
+                limit
+                    .saturating_mul(MAX_RERANK_MULTIPLIER)
+                    .min(MAX_RERANK_CANDIDATES)
+                    .max(limit),
+            ));
+        }
+    }
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.candidate_strategy = Some("staged_exact_bm25");
+        profile.candidate_limit = limit;
+    }
+
+    let mut collected: Vec<RankedCandidate> = Vec::with_capacity(limit);
+    let mut seen = HashSet::with_capacity(limit);
+    let mut every_stage_complete = true;
+    let mut recency_truncated = false;
+    let stage_total = stages.len();
+    for (index, (match_query, kind, window)) in stages.into_iter().enumerate() {
+        let want = if window > limit {
+            window
+        } else {
+            limit - collected.len()
+        };
+        let truncated = run_stage(
+            conn,
+            kind,
+            &match_query,
+            scope,
+            at,
+            want,
+            &mut seen,
+            query_terms,
+            full_terms,
+            &mut collected,
+            profile.as_deref_mut(),
+        )?;
+        if truncated {
+            every_stage_complete = false;
+            recency_truncated |= kind == StageKind::Recency;
+        }
+        if collected.len() >= limit && index + 1 < stage_total {
+            every_stage_complete = false;
+            break;
+        }
+    }
+    let coverage = if recency_stage && recency_truncated {
+        CandidateCoverage::RecencyWindow
+    } else if every_stage_complete {
+        CandidateCoverage::Complete
+    } else if bounded_window {
+        CandidateCoverage::Bm25TopK
+    } else {
+        CandidateCoverage::ExactTopK
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.candidate_budget_saturated = !every_stage_complete;
+    }
+    let phase = ProfileTimer::start(profile, "final_sort");
+    collected.sort_by(compare_ranked_candidates);
+    if let Some(phase) = phase {
+        phase.finish();
+    }
+    Ok(collected
+        .into_iter()
+        .take(limit)
+        .map(|(mut result, _, _, _)| {
+            result.candidate_coverage = coverage;
+            result
+        })
+        .collect())
 }
 
 fn finish_profile_total(
@@ -1299,7 +1711,11 @@ fn validate_scope(scope: &str) -> Result<()> {
     Ok(())
 }
 
-fn memory_match_query(scope: &str, query_terms: &[String], full_terms: &[String]) -> String {
+pub(crate) fn memory_match_query(
+    scope: &str,
+    query_terms: &[String],
+    full_terms: &[String],
+) -> String {
     let alternatives = query_terms
         .iter()
         .map(|term| format!("\"{term}\""))
@@ -1317,7 +1733,7 @@ fn memory_match_query(scope: &str, query_terms: &[String], full_terms: &[String]
     )
 }
 
-fn normalized_tokens(text: &str) -> Vec<String> {
+pub(crate) fn normalized_tokens(text: &str) -> Vec<String> {
     let folded = text
         .nfkd()
         .filter(|character| !is_combining_mark(*character))
@@ -1330,7 +1746,7 @@ fn normalized_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn informative_terms(terms: &[String]) -> Vec<String> {
+pub(crate) fn informative_terms(terms: &[String]) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
         "a", "an", "and", "are", "as", "at", "be", "before", "but", "by", "can", "did", "do",
         "does", "for", "from", "had", "has", "have", "he", "her", "his", "how", "i", "in", "is",
@@ -1352,11 +1768,11 @@ fn informative_terms(terms: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn token_vec(text: &str) -> Vec<String> {
+pub(crate) fn token_vec(text: &str) -> Vec<String> {
     normalized_tokens(text)
 }
 
-fn contains_contiguous_terms(content: &[String], query: &[String]) -> bool {
+pub(crate) fn contains_contiguous_terms(content: &[String], query: &[String]) -> bool {
     !query.is_empty()
         && query.len() <= content.len()
         && content

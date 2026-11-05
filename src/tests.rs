@@ -1473,7 +1473,7 @@ fn default_memory_recall_finds_exact_phrase_at_every_matching_position() {
             });
         assert_eq!(
             exact_phrase.candidate_coverage,
-            memory::CandidateCoverage::Bm25TopK,
+            memory::CandidateCoverage::ExactTopK,
             "exact-phrase evidence at matching position {target_position}/{FANOUT} was omitted"
         );
         assert_eq!(
