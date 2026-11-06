@@ -1835,7 +1835,8 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
         },
         "platform": {"os": std::env::consts::OS, "arch": std::env::consts::ARCH, "sqlite": rusqlite::version()},
         "database_bytes": code::database_bytes(&db_path),
-        "peak_rss_bytes": current_rss_bytes(),
+        "peak_rss_bytes": code::peak_rss_bytes(),
+        "current_rss_bytes_after_run": current_rss_bytes(),
         "classes": reports,
     }))
 }
