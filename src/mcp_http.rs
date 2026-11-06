@@ -99,7 +99,9 @@ fn connection(
             reject(403, "Forbidden", "invalid Origin header")?;
             return Ok(());
         }
-        if req.path != "/mcp" {
+        // `/mcp/<label>` lets a client keep one endpoint record per token; the
+        // label carries no authority (the bearer token alone selects the policy).
+        if req.path != "/mcp" && !req.path.starts_with("/mcp/") {
             reject(404, "Not Found", "endpoint is /mcp")?;
             return Ok(());
         }
