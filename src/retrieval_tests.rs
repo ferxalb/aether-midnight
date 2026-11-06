@@ -1481,3 +1481,44 @@ fn long_queries_use_a_labeled_bounded_window_and_still_surface_phrase_and_full_m
     )));
     assert!(results.iter().all(|r| r.memory.scope == scope));
 }
+
+#[test]
+fn newest_first_rank_scan_preserves_ties_and_widens_past_ineligible_winners() {
+    let scope = "project:descending";
+    let mut inputs = Vec::new();
+    // Exact BM25 ties at the cut must select newest eligible IDs. Newer short rows from
+    // another namespace and expired rows beat them in BM25 and force repeated widening.
+    for _ in 0..80 {
+        inputs.push(input(scope, "status evidence"));
+    }
+    for _ in 0..160 {
+        inputs.push(input("project:other", "status"));
+        let mut expired = input(scope, "status");
+        expired.valid_to = Some("2000-01-01T00:00:00Z".into());
+        inputs.push(expired);
+    }
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("descending.sqlite3");
+    let mut session = memory::MemorySession::open(&path).unwrap();
+    let inserted = insert_all(&mut session, &inputs);
+    let oracle = Oracle::new(load_corpus(&path));
+    for limit in [1, 10, 79, 80, 100] {
+        assert_oracle_agreement(&session, &oracle, scope, "status", limit);
+    }
+    let results = session
+        .recall(scope, "status", Some(FAR_FUTURE), 10)
+        .unwrap();
+    assert_eq!(ids(&results), inserted[70..80].to_vec());
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit.candidate_coverage == CandidateCoverage::ExactTopK)
+    );
+    let plan = session
+        .recall_query_plan_ordered(scope, "status", RecallCandidateOrder::Staged)
+        .unwrap();
+    assert!(
+        plan.iter().any(|step| step.contains("CO-ROUTINE")),
+        "{plan:?}"
+    );
+}

@@ -40,6 +40,19 @@ const MEMORY_RANKED_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_u
               AND (m.valid_from IS NULL OR m.valid_from<=?3)
               AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY f.rank,f.rid DESC";
+// A coroutine scans newest first before the exact top-k sort. LIMIT -1 prevents flattening
+// without truncating any match. On broad single terms, ties no longer replace the top-k heap
+// on every row. Multi-term stages retain the direct scan: the coroutine costs more there.
+const MEMORY_RANKED_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,f.rank
+         FROM (SELECT rid,rank FROM (
+                   SELECT rowid AS rid,rank FROM memory_fts
+                   WHERE memory_fts MATCH ?1 AND rank MATCH 'bm25(0.0,1.0)'
+                   ORDER BY rowid DESC LIMIT -1)
+               ORDER BY rank,rid DESC LIMIT ?4) f
+         LEFT JOIN memories m ON m.id=f.rid AND m.scope=?2 AND m.deleted_at IS NULL
+              AND (m.valid_from IS NULL OR m.valid_from<=?3)
+              AND (m.valid_to IS NULL OR m.valid_to>?3)
+         ORDER BY f.rank,f.rid DESC";
 const MEMORY_RECENCY_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,-CAST(m.id AS REAL)
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1
@@ -525,7 +538,19 @@ impl MemorySession {
         if query_terms.is_empty() {
             return Ok(Vec::new());
         }
-        let match_query = memory_match_query(scope, &query_terms, &full_terms);
+        let match_query = if matches!(candidate_order, RecallCandidateOrder::Staged)
+            && query_terms.len() == 1
+            && full_terms.len() == 1
+        {
+            let (scope_active, total_active) = scope_sizes(&self.connection, scope)?;
+            scoped_match(
+                scope,
+                &all_terms_expr(&[&query_terms[0]]),
+                scope_active * 2 < total_active,
+            )
+        } else {
+            memory_match_query(scope, &query_terms, &full_terms)
+        };
         let orders = if matches!(candidate_order, RecallCandidateOrder::BalancedRowIdWindows) {
             vec![
                 RecallCandidateOrder::RowIdAscending,
@@ -536,7 +561,15 @@ impl MemorySession {
         };
         let mut plans = Vec::new();
         for order in orders {
-            let sql = format!("EXPLAIN QUERY PLAN {}", order.sql());
+            let stage_sql = if matches!(order, RecallCandidateOrder::Staged)
+                && query_terms.len() == 1
+                && full_terms.len() == 1
+            {
+                MEMORY_RANKED_DESC_SQL
+            } else {
+                order.sql()
+            };
+            let sql = format!("EXPLAIN QUERY PLAN {stage_sql}");
             let mut statement = self.connection.prepare(&sql)?;
             let rows = statement
                 .query_map(params![match_query, scope, now_utc(), 10i64], |row| {
@@ -1326,7 +1359,12 @@ fn run_ranked_stage(
     };
     loop {
         let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
-        let mut statement = conn.prepare_cached(MEMORY_RANKED_SQL)?;
+        let sql = if query_terms.len() == 1 && full_terms.len() == 1 {
+            MEMORY_RANKED_DESC_SQL
+        } else {
+            MEMORY_RANKED_SQL
+        };
+        let mut statement = conn.prepare_cached(sql)?;
         let mut rows = statement.query(params![match_query, scope, at, fetch as i64])?;
         let (mut fetched, mut rejected) = (0usize, 0usize);
         let mut accepted: Vec<RankedCandidate> = Vec::new();

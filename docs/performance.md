@@ -1,5 +1,6 @@
 # Performance contract and benchmark results
 
+> **v0.5 update:** the bounded exact single-token improvement, native paired measurements and unmet latency gates are in [the v0.5 retrieval record](retrieval-v05.md).
 > **v0.4 update:** current memory-recall measurements and the paired v0.3.1 comparison are in [the v0.4 retrieval record](retrieval-v04.md). Older sections here describe earlier strategies.
 
 This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md) and [the investigation](performance-investigation.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
