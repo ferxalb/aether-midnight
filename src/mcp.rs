@@ -192,7 +192,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "recall",
-            "Search active memories in exactly one namespace and time; repository code is never included. Results carry candidate_coverage: complete, exact_top_k (exact under the documented ordering), bm25_top_k (bounded window for queries with more than six informative terms), or recency_window (only when broad_terms is recent).",
+            "Search active memories in exactly one namespace and time; repository code is never included. Results carry candidate_coverage: complete, exact_top_k (exact under the documented ordering), bm25_top_k (bounded window for queries with more than four informative terms), or recency_window (only when broad_terms is recent).",
             json!({"type":"object","properties":{"scope":{"type":"string"},"query":{"type":"string"},"at":{"type":"string"},"limit":{"type":"integer"},"broad_terms":{"type":"string","enum":["exact","recent"],"description":"Default exact BM25 ranking. recent opts a single query term found in at least half of the namespace into a fast newest-first window that can omit older evidence."}},"required":["scope","query"]}),
         ),
         tool(
