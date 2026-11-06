@@ -1,6 +1,7 @@
 //! Loopback-only MCP Streamable HTTP transport (stateless JSON responses).
 //!
-//! Dependency-free (std::net). Binds only to 127.0.0.1 / ::1, rejects foreign
+//! Dependency-free (std::net). Every request needs a bearer token from the
+//! registry in `auth.rs`. Binds only to 127.0.0.1 / ::1, rejects foreign
 //! Host/Origin headers (DNS-rebinding defence), bounds every read, and never
 //! follows or issues network requests.
 
@@ -13,7 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::mcp::{Policy, handle_message};
+use crate::auth::Authenticator;
+use crate::mcp::handle_message;
 
 const MAX_BODY: usize = 1024 * 1024;
 const MAX_HEADER_LINE: usize = 8 * 1024;
@@ -21,12 +23,7 @@ const MAX_HEADERS: usize = 64;
 const MAX_CONNECTIONS: usize = 16;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn serve(
-    db_path: &Path,
-    policy: &Policy,
-    bind: SocketAddr,
-    cancellation: Arc<AtomicBool>,
-) -> Result<()> {
+pub fn serve(db_path: &Path, bind: SocketAddr, cancellation: Arc<AtomicBool>) -> Result<()> {
     if !bind.ip().is_loopback() {
         bail!("MCP HTTP transport only binds loopback addresses (127.0.0.1 or ::1)");
     }
@@ -43,6 +40,7 @@ pub fn serve(
     );
     std::io::stdout().flush()?;
     let active = Arc::new(AtomicUsize::new(0));
+    let auth = Arc::new(Authenticator::new(db_path));
     while !cancellation.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -52,15 +50,15 @@ pub fn serve(
                         write_plain(&stream, 503, "Service Unavailable", "too many connections");
                     continue;
                 }
-                let (db, policy, cancel, active) = (
+                let (db, auth, cancel, active) = (
                     db_path.to_path_buf(),
-                    policy.clone(),
+                    auth.clone(),
                     cancellation.clone(),
                     active.clone(),
                 );
                 let port = local.port();
                 std::thread::spawn(move || {
-                    let _ = connection(stream, port, &db, &policy, &cancel);
+                    let _ = connection(stream, port, &db, &auth, &cancel);
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -77,7 +75,7 @@ fn connection(
     stream: TcpStream,
     port: u16,
     db_path: &Path,
-    policy: &Policy,
+    auth: &Authenticator,
     cancel: &AtomicBool,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
@@ -105,6 +103,18 @@ fn connection(
             reject(404, "Not Found", "endpoint is /mcp")?;
             return Ok(());
         }
+        // Reachability on loopback is not authority: every request, including
+        // initialize and tools/list, needs a live token. The policy is read
+        // from the token record on each request, so revocation is immediate.
+        let record = req
+            .header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(|token| auth.authenticate(token.trim()));
+        let Some(record) = record else {
+            write_unauthorized(&stream)?;
+            return Ok(());
+        };
+        let policy = &record.policy;
         match req.method.as_str() {
             "DELETE" => write_response(&stream, 200, "OK", None, req.keep_alive)?,
             "POST" => {
@@ -281,6 +291,17 @@ fn write_response(
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(&payload)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_unauthorized(mut stream: &TcpStream) -> Result<()> {
+    let msg = "authentication required";
+    let head = format!(
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"aether-midnight\"\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+        msg.len()
+    );
+    stream.write_all(head.as_bytes())?;
     stream.flush()?;
     Ok(())
 }

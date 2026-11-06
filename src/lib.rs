@@ -1,5 +1,6 @@
 //! Local-first, deterministic retrieval primitives for AETHER Midnight.
 
+pub mod auth;
 pub mod benchmark;
 pub mod code;
 pub mod db;

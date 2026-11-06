@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// Least-privilege limits applied to every tool call on any transport.
 /// The default policy is unrestricted so existing stdio users are unaffected.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Policy {
     /// When set, only these tools are listed or callable.
     pub allowed_tools: Option<Vec<String>>,
@@ -54,14 +55,36 @@ impl Policy {
             .is_none_or(|list| list.iter().any(|t| t == name))
     }
 
-    fn authorize(&self, name: &str, args: &Value) -> Result<()> {
+    /// Checks a call and returns the arguments to execute. When the policy
+    /// pins exactly one literal memory scope, the scope is injected so a model
+    /// can neither omit nor override it: authority comes from the policy, not
+    /// from model-generated arguments.
+    fn authorize(&self, name: &str, args: &Value) -> Result<Value> {
+        let mut args = args.clone();
         if !self.tool_allowed(name) {
             bail!("permission denied: tool {name} is not enabled for this server");
         }
         if let Some(scopes) = &self.memory_scopes
             && MEMORY_TOOLS.contains(&name)
         {
-            let scope = required_str(args, "scope").ok();
+            let pinned = match scopes.as_slice() {
+                [only] if !only.ends_with('*') => Some(only.clone()),
+                _ => None,
+            };
+            if let (Some(pinned), Some(map)) = (&pinned, args.as_object_mut()) {
+                if name == "remember_batch" {
+                    if let Some(items) = map.get_mut("memories").and_then(Value::as_array_mut) {
+                        for item in items {
+                            if let Some(m) = item.as_object_mut() {
+                                m.entry("scope").or_insert_with(|| json!(pinned));
+                            }
+                        }
+                    }
+                } else {
+                    map.entry("scope").or_insert_with(|| json!(pinned));
+                }
+            }
+            let scope = required_str(&args, "scope").ok();
             let batch: Vec<&str> = args
                 .get("memories")
                 .and_then(Value::as_array)
@@ -93,7 +116,7 @@ impl Policy {
         if let Some(roots) = &self.repo_roots
             && args.get("repo_path").is_some()
         {
-            let repo = std::fs::canonicalize(required_str(args, "repo_path")?)
+            let repo = std::fs::canonicalize(required_str(&args, "repo_path")?)
                 .context("permission denied: repository path is not accessible")?;
             let allowed = roots
                 .iter()
@@ -102,7 +125,7 @@ impl Policy {
                 bail!("permission denied: repository is outside the roots enabled for this server");
             }
         }
-        Ok(())
+        Ok(args)
     }
 }
 
@@ -140,7 +163,11 @@ pub fn handle_message(
                         .unwrap_or_else(|| json!({}));
                     policy.authorize(name, &args)
                 })
-                .and_then(|()| call_tool(db_path, memory_session, &params, cancellation));
+                .and_then(|args| {
+                    let mut checked = params.clone();
+                    checked["arguments"] = args;
+                    call_tool(db_path, memory_session, &checked, cancellation)
+                });
             match outcome {
                 Ok(result) => ok_response(
                     id,
