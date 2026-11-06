@@ -1321,7 +1321,31 @@ fn schema_three_database_migrates_to_scope_counts_and_keeps_every_memory() {
         .unwrap();
     drop(raw);
 
+    let original = path;
+    let path = temp.path().join("migration-copy.sqlite3");
+    std::fs::copy(&original, &path).unwrap();
+    let original_bytes = std::fs::read(&original).unwrap();
+    // Fail after table creation/backfill, before the schema version is committed.
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "CREATE TRIGGER reject_v4 BEFORE UPDATE ON metadata WHEN new.key='schema_version' AND new.value='4' BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;",
+    )
+    .unwrap();
+    drop(raw);
+    assert!(crate::db::open_db(&path).is_err());
+    let raw = Connection::open(&path).unwrap();
+    let state: (i64, bool) = raw.query_row(
+        "SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_master WHERE name='memory_scope_counts')",
+        [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(state, (3, false));
+    raw.execute_batch("DROP TRIGGER reject_v4;").unwrap();
+    drop(raw);
     let migrated = crate::db::open_db(&path).unwrap();
+    assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+    let integrity: String = migrated
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();

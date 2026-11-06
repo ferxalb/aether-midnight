@@ -1540,7 +1540,17 @@ fn configured_batch_limits() -> (usize, usize) {
     )
 }
 
-fn acquire_index_lock(db_path: &Path, scope: &RepoScope) -> Result<File> {
+struct IndexLock(File);
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        // Closing alone leaves flock held by descriptors inherited by a concurrent fork.
+        // Unlock the shared open-file description when the protected operation finishes.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn acquire_index_lock(db_path: &Path, scope: &RepoScope) -> Result<IndexLock> {
     let parent = db_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1564,7 +1574,7 @@ fn acquire_index_lock(db_path: &Path, scope: &RepoScope) -> Result<File> {
             scope.root.display()
         )
     })?;
-    Ok(file)
+    Ok(IndexLock(file))
 }
 
 #[allow(clippy::too_many_arguments)] // Keeps this internal report construction local and explicit.
@@ -3202,5 +3212,34 @@ mod parser_budget_tests {
             )
             .unwrap();
         assert!(incomplete);
+    }
+}
+
+#[cfg(test)]
+mod index_lock_tests {
+    use super::*;
+
+    #[test]
+    fn completed_index_releases_lock_even_with_inherited_descriptor() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let scope = RepoScope {
+            root: temp.path().to_path_buf(),
+            repo_id: "repo".into(),
+            worktree_id: "tree".into(),
+            branch: None,
+            revision: None,
+        };
+        let database = temp.path().join("index.sqlite3");
+        let lock = acquire_index_lock(&database, &scope).unwrap();
+        // dup shares the open-file description, just like a concurrent fork before exec.
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(acquire_index_lock(&database, &scope).is_err());
+        drop(lock);
+        let next = acquire_index_lock(&database, &scope).unwrap();
+        assert!(acquire_index_lock(&database, &scope).is_err());
+        drop(inherited);
+        assert!(acquire_index_lock(&database, &scope).is_err());
+        drop(next);
+        assert!(acquire_index_lock(&database, &scope).is_ok());
     }
 }

@@ -225,7 +225,16 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
         .unwrap();
     drop(legacy);
 
+    let original = database;
+    let database = temp.path().join("migration-copy.sqlite3");
+    fs::copy(&original, &database).unwrap();
+    let original_bytes = fs::read(&original).unwrap();
     let migrated = db::open_db(&database).unwrap();
+    assert_eq!(fs::read(&original).unwrap(), original_bytes);
+    let integrity: String = migrated
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();

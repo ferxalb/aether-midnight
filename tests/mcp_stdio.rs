@@ -312,6 +312,89 @@ fn mcp_recall_finds_middle_exact_phrase_and_reports_candidate_coverage() {
     assert!(child.wait().unwrap().success());
 }
 
+#[test]
+fn dots_persistent_memory_lifecycle_preserves_evidence() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("dots.sqlite3");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .args(["--db", database.to_str().unwrap(), "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    write_request(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"dots-test","version":"1"}}}),
+    );
+    read_response(&mut stdout);
+    let mut sequence = 1;
+    let mut timings = Vec::new();
+    let mut call = |name: &str, arguments: Value| {
+        sequence += 1;
+        let started = std::time::Instant::now();
+        write_request(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":sequence,"method":"tools/call",
+            "params":{"name":name,"arguments":arguments}}),
+        );
+        let response = read_response(&mut stdout);
+        timings.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        serde_json::from_str::<Value>(response["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap()
+    };
+    let original = call(
+        "remember",
+        json!({"scope":"project:dots","kind":"derived",
+        "content":"orbital launch window monday","source_uri":"dots://decision/1",
+        "valid_from":"2025-01-01T00:00:00Z"}),
+    );
+    let original_id = original["id"].as_i64().unwrap();
+    let recalled = call(
+        "recall",
+        json!({"scope":"project:dots","query":"orbital launch window"}),
+    );
+    assert_eq!(recalled[0]["memory"]["id"], original_id);
+    assert_eq!(recalled[0]["memory"]["source_uri"], "dots://decision/1");
+    let updated = call(
+        "remember",
+        json!({"scope":"project:dots","kind":"derived",
+        "content":"orbital launch window friday","source_uri":"dots://decision/2",
+        "supersedes_id":original_id,"valid_from":"2025-02-01T00:00:00Z"}),
+    );
+    let updated_id = updated["id"].as_i64().unwrap();
+    let current = call(
+        "recall",
+        json!({"scope":"project:dots","query":"orbital launch window"}),
+    );
+    assert_eq!(current.as_array().unwrap().len(), 1);
+    assert_eq!(current[0]["memory"]["id"], updated_id);
+    assert_eq!(current[0]["memory"]["source_uri"], "dots://decision/2");
+    assert_eq!(current[0]["memory"]["supersedes_id"], original_id);
+    let isolated = call(
+        "recall",
+        json!({"scope":"project:other","query":"orbital launch window"}),
+    );
+    assert!(isolated.as_array().unwrap().is_empty());
+    call("forget", json!({"scope":"project:dots","id":updated_id}));
+    let forgotten = call(
+        "recall",
+        json!({"scope":"project:dots","query":"orbital launch window"}),
+    );
+    assert!(forgotten.as_array().unwrap().is_empty());
+    eprintln!("Dots lifecycle round-trip milliseconds: {timings:?}");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    let conn = aether_midnight::db::open_db(&database).unwrap();
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+}
+
 fn write_request(stdin: &mut impl Write, value: &Value) {
     serde_json::to_writer(&mut *stdin, value).unwrap();
     stdin.write_all(b"\n").unwrap();
@@ -322,4 +405,75 @@ fn read_response(stdout: &mut impl BufRead) -> Value {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
+}
+
+#[test]
+fn killed_writer_rolls_back_memory_counters_and_schema() {
+    const CHILD_DB: &str = "MIDNIGHT_CRASH_TEST_DB";
+    if let Some(path) = std::env::var_os(CHILD_DB) {
+        let conn = aether_midnight::db::open_db(std::path::Path::new(&path)).unwrap();
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+            UPDATE memories SET deleted_at='2025-01-01T00:00:00Z';
+            CREATE TABLE interrupted_schema(value TEXT);",
+        )
+        .unwrap();
+        println!("transaction-ready");
+        std::io::stdout().flush().unwrap();
+        std::thread::park();
+        unreachable!();
+    }
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("crash.sqlite3");
+    aether_midnight::memory::remember(
+        &database,
+        "project:crash",
+        "source",
+        "durable provenance marker",
+        Some("dots://durable"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "killed_writer_rolls_back_memory_counters_and_schema",
+            "--nocapture",
+        ])
+        .env(CHILD_DB, &database)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert!(stdout.read_line(&mut line).unwrap() > 0);
+        if line.trim() == "transaction-ready" {
+            break;
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let conn = aether_midnight::db::open_db(&database).unwrap();
+    let state: (String, i64, bool, String) = conn
+        .query_row(
+            "SELECT (SELECT source_uri FROM memories WHERE deleted_at IS NULL),
+         (SELECT active FROM memory_scope_counts WHERE scope=''),
+         EXISTS(SELECT 1 FROM sqlite_master WHERE name='interrupted_schema'),
+         (SELECT integrity_check FROM pragma_integrity_check)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("dots://durable".into(), 1, false, "ok".into()));
+    assert_eq!(
+        aether_midnight::memory::recall(&database, "project:crash", "durable provenance", None, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
