@@ -166,3 +166,36 @@ fn http_refuses_non_loopback_bind() {
         .unwrap();
     assert!(!out.status.success());
 }
+
+#[test]
+fn two_server_processes_share_one_database_without_losing_acknowledged_writes() {
+    let temp = TempDir::new().unwrap();
+    let db = temp.path().join("m.sqlite3");
+    let a = std::sync::Arc::new(start(&db, &[]));
+    let b = std::sync::Arc::new(start(&db, &[]));
+    let mut threads = Vec::new();
+    for t in 0..4u64 {
+        let server = if t % 2 == 0 { a.clone() } else { b.clone() };
+        threads.push(std::thread::spawn(move || {
+            for i in 0..25 {
+                let (err, text) = call(
+                    &server,
+                    "remember",
+                    json!({"scope":"project:shared","kind":"source","content":format!("writer {t} note {i}")}),
+                );
+                assert!(!err, "{text}");
+            }
+        }));
+    }
+    for t in threads {
+        t.join().unwrap();
+    }
+    let (err, text) = call(
+        &a,
+        "list_memories",
+        json!({"scope":"project:shared","limit":500}),
+    );
+    assert!(!err);
+    let rows: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(rows.len(), 100);
+}

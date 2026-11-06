@@ -1,0 +1,62 @@
+# AETHER Dots integration (loopback MCP over HTTP)
+
+AETHER Dots connects only to **user-run loopback Streamable HTTP MCP servers**; it never launches
+server commands. Midnight therefore offers `serve-http`, which shares the stdio tool set and
+dispatch code.
+
+```
+aether-midnight --db midnight.sqlite3 serve-http \
+  --bind 127.0.0.1:0 \                 # loopback only; non-loopback is refused
+  --memory-scope 'dot:<conversation-id>' \   # repeatable; trailing * = prefix
+  [--read-only] [--allow-tools recall,search_code] [--repo-root /path/to/repo]
+# prints: listening http://127.0.0.1:<port>/mcp
+```
+
+## Guarantees
+
+- **Transport**: `POST /mcp` with one JSON-RPC object per request (JSON responses, no SSE; `GET` → 405,
+  notifications → 202, batches rejected). Request bodies ≤ 1 MiB, headers bounded, 16 concurrent
+  connections, 30 s idle timeout. No new dependencies.
+- **DNS-rebinding defence**: `Host` must be `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>`;
+  any `Origin` must be loopback.
+- **Scoped permissions** (also on stdio via `mcp`): `--read-only` hides `remember`, `remember_batch`,
+  `forget`, `index_repository`, `refresh_indexed_file`; `--allow-tools` is an allowlist; memory tools
+  (including every entry of `remember_batch`) must name an allowed scope; code tools must name a
+  repository inside `--repo-root`. Denials are `isError` tool results saying `permission denied`.
+- **Retrieval is untouched**: same code path, exact top-k, provenance, temporal validity, namespaces.
+  The frozen retrieval suites and oracle tests pass unchanged.
+- Durability: writes are acknowledged after SQLite WAL commit; two server processes can share one database
+  (tested, 100/100 acknowledged writes retained; `kill -9` + restart retains data).
+
+## Dots wiring (CLI)
+
+```
+aether midnight enable <dot-id> --endpoint http://127.0.0.1:<port>/mcp --accept-model-disclosure [--code] [--forget]
+aether memory remember|recall|list|forget <dot-id> ...
+aether doctor
+```
+
+The Dot's memory namespace is `dot:<conversation-id>`; `enable` records it in the Dot's working
+instructions so the model uses the exact scope. Start Midnight with a matching `--memory-scope`
+to enforce isolation server-side. `scripts/e2e-midnight.sh` in aether-dots reproduces the whole flow offline.
+
+## Measured (offline mock model, 2,000 memories, aggregate only, shared sandbox VM)
+
+| Case | p50 | p95 | p99 |
+|---|---|---|---|
+| Midnight recall over HTTP (broad term, exact BM25) | 15.2 ms | 16.2 ms | 20.0 ms |
+| `aether list` (CLI startup + store open) | 6.7 ms | 8.2 ms | 8.3 ms |
+| `aether send`, no tools | 23.8 ms | 30.3 ms | 39.0 ms |
+| `aether send`, Midnight recall (full grounded flow) | 49.2 ms | 64.9 ms | 68.5 ms |
+
+`serve-http` startup ≈ 3 ms, idle RSS ≈ 9 MiB, idle CPU ≈ 0.4 %. Model-network latency is excluded
+(mock model, zero delay). Rejected experiment: a warm `MemorySession` pool changed recall p50 by
+0.0 ms (session open is not the cost; the time is the exact scoring of a term present in every
+record), so it was not kept. No retrieval/ranking code changed, so no paired `bench-retrieval`
+run was required by the retrieval-change rule.
+
+## Limitations
+
+macOS Desktop was not run (Linux sandbox); stdio-based Dots clients are unaffected. HTTP has no
+authentication beyond loopback binding — any local process can reach the port; use `--memory-scope`
+and `--read-only`, and a per-Dot server for strict isolation.

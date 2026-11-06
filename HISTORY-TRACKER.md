@@ -26,3 +26,8 @@ This file records unreleased development progress. Entries use `YYYY-MM-DD (n) -
 * 2026-11-03 (3) - Added bounded, incremental repository indexing with ignore rules, default exclusions, symlink containment, cancellation, and partial-index reporting.
 * 2026-11-03 (2) - Added source-grounded retrieval for paths, symbols, lexical matches, ranges, repository maps, and index status, including freshness checks.
 * 2026-11-03 (1) - Added reproducible benchmark tooling and results, integration and safety checks, and product, architecture, API, privacy, platform, and dependency documentation.
+
+## 2026-11-06 — Dots integration
+
+- Added `serve-http` (loopback MCP Streamable HTTP) and the shared permission `Policy` (read-only, tool allowlist, memory scopes, repo roots) for stdio and HTTP. Docs: `docs/dots-integration.md`. Tests: `tests/mcp_http.rs` (restart, scope denial, read-only, Host rejection, loopback-only bind, two-process concurrent writes).
+- Evaluated and rejected a warm `MemorySession` pool: no measurable recall change.
