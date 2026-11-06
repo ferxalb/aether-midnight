@@ -27,6 +27,10 @@ pub fn serve(db_path: &Path, bind: SocketAddr, cancellation: Arc<AtomicBool>) ->
     if !bind.ip().is_loopback() {
         bail!("MCP HTTP transport only binds loopback addresses (127.0.0.1 or ::1)");
     }
+    // Finish and close bootstrap initialization before reporting readiness.
+    // Request connections retain their existing close/checkpoint behavior; no
+    // idle keeper changes WAL lifetime or normal checkpoint frequency.
+    drop(crate::db::open_db(db_path).context("initialize HTTP database before readiness")?);
     let listener = TcpListener::bind(bind).with_context(|| format!("bind {bind}"))?;
     listener.set_nonblocking(true)?;
     let local = listener.local_addr()?;

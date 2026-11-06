@@ -82,21 +82,26 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     .with_context(|| format!("open database {}", path.display()))?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
-    // WAL initialization/recovery can return SQLITE_BUSY without invoking the
-    // busy handler when another connection is closing. Retry only this setup
-    // step, outside any transaction, within the existing five-second budget.
-    let wal_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match connection.pragma_update(None, "journal_mode", "WAL") {
-            Ok(()) => break,
-            Err(rusqlite::Error::SqliteFailure(ref error, _))
-                if error.code == rusqlite::ErrorCode::DatabaseBusy
-                    && std::time::Instant::now() < wal_deadline =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(error) => return Err(error).context("configure WAL journal mode"),
-        }
+    // Reading the persistent journal mode avoids requesting a mode transition on
+    // every short-lived HTTP connection. Do not retry writes or change durability.
+    let journal_started = std::time::Instant::now();
+    let journal: String = connection
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .with_context(|| {
+            format!(
+                "read journal mode after {} microseconds",
+                journal_started.elapsed().as_micros()
+            )
+        })?;
+    if !journal.eq_ignore_ascii_case("wal") {
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| {
+                format!(
+                    "initialize WAL journal mode after {} microseconds",
+                    journal_started.elapsed().as_micros()
+                )
+            })?;
     }
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     #[cfg(feature = "retrieval-experiments")]

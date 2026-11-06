@@ -17,3 +17,9 @@ pub const MAX_FILE_BYTES: u64 = 1_048_576;
 mod retrieval_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "retrieval-experiments")]
+mod kernel_diagnostic;
+
+#[cfg(feature = "allocation-diagnostics")]
+mod allocation_diagnostic;

@@ -1,5 +1,8 @@
 # Paired Linux kernel evidence
 
+Historical measurements used the pre-publication candidate later captured by local commit `544d6f4` (verified by a byte-identical rebuild), not the subsequently published `9653863` artifact. Retrieval source is identical between those commits. The [follow-up](kernel-followup.md) supersedes retrieval optimization and HTTP setup behavior; idempotency, maintenance and integrity guarantees remain in production.
+
+
 Baseline `1f30289`, delivered candidate working tree, identical release settings, same host, sequential runs without compilation. Warm persistent connections; shared-host measurements. No latency outliers removed. WAL/NORMAL unchanged. Raw output stays ignored. All 83 frozen queries retain every quality metric, first-relevant rank and full top-10 list; zero namespace leaks or temporal-invalid results. One evaluation repeat per suite.
 
 ## Zipf retrieval

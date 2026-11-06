@@ -1572,3 +1572,72 @@ fn operation_ledger_migration_failure_rolls_back_and_retries() {
     crate::db::open_db(&path).unwrap();
     crate::memory::verify_integrity(&path).unwrap();
 }
+
+#[test]
+fn maintenance_and_reopening_connections_preserve_concurrent_keyed_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("concurrent.sqlite3");
+    crate::db::open_db(&path).unwrap();
+    let threads: Vec<_> = (0..8).map(|writer| {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            for i in 0..40 {
+                let input: crate::memory::MemoryInput = serde_json::from_value(serde_json::json!({"scope":"project:stress","kind":"source","content":format!("concurrent observation {writer} {i}")})).unwrap();
+                let key = format!("{writer}-{i}");
+                let first = crate::memory::remember_idempotent(&path, &key, &input).unwrap();
+                assert_eq!(first.id, crate::memory::remember_idempotent(&path, &key, &input).unwrap().id);
+                if i % 4 == 0 { crate::memory::forget(&path, &input.scope, first.id).unwrap(); crate::memory::maintain(&path, 8).unwrap(); }
+            }
+        })
+    }).collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    crate::memory::verify_integrity(&path).unwrap();
+}
+
+#[test]
+#[ignore = "explicit journal setup contention diagnostic"]
+fn journal_mode_contention_diagnostic() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("journal.sqlite3");
+    crate::db::open_db(&path).unwrap();
+    for setter in [true, false] {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut errors = Vec::new();
+                    for _ in 0..500 {
+                        let started = std::time::Instant::now();
+                        let conn = rusqlite::Connection::open(&path).unwrap();
+                        conn.busy_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        let result = if setter {
+                            conn.pragma_update(None, "journal_mode", "WAL")
+                        } else {
+                            conn.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+                                .map(|_| ())
+                        };
+                        match result {
+                            Ok(()) => {}
+                            Err(rusqlite::Error::SqliteFailure(e, _)) => {
+                                errors.push((e.extended_code, started.elapsed().as_micros()))
+                            }
+                            Err(error) => panic!("unexpected journal diagnostic failure: {error}"),
+                        }
+                    }
+                    errors
+                })
+            })
+            .collect();
+        let errors: Vec<_> = threads
+            .into_iter()
+            .flat_map(|t| t.join().unwrap())
+            .collect();
+        println!("journal_setter={setter} calls=4000 errors={errors:?}");
+    }
+}

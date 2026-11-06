@@ -38,3 +38,5 @@ There is no filesystem watcher. Every explicit full index command reconciles the
 Each Tree-sitter parse has a 250 ms budget checked through its progress callback; a timed-out parse keeps the lexical file entry, omits structural symbols, and marks the structural index incomplete. The callback is cooperative and may overshoot until Tree-sitter's next progress check; the 1 MiB file cap bounds each input. No allocator live-heap or mmap-page instrumentation is included. These are tracked limits, not claims of a strict operating-system wall-clock deadline.
 
 The [kernel update](kernel-retrieval-persistence.md) documents schema 5 operation keys, bounded maintenance, integrity verification and the unchanged WAL/NORMAL durability policy.
+
+The [kernel follow-up](kernel-followup.md) restores the original production retrieval path, isolates optimization ablations in diagnostic builds, and initializes the HTTP database before reporting readiness.

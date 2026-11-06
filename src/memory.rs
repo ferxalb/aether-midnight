@@ -279,7 +279,7 @@ impl<'a> ProfileTimer<'a> {
 }
 
 #[cfg(unix)]
-fn thread_cpu_time_ns() -> Option<u64> {
+pub(crate) fn thread_cpu_time_ns() -> Option<u64> {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -293,7 +293,7 @@ fn thread_cpu_time_ns() -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn thread_cpu_time_ns() -> Option<u64> {
+pub(crate) fn thread_cpu_time_ns() -> Option<u64> {
     None
 }
 
@@ -1358,11 +1358,28 @@ fn is_non_discriminative_term(
     Ok(count_matches_up_to(conn, term_match, threshold)? >= threshold)
 }
 
+fn kernel_flags() -> u8 {
+    #[cfg(feature = "retrieval-experiments")]
+    {
+        crate::kernel_diagnostic::flags()
+    }
+    #[cfg(not(feature = "retrieval-experiments"))]
+    {
+        0
+    }
+}
+
 fn classify_candidate(
     content: &str,
     query_terms: &[String],
     full_terms: &[String],
 ) -> Option<(bool, usize)> {
+    if kernel_flags() & 1 == 0 {
+        let terms = token_vec(content);
+        let matched = query_terms.iter().filter(|t| terms.contains(t)).count();
+        return (matched >= MIN_DISTINCT_TERM_MATCHES.min(query_terms.len()))
+            .then(|| (contains_contiguous_terms(&terms, full_terms), matched));
+    }
     // One normalized buffer, borrowed tokens: no allocation per content token.
     let folded = fold_text(content);
     // Token descriptors borrow the folded text. At most one descriptor per normalized
@@ -1455,6 +1472,8 @@ fn run_ranked_stage(
     collected: &mut Vec<RankedCandidate>,
     mut profile: Option<&mut MemoryRecallProfile>,
 ) -> Result<bool> {
+    #[cfg(feature = "retrieval-experiments")]
+    crate::kernel_diagnostic::work(|t| t.stages += 1);
     // Duplicates of earlier stages and a few filtered rows are absorbed without a second pass.
     // A non-widening (bounded-window) stage reads a fixed multiple of its window once.
     let mut fetch = if widen {
@@ -1465,23 +1484,59 @@ fn run_ranked_stage(
     loop {
         let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
         let mut statement = conn.prepare_cached(sql)?;
+        #[cfg(feature = "retrieval-experiments")]
+        let vm_before = statement.get_status(rusqlite::StatementStatus::VmStep);
+        #[cfg(feature = "retrieval-experiments")]
+        let sorts_before = statement.get_status(rusqlite::StatementStatus::Sort);
         let mut rows = statement.query(params![match_query, scope, at, fetch as i64])?;
         let (mut fetched, mut rejected) = (0usize, 0usize);
         let mut accepted: Vec<RankedCandidate> = Vec::new();
         while let Some(row) = rows.next().context("read memory search results")? {
             fetched += 1;
             let Some(id) = row.get::<_, Option<i64>>(0)? else {
+                #[cfg(feature = "retrieval-experiments")]
+                crate::kernel_diagnostic::work(|t| t.filtered_rows += 1);
                 continue; // filtered by namespace, deletion, or validity
             };
             if seen.contains(&id) || accepted.len() > want {
                 continue;
             }
-            let classification =
-                classify_candidate(row.get_ref(3)?.as_str()?, query_terms, full_terms);
+            let eager = if kernel_flags() & 4 == 0 {
+                Some(hydrate_memory(row)?)
+            } else {
+                None
+            };
+            let content = match &eager {
+                Some(memory) => memory.content.as_str(),
+                None => row.get_ref(3)?.as_str()?,
+            };
+            #[cfg(feature = "retrieval-experiments")]
+            if eager.is_some() {
+                crate::kernel_diagnostic::work(|t| {
+                    t.hydrated += 1;
+                    t.content_bytes += content.len();
+                    t.record_bytes += memory_record_bytes(eager.as_ref().unwrap());
+                });
+            }
+            #[cfg(feature = "retrieval-experiments")]
+            crate::kernel_diagnostic::work(|t| t.classified += 1);
+            let classification = classify_candidate(content, query_terms, full_terms);
             let rank: f64 = row.get(11)?;
             match classification {
                 Some(classification) => accepted.push(stage_candidate(
-                    hydrate_memory(row)?,
+                    match eager {
+                        Some(memory) => memory,
+                        None => {
+                            let memory = hydrate_memory(row)?;
+                            #[cfg(feature = "retrieval-experiments")]
+                            crate::kernel_diagnostic::work(|t| {
+                                t.hydrated += 1;
+                                t.content_bytes += memory.content.len();
+                                t.record_bytes += memory_record_bytes(&memory);
+                            });
+                            memory
+                        }
+                    },
                     rank,
                     StageKind::Ranked,
                     classification,
@@ -1489,7 +1544,22 @@ fn run_ranked_stage(
                 None => rejected += 1,
             }
         }
+        #[cfg(feature = "retrieval-experiments")]
+        crate::kernel_diagnostic::work(|t| {
+            t.fetch_limits.push(fetch);
+            t.rows += fetched;
+            t.rejected += rejected;
+        });
         drop(rows);
+        #[cfg(feature = "retrieval-experiments")]
+        crate::kernel_diagnostic::work(|t| {
+            t.vm_steps += statement
+                .get_status(rusqlite::StatementStatus::VmStep)
+                .wrapping_sub(vm_before) as u32 as u64;
+            t.sorts += statement
+                .get_status(rusqlite::StatementStatus::Sort)
+                .wrapping_sub(sorts_before) as u32 as u64;
+        });
         if let Some(phase) = phase {
             phase.finish();
         }
@@ -2154,7 +2224,7 @@ pub(crate) fn memory_match_query(
 fn fold_text(text: &str) -> String {
     // NFKD and combining-mark removal are identities for ASCII. Preserve exactly
     // the same lowercase bytes while avoiding the decomposition iterator.
-    if text.is_ascii() {
+    if kernel_flags() & 2 != 0 && text.is_ascii() {
         return text.to_ascii_lowercase();
     }
     text.nfkd()
@@ -2216,23 +2286,32 @@ mod kernel_tests {
 
     #[test]
     fn borrowed_classification_matches_allocating_reference() {
-        for content in [
-            "CAFÉ cafe\u{301} alpha beta",
-            "αβγ 東京 ﬃ İ",
-            "a a a b a",
-            "",
-            "!!!",
-        ] {
-            for query in ["café alpha", "a a b", "αβγ 東京", "ﬃ İ", "a", ""] {
-                let full = normalized_tokens(query);
-                let terms = informative_terms(&full);
-                let tokens = token_vec(content);
-                let count = terms.iter().filter(|t| tokens.contains(t)).count();
-                let expected = (count >= MIN_DISTINCT_TERM_MATCHES.min(terms.len()))
-                    .then(|| (contains_contiguous_terms(&tokens, &full), count));
-                assert_eq!(classify_candidate(content, &terms, &full), expected);
+        for flags in 0..8 {
+            #[cfg(feature = "retrieval-experiments")]
+            crate::kernel_diagnostic::select(flags);
+            #[cfg(not(feature = "retrieval-experiments"))]
+            let _ = flags;
+
+            for content in [
+                "CAFÉ cafe\u{301} alpha beta",
+                "αβγ 東京 ﬃ İ",
+                "a a a b a",
+                "",
+                "!!!",
+            ] {
+                for query in ["café alpha", "a a b", "αβγ 東京", "ﬃ İ", "a", ""] {
+                    let full = normalized_tokens(query);
+                    let terms = informative_terms(&full);
+                    let tokens = token_vec(content);
+                    let count = terms.iter().filter(|t| tokens.contains(t)).count();
+                    let expected = (count >= MIN_DISTINCT_TERM_MATCHES.min(terms.len()))
+                        .then(|| (contains_contiguous_terms(&tokens, &full), count));
+                    assert_eq!(classify_candidate(content, &terms, &full), expected);
+                }
             }
         }
+        #[cfg(feature = "retrieval-experiments")]
+        crate::kernel_diagnostic::select(0);
     }
 
     #[test]

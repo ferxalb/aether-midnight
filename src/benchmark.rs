@@ -1686,6 +1686,34 @@ pub fn run_retrieval_scan_ab(
     run_retrieval_ab_impl(size, namespace_count, samples, true, tied)
 }
 
+#[cfg(feature = "retrieval-experiments")]
+pub fn run_kernel_ab(
+    size: usize,
+    namespaces: usize,
+    samples: usize,
+    tied: bool,
+    fixed: bool,
+    broad: bool,
+) -> Result<Value> {
+    if !(1..=1_000).contains(&samples) {
+        bail!("kernel diagnostics require 1..=1000 samples to bound report buffers");
+    }
+    KERNEL_AB.set(true);
+    KERNEL_FIXED.set(fixed);
+    KERNEL_BROAD.set(broad);
+    let result = run_retrieval_ab_impl(size, namespaces, samples, false, tied);
+    KERNEL_AB.set(false);
+    KERNEL_FIXED.set(false);
+    KERNEL_BROAD.set(false);
+    crate::kernel_diagnostic::select(0);
+    result
+}
+thread_local! {
+    static KERNEL_AB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static KERNEL_FIXED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static KERNEL_BROAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn run_retrieval_ab_impl(
     size: usize,
     namespace_count: usize,
@@ -1696,6 +1724,8 @@ fn run_retrieval_ab_impl(
     if !(1_000..=100_000).contains(&size) || !matches!(namespace_count, 1 | 4) || samples == 0 {
         bail!("retrieval A/B requires 1000..=100000 records, 1 or 4 namespaces, and samples > 0");
     }
+    let kernel = KERNEL_AB.get();
+    let fixed = KERNEL_FIXED.get();
     const VOCABULARY: usize = 3_000;
     let scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
     let scopes = &scopes[..namespace_count];
@@ -1762,56 +1792,83 @@ fn run_retrieval_ab_impl(
         ("planted_contiguous_phrase", planted.clone()),
         ("natural_language_with_stop_words", natural),
     ];
-    if scan_ab {
+    if scan_ab || (kernel && tied) {
         if tied {
             classes = vec![("tied_single_term", "namespace".into())];
         } else {
             classes.truncate(3);
         }
     }
+    if kernel && KERNEL_BROAD.get() {
+        classes.truncate(1);
+    }
     let mut reports = Vec::new();
     for (class, query) in classes {
         let mut strategies = serde_json::Map::new();
         let mut top_ids: Vec<(String, Vec<i64>, String)> = Vec::new();
-        let run = |session: &memory::MemorySession, label: &str, scope: &str| match label {
-            "staged_direct" => session.recall_ordered(
-                scope,
-                &query,
-                None,
-                10,
-                memory::RecallCandidateOrder::StagedDirect,
-            ),
-            "staged_descending" => session.recall_ordered(
-                scope,
-                &query,
-                None,
-                10,
-                memory::RecallCandidateOrder::StagedDescending,
-            ),
-            "staged_recent_opt_in" => {
-                session.recall_with_policy(scope, &query, None, 10, memory::BroadTermPolicy::Recent)
+        let run = |session: &memory::MemorySession, label: &str, scope: &str| {
+            #[cfg(feature = "retrieval-experiments")]
+            crate::kernel_diagnostic::select(match label {
+                "candidate" => 7,
+                "borrowed_only" => 1,
+                "ascii_only" => 2,
+                "deferred_only" => 4,
+                _ => 0,
+            });
+            match label {
+                "staged_direct" => session.recall_ordered(
+                    scope,
+                    &query,
+                    None,
+                    10,
+                    memory::RecallCandidateOrder::StagedDirect,
+                ),
+                "staged_descending" => session.recall_ordered(
+                    scope,
+                    &query,
+                    None,
+                    10,
+                    memory::RecallCandidateOrder::StagedDescending,
+                ),
+                "staged_recent_opt_in" => session.recall_with_policy(
+                    scope,
+                    &query,
+                    None,
+                    10,
+                    memory::BroadTermPolicy::Recent,
+                ),
+                "staged" | "baseline" | "control" | "candidate" | "borrowed_only"
+                | "ascii_only" | "deferred_only" => session.recall_ordered(
+                    scope,
+                    &query,
+                    None,
+                    10,
+                    memory::RecallCandidateOrder::Staged,
+                ),
+                _ => session.recall_ordered(
+                    scope,
+                    &query,
+                    None,
+                    10,
+                    memory::RecallCandidateOrder::Ranked,
+                ),
             }
-            "staged" => session.recall_ordered(
-                scope,
-                &query,
-                None,
-                10,
-                memory::RecallCandidateOrder::Staged,
-            ),
-            _ => session.recall_ordered(
-                scope,
-                &query,
-                None,
-                10,
-                memory::RecallCandidateOrder::Ranked,
-            ),
+            // Interleave strategies per sample and rotate their order so that page-cache and
+            // allocator state is shared symmetrically instead of favoring whichever runs last.
         };
-        // Interleave strategies per sample and rotate their order so that page-cache and
-        // allocator state is shared symmetrically instead of favoring whichever runs last.
-        let labels = if scan_ab {
-            ["staged_direct", "staged_descending", "staged"]
+        let labels: &[&str] = if kernel {
+            &[
+                "baseline",
+                "control",
+                "candidate",
+                "borrowed_only",
+                "ascii_only",
+                "deferred_only",
+            ]
+        } else if scan_ab {
+            &["staged_direct", "staged_descending", "staged"]
         } else {
-            ["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"]
+            &["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"]
         };
         for label in labels {
             for _ in 0..3 {
@@ -1827,20 +1884,23 @@ fn run_retrieval_ab_impl(
         for sample in 0..samples {
             for offset in 0..labels.len() {
                 let index = (sample + offset) % labels.len();
-                let cache_before = scan_ab.then(|| session.cache_read_counters());
-                let cpu_started = code::process_cpu_seconds();
+                let cache_before = (scan_ab || kernel).then(|| session.cache_read_counters());
+                let cpu_started = memory::thread_cpu_time_ns().map(|v| v as f64 / 1e9);
                 let started = Instant::now();
                 last[index] = run(
                     &session,
                     labels[index],
-                    if scan_ab {
+                    if (scan_ab || kernel) && !fixed {
                         scopes[sample % scopes.len()]
                     } else {
                         scope
                     },
                 )?;
                 wall[index].push(started.elapsed().as_secs_f64() * 1000.0);
-                if let (Some(end), Some(start)) = (code::process_cpu_seconds(), cpu_started) {
+                if let (Some(end), Some(start)) = (
+                    memory::thread_cpu_time_ns().map(|v| v as f64 / 1e9),
+                    cpu_started,
+                ) {
                     let elapsed = (end - start) * 1000.0;
                     cpu[index] += elapsed;
                     cpu_samples[index].push(elapsed);
@@ -1852,15 +1912,23 @@ fn run_retrieval_ab_impl(
                         .push(after_misses.zip(misses).map(|(a, b)| a.saturating_sub(b)));
                 }
             }
-            if scan_ab {
+            if scan_ab || kernel {
                 let ids = |results: &[memory::MemorySearchResult]| {
                     results
                         .iter()
                         .map(|result| result.memory.id)
                         .collect::<Vec<_>>()
                 };
-                if ids(&last[0]) != ids(&last[1]) || ids(&last[0]) != ids(&last[2]) {
+                if last.iter().any(|r| ids(r) != ids(&last[0])) {
                     bail!("exact scan strategies disagree on sample {sample}");
+                }
+                if kernel {
+                    let reference = serde_json::to_value(&last[0])?;
+                    for result in &last[1..] {
+                        if serde_json::to_value(result)? != reference {
+                            bail!("kernel full result mismatch on sample {sample}");
+                        }
+                    }
                 }
             }
         }
@@ -1872,7 +1940,7 @@ fn run_retrieval_ab_impl(
             let mut entry = distribution(&wall[index]);
             if let Some(object) = entry.as_object_mut() {
                 object.remove("samples_ms");
-                if scan_ab {
+                if scan_ab || kernel {
                     object.insert("wall_ms_in_sample_order".into(), json!(wall[index]));
                     object.insert("cpu_ms_in_sample_order".into(), json!(cpu_samples[index]));
                     object.insert(
@@ -1890,6 +1958,45 @@ fn run_retrieval_ab_impl(
                 );
                 object.insert("coverage".into(), coverage.clone().into());
                 object.insert("result_count".into(), last[index].len().into());
+            }
+            #[cfg(feature = "retrieval-experiments")]
+            if kernel {
+                let mut traces = Vec::new();
+                for sample in 0..samples {
+                    crate::kernel_diagnostic::begin();
+                    #[cfg(feature = "allocation-diagnostics")]
+                    let allocation_before = crate::allocation_diagnostic::snapshot();
+                    let cpu = memory::thread_cpu_time_ns();
+                    let start = Instant::now();
+                    run(
+                        &session,
+                        label,
+                        if fixed {
+                            scope
+                        } else {
+                            scopes[sample % scopes.len()]
+                        },
+                    )?;
+                    #[cfg(feature = "allocation-diagnostics")]
+                    let allocation_after = crate::allocation_diagnostic::snapshot();
+                    let wall = start.elapsed().as_secs_f64() * 1000.0;
+                    let cpu = cpu
+                        .zip(memory::thread_cpu_time_ns())
+                        .map(|(a, b)| (b - a) as f64 / 1e6);
+                    let work = crate::kernel_diagnostic::finish();
+                    let mut trace = json!({"sql_executions":work.fetch_limits.len(),"widening_passes":work.fetch_limits.len().saturating_sub(work.stages),"work":work,"wall_ms":wall,"thread_cpu_ms":cpu});
+                    #[cfg(feature = "allocation-diagnostics")]
+                    {
+                        trace["rust_allocation_calls"] =
+                            json!(allocation_after.0 - allocation_before.0);
+                        trace["rust_allocated_bytes"] =
+                            json!(allocation_after.1 - allocation_before.1);
+                    }
+                    trace["allocation_instrumented"] =
+                        json!(cfg!(feature = "allocation-diagnostics"));
+                    traces.push(trace);
+                }
+                entry["separate_work_diagnostic"] = json!(traces);
             }
             strategies.insert((*label).into(), entry);
             top_ids.push((
@@ -1941,7 +2048,8 @@ fn run_retrieval_ab_impl(
             "vocabulary": if tied { Value::Null } else { json!(VOCABULARY) },
             "distribution": if tied { "tied memory workload" } else { "zipf s=1" },
             "scan_ab": scan_ab,
-            "query_namespace_distribution": if scan_ab { "round-robin" } else { "fixed namespace" },
+            "kernel_ab": kernel,
+            "query_namespace_distribution": if (scan_ab || kernel) && !fixed { "round-robin" } else { "fixed namespace" },
             "samples_per_strategy": samples,
             "result_limit": 10,
             "cache": "warm persistent connection, default 2 MiB SQLite page cache",

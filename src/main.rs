@@ -172,11 +172,20 @@ enum Commands {
     },
     /// Paired staged-vs-v0.3.1 recall measurement on a deterministic Zipf corpus.
     BenchRetrieval {
+        #[cfg(feature = "retrieval-experiments")]
+        #[arg(long)]
+        kernel_ab: bool,
+        #[cfg(feature = "retrieval-experiments")]
+        #[arg(long, requires = "kernel_ab")]
+        kernel_fixed: bool,
+        #[cfg(feature = "retrieval-experiments")]
+        #[arg(long, requires = "kernel_ab")]
+        kernel_broad: bool,
         /// Interleave original, descending and production exact stages; assert identical results.
         #[arg(long)]
         scan_ab: bool,
-        /// Use the tied bench-memory corpus instead of Zipf (requires --scan-ab).
-        #[arg(long, requires = "scan_ab")]
+        /// Use the tied bench-memory corpus instead of Zipf (requires an explicit comparison mode).
+        #[arg(long)]
         tied_corpus: bool,
         #[arg(long, default_value_t = 100_000)]
         size: usize,
@@ -475,12 +484,33 @@ fn main() -> Result<()> {
             )?)?;
         }
         Commands::BenchRetrieval {
+            #[cfg(feature = "retrieval-experiments")]
+            kernel_ab,
+            #[cfg(feature = "retrieval-experiments")]
+            kernel_fixed,
+            #[cfg(feature = "retrieval-experiments")]
+            kernel_broad,
             scan_ab,
             tied_corpus,
             size,
             namespace_count,
             samples,
         } => {
+            #[cfg(feature = "retrieval-experiments")]
+            if kernel_ab {
+                print_json(&benchmark::run_kernel_ab(
+                    size,
+                    namespace_count,
+                    samples,
+                    tied_corpus,
+                    kernel_fixed,
+                    kernel_broad,
+                )?)?;
+                return Ok(());
+            }
+            if tied_corpus && !scan_ab {
+                anyhow::bail!("--tied-corpus requires --scan-ab or --kernel-ab");
+            }
             let result = if scan_ab {
                 benchmark::run_retrieval_scan_ab(size, namespace_count, samples, tied_corpus)?
             } else {

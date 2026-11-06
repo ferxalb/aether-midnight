@@ -340,7 +340,21 @@ fn two_server_processes_share_one_database_without_losing_acknowledged_writes() 
     let temp = TempDir::new().unwrap();
     let db = temp.path().join("m.sqlite3");
     let token = std::sync::Arc::new(mint(&db, "w", &["--memory-scope", "project:shared"]));
+    assert!(
+        !db.exists(),
+        "token creation must not initialize the database"
+    );
     let a = std::sync::Arc::new(start(&db, &[]));
+    let initialized = rusqlite::Connection::open(&db).unwrap();
+    let mode: String = initialized
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal", "readiness must follow WAL initialization");
+    let version: i64 = initialized
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+    drop(initialized);
     let b = std::sync::Arc::new(start(&db, &[]));
     let mut threads = Vec::new();
     for t in 0..4u64 {

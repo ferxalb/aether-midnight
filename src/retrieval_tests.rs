@@ -266,15 +266,27 @@ fn assert_oracle_agreement(
     query: &str,
     limit: usize,
 ) {
-    let engine = session
-        .recall(scope, query, Some(FAR_FUTURE), limit)
-        .unwrap();
     let expected = oracle.rank(scope, query, FAR_FUTURE, limit);
-    assert_eq!(
-        ids(&engine),
-        expected.iter().map(|hit| hit.id).collect::<Vec<_>>(),
-        "engine/oracle top-{limit} diverged for query {query:?} in {scope}\noracle: {expected:?}"
-    );
+    #[cfg(feature = "retrieval-experiments")]
+    let variants = 0..8;
+    #[cfg(not(feature = "retrieval-experiments"))]
+    let variants = 0..1;
+    for variant in variants {
+        #[cfg(feature = "retrieval-experiments")]
+        crate::kernel_diagnostic::select(variant);
+        #[cfg(not(feature = "retrieval-experiments"))]
+        let _ = variant;
+        let engine = session
+            .recall(scope, query, Some(FAR_FUTURE), limit)
+            .unwrap();
+        assert_eq!(
+            ids(&engine),
+            expected.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            "engine/oracle top-{limit} diverged for query {query:?} in {scope}; variant {variant}; oracle: {expected:?}"
+        );
+    }
+    #[cfg(feature = "retrieval-experiments")]
+    crate::kernel_diagnostic::select(0);
 }
 
 /// Zipf-skewed deterministic corpus across several namespaces with validity windows,
@@ -1522,9 +1534,19 @@ fn newest_first_rank_scan_preserves_ties_and_widens_past_ineligible_winners() {
                 .collect::<Vec<_>>()
         );
     }
+    #[cfg(feature = "retrieval-experiments")]
+    crate::kernel_diagnostic::begin();
     let results = session
         .recall(scope, "status", Some(FAR_FUTURE), 10)
         .unwrap();
+    #[cfg(feature = "retrieval-experiments")]
+    {
+        let trace = crate::kernel_diagnostic::finish();
+        assert!(trace.fetch_limits.len() > trace.stages);
+        assert!(trace.filtered_rows > 0);
+        assert!(trace.hydrated >= results.len());
+        println!("widening_work={}", serde_json::to_string(&trace).unwrap());
+    }
     assert_eq!(ids(&results), inserted[70..80].to_vec());
     assert!(
         results

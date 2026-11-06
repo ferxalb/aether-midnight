@@ -9,6 +9,7 @@ default-run = "aether-midnight"
 [features]
 sqlite-scanstatus = []
 retrieval-experiments = []
+allocation-diagnostics = ["retrieval-experiments"]
 
 [dependencies]
 anyhow = "1.0.100"
