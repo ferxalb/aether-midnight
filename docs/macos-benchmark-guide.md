@@ -42,3 +42,5 @@ For an independent one-off inspection, `/usr/bin/time -l target/release/aether-m
 ## Reproduction limits
 
 The reference campaign contains five-sample full-index screens at 1/2/4/6/12 workers before the prepared-statement optimization and a five-sample six-worker after run. It also includes persistent MCP searches, idle CPU, one-file update visibility, and a five-query development retrieval suite. It does not establish Apple Silicon performance, Linux Kernel or VS Code status on the current revision, a 100k memory-record benchmark, filesystem-event watcher behavior, OS-cache-cold performance, thermal throttling over hours, or allocator-live-heap totals.
+
+The v0.4 stabilization run now includes native Intel 1k/10k/100k memory measurements in one and four namespaces, an actual v0.3.1 binary comparison, and persistent MCP lifecycle measurements. See [the aggregate report](stabilization-v04.md) for results, interference limits and failing latency targets. The earlier reference-campaign limits above describe that earlier campaign.
