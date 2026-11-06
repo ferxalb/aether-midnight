@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aether_midnight::{benchmark, code, db, mcp, memory};
+use aether_midnight::{benchmark, code, db, mcp, mcp_http, memory};
 
 #[derive(Parser)]
 #[command(
@@ -186,7 +186,53 @@ enum Commands {
         samples: usize,
     },
     /// Serve the local MCP tool interface over newline-delimited stdio JSON-RPC.
-    Mcp,
+    Mcp {
+        #[command(flatten)]
+        policy: PolicyArgs,
+    },
+    /// Serve MCP over loopback-only Streamable HTTP (for clients such as AETHER Dots).
+    ServeHttp {
+        /// Loopback address to bind. Port 0 picks a free port (printed on stdout).
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: std::net::SocketAddr,
+        #[command(flatten)]
+        policy: PolicyArgs,
+    },
+}
+
+#[derive(clap::Args, Clone)]
+struct PolicyArgs {
+    /// Expose only read/recall tools (no remember, forget, or indexing).
+    #[arg(long)]
+    read_only: bool,
+    /// Comma-separated allowlist of tool names (default: all, subject to --read-only).
+    #[arg(long, value_delimiter = ',')]
+    allow_tools: Option<Vec<String>>,
+    /// Memory namespaces tools may touch; a trailing * matches a prefix (repeatable).
+    #[arg(long = "memory-scope")]
+    memory_scopes: Option<Vec<String>>,
+    /// Directory roots that repo_path must be inside (repeatable).
+    #[arg(long = "repo-root")]
+    repo_roots: Option<Vec<PathBuf>>,
+}
+
+impl PolicyArgs {
+    fn into_policy(self) -> mcp::Policy {
+        let allowed_tools = match (self.allow_tools, self.read_only) {
+            (Some(list), true) => {
+                let ro = mcp::Policy::read_only_tools();
+                Some(list.into_iter().filter(|t| ro.contains(t)).collect())
+            }
+            (Some(list), false) => Some(list),
+            (None, true) => Some(mcp::Policy::read_only_tools()),
+            (None, false) => None,
+        };
+        mcp::Policy {
+            allowed_tools,
+            memory_scopes: self.memory_scopes,
+            repo_roots: self.repo_roots,
+        }
+    }
 }
 
 #[derive(Clone, ValueEnum)]
@@ -381,7 +427,10 @@ fn main() -> Result<()> {
         } => {
             print_json(&benchmark::evaluate_fts5(&repo, &manifest, samples)?)?;
         }
-        Commands::Mcp => mcp::run_stdio(&db_path, cancellation)?,
+        Commands::Mcp { policy } => mcp::run_stdio(&db_path, &policy.into_policy(), cancellation)?,
+        Commands::ServeHttp { bind, policy } => {
+            mcp_http::serve(&db_path, &policy.into_policy(), bind, cancellation)?
+        }
     }
     Ok(())
 }

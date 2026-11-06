@@ -351,7 +351,7 @@ impl<'a> From<&'a MemoryInput> for MemoryInputRef<'a> {
     }
 }
 
-pub(crate) struct MemorySession {
+pub struct MemorySession {
     connection: Connection,
 }
 

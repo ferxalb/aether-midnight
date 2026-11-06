@@ -4,6 +4,7 @@ pub mod benchmark;
 pub mod code;
 pub mod db;
 pub mod mcp;
+pub mod mcp_http;
 pub mod memory;
 mod text_index;
 
