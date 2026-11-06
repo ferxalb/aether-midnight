@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -82,7 +82,22 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     .with_context(|| format!("open database {}", path.display()))?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    // WAL initialization/recovery can return SQLITE_BUSY without invoking the
+    // busy handler when another connection is closing. Retry only this setup
+    // step, outside any transaction, within the existing five-second budget.
+    let wal_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match connection.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => break,
+            Err(rusqlite::Error::SqliteFailure(ref error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < wal_deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error).context("configure WAL journal mode"),
+        }
+    }
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     #[cfg(feature = "retrieval-experiments")]
     if let Ok(raw_pages) = std::env::var("AETHER_WAL_AUTOCHECKPOINT_PAGES") {
@@ -251,6 +266,14 @@ fn migrate(connection: &Connection) -> Result<()> {
                 migrate_scope_counts_v4(connection)?;
                 migrated_version = 4;
             }
+            if migrated_version == 4 {
+                connection.execute_batch("CREATE TABLE memory_operations (
+                    scope TEXT NOT NULL, operation_key TEXT NOT NULL, payload_hash BLOB NOT NULL,
+                    memory_id INTEGER NOT NULL REFERENCES memories(id),
+                    PRIMARY KEY(scope,operation_key)) WITHOUT ROWID;
+                    UPDATE metadata SET value='5' WHERE key='schema_version'; PRAGMA user_version=5;")?;
+                migrated_version = 5;
+            }
             if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");
             }
@@ -298,7 +321,7 @@ fn migrate_memory_fts_v2(connection: &Connection) -> Result<()> {
         "UPDATE metadata SET value='3' WHERE key='schema_version'",
         [],
     )?;
-    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    connection.pragma_update(None, "user_version", 3)?;
     Ok(())
 }
 

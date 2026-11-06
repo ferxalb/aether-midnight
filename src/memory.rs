@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::CStr;
 #[cfg(feature = "sqlite-scanstatus")]
@@ -296,7 +297,7 @@ fn thread_cpu_time_ns() -> Option<u64> {
     None
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryInput {
     pub scope: String,
     pub kind: String,
@@ -389,6 +390,14 @@ impl MemorySession {
                 valid_to,
             },
         )
+    }
+
+    pub(crate) fn remember_idempotent(
+        &mut self,
+        key: &str,
+        input: &MemoryInput,
+    ) -> Result<MemoryRecord> {
+        remember_idempotent_on(&mut self.connection, key, input)
     }
 
     pub(crate) fn remember_batch(&mut self, inputs: &[MemoryInput]) -> Result<Vec<MemoryRecord>> {
@@ -652,6 +661,48 @@ pub fn remember(
     )
 }
 
+/// Retry identity is scoped to (database, namespace, operation key). Payload equality is
+/// byte-exact over the input fields, including explicit timestamp strings.
+pub fn remember_idempotent(
+    db_path: &Path,
+    operation_key: &str,
+    input: &MemoryInput,
+) -> Result<MemoryRecord> {
+    let mut conn = open_db(db_path)?;
+    remember_idempotent_on(&mut conn, operation_key, input)
+}
+
+fn remember_idempotent_on(
+    conn: &mut Connection,
+    key: &str,
+    input: &MemoryInput,
+) -> Result<MemoryRecord> {
+    if key.is_empty() || key.len() > 256 || key.contains('\0') {
+        bail!("operation_key must contain 1 to 256 bytes without NUL");
+    }
+    let validated = validate_input(MemoryInputRef::from(input))?;
+    let digest = Sha256::digest(serde_json::to_vec(input)?).to_vec();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let prior: Option<(Vec<u8>, i64)> = tx.query_row(
+        "SELECT payload_hash,memory_id FROM memory_operations WHERE scope=?1 AND operation_key=?2",
+        params![input.scope,key], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let result = if let Some((hash, id)) = prior {
+        if hash != digest {
+            bail!(
+                "operation_key already used with a different payload; use a new key for a new observation"
+            );
+        }
+        tx.query_row("SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to FROM memories WHERE id=?1 AND deleted_at IS NULL", [id], hydrate_memory)
+            .optional()?.context("operation completed but memory was forgotten; retry cannot restore it")?
+    } else {
+        let record = insert_memory(&tx, validated)?;
+        tx.execute("INSERT INTO memory_operations(scope,operation_key,payload_hash,memory_id) VALUES(?1,?2,?3,?4)", params![input.scope,key,digest,record.id])?;
+        record
+    };
+    tx.commit()?;
+    Ok(result)
+}
+
 /// Insert a bounded set of memories atomically. Any invalid record or provenance link rolls back
 /// every row in this call. Larger imports should be split into caller-managed chunks.
 pub fn remember_batch(db_path: &Path, inputs: &[MemoryInput]) -> Result<Vec<MemoryRecord>> {
@@ -666,7 +717,9 @@ pub fn remember_batch(db_path: &Path, inputs: &[MemoryInput]) -> Result<Vec<Memo
 
 fn remember_on(connection: &mut Connection, input: MemoryInputRef<'_>) -> Result<MemoryRecord> {
     let validated = validate_input(input)?;
-    let tx = connection.transaction()?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .context("reserve memory write transaction")?;
     let record = insert_memory(&tx, validated)?;
     tx.commit()?;
     Ok(record)
@@ -685,7 +738,9 @@ fn remember_batch_on(
         .copied()
         .map(validate_input)
         .collect::<Result<Vec<_>>>()?;
-    let tx = connection.transaction()?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .context("reserve memory write transaction")?;
     let mut records = Vec::with_capacity(validated.len());
     for input in validated {
         records.push(insert_memory(&tx, input)?);
@@ -1308,22 +1363,29 @@ fn classify_candidate(
     query_terms: &[String],
     full_terms: &[String],
 ) -> Option<(bool, usize)> {
-    let content_terms = token_vec(content);
+    // One normalized buffer, borrowed tokens: no allocation per content token.
+    let folded = fold_text(content);
+    // Token descriptors borrow the folded text. At most one descriptor per normalized
+    // byte; the 64 KiB content cap bounds this vector independently of corpus size.
+    let tokens: Vec<&str> = folded
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
     let matched_terms = query_terms
         .iter()
-        .filter(|term| {
-            content_terms
-                .iter()
-                .any(|content_term| content_term == *term)
-        })
+        .filter(|term| tokens.contains(&term.as_str()))
         .count();
     if matched_terms < MIN_DISTINCT_TERM_MATCHES.min(query_terms.len()) {
         return None;
     }
-    Some((
-        contains_contiguous_terms(&content_terms, full_terms),
-        matched_terms,
-    ))
+    let phrase = !full_terms.is_empty()
+        && tokens.windows(full_terms.len()).any(|window| {
+            window
+                .iter()
+                .copied()
+                .eq(full_terms.iter().map(String::as_str))
+        });
+    Some((phrase, matched_terms))
 }
 
 fn hydrate_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
@@ -1414,11 +1476,12 @@ fn run_ranked_stage(
             if seen.contains(&id) || accepted.len() > want {
                 continue;
             }
-            let memory = hydrate_memory(row)?;
+            let classification =
+                classify_candidate(row.get_ref(3)?.as_str()?, query_terms, full_terms);
             let rank: f64 = row.get(11)?;
-            match classify_candidate(&memory.content, query_terms, full_terms) {
+            match classification {
                 Some(classification) => accepted.push(stage_candidate(
-                    memory,
+                    hydrate_memory(row)?,
                     rank,
                     StageKind::Ranked,
                     classification,
@@ -1988,13 +2051,68 @@ fn forget_on(conn: &Connection, scope: &str, id: i64) -> Result<bool> {
     Ok(changed != 0)
 }
 
+/// Bounded tombstone scrubbing and FTS segment merging. Does not run VACUUM or
+/// a truncating checkpoint. The returned count lets callers schedule more work.
+pub fn maintain(db_path: &Path, max_records: usize) -> Result<usize> {
+    if !(1..=512).contains(&max_records) {
+        bail!("maintenance max_records must be 1..=512");
+    }
+    let mut conn = open_db(db_path)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let scrubbed = tx.execute("UPDATE memories SET content='',source_uri=NULL WHERE id IN
+        (SELECT id FROM memories WHERE deleted_at IS NOT NULL AND (content<>'' OR source_uri IS NOT NULL) LIMIT ?1)", [max_records as i64])?;
+    tx.execute_batch(
+        "INSERT INTO memory_fts(memory_fts,rank) VALUES('merge',16);
+        INSERT INTO code_fts(code_fts,rank) VALUES('merge',16);",
+    )?;
+    tx.commit()?;
+    Ok(scrubbed)
+}
+
+/// Verify SQLite, FTS structure, active row membership and trigger-maintained counts.
+/// Runs in one snapshot; errors are never converted into a successful partial report.
+pub fn verify_integrity(db_path: &Path) -> Result<()> {
+    let mut conn = open_db(db_path)?;
+    let tx = conn.transaction()?;
+    let check: String = tx.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        bail!("SQLite integrity check: {check}");
+    }
+    let foreign_key_error = tx.prepare("PRAGMA foreign_key_check")?.exists([])?;
+    if foreign_key_error {
+        bail!("foreign key consistency check failed");
+    }
+    tx.execute_batch(
+        "INSERT INTO memory_fts(memory_fts) VALUES('integrity-check');
+        INSERT INTO code_fts(code_fts) VALUES('integrity-check');",
+    )?;
+    let mismatch: bool = tx.query_row("SELECT
+        EXISTS(SELECT id FROM memories WHERE deleted_at IS NULL EXCEPT SELECT rowid FROM memory_fts)
+        OR EXISTS(SELECT rowid FROM memory_fts EXCEPT SELECT id FROM memories WHERE deleted_at IS NULL)
+        OR NOT EXISTS(SELECT 1 FROM memory_scope_counts WHERE scope='')
+        OR EXISTS(SELECT 1 FROM memory_scope_counts c WHERE c.active<>(SELECT count(*) FROM memories m WHERE m.deleted_at IS NULL AND (c.scope='' OR m.scope=c.scope)))
+        OR EXISTS(SELECT 1 FROM memories m WHERE m.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM memory_scope_counts c WHERE c.scope=m.scope))", [], |r| r.get(0))?;
+    if mismatch {
+        bail!("memory FTS membership or scope counters inconsistent");
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn compact(db_path: &Path) -> Result<()> {
     let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE memories SET content='',source_uri=NULL WHERE deleted_at IS NOT NULL",
         [],
     )?;
-    conn.execute_batch("INSERT INTO code_fts(code_fts) VALUES('optimize'); INSERT INTO memory_fts(memory_fts) VALUES('optimize'); PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+    conn.execute_batch("INSERT INTO code_fts(code_fts) VALUES('optimize'); INSERT INTO memory_fts(memory_fts) VALUES('optimize');")?;
+    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    if busy != 0 {
+        bail!(
+            "full compaction checkpoint incomplete: another connection is using the WAL; retry when readers are idle"
+        );
+    }
+    conn.execute_batch("VACUUM;")?;
     Ok(())
 }
 
@@ -2033,12 +2151,20 @@ pub(crate) fn memory_match_query(
     )
 }
 
-pub(crate) fn normalized_tokens(text: &str) -> Vec<String> {
-    let folded = text
-        .nfkd()
+fn fold_text(text: &str) -> String {
+    // NFKD and combining-mark removal are identities for ASCII. Preserve exactly
+    // the same lowercase bytes while avoiding the decomposition iterator.
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
+    text.nfkd()
         .filter(|character| !is_combining_mark(*character))
         .flat_map(char::to_lowercase)
-        .collect::<String>();
+        .collect::<String>()
+}
+
+pub(crate) fn normalized_tokens(text: &str) -> Vec<String> {
+    let folded = fold_text(text);
     folded
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| !term.is_empty())
@@ -2078,4 +2204,81 @@ pub(crate) fn contains_contiguous_terms(content: &[String], query: &[String]) ->
         && content
             .windows(query.len())
             .any(|window| window.iter().eq(query.iter()))
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+
+    fn input() -> MemoryInput {
+        serde_json::from_value(serde_json::json!({"scope":"project:kernel","kind":"source","content":"café alpha beta", "source_uri":"fixture:one"})).unwrap()
+    }
+
+    #[test]
+    fn borrowed_classification_matches_allocating_reference() {
+        for content in [
+            "CAFÉ cafe\u{301} alpha beta",
+            "αβγ 東京 ﬃ İ",
+            "a a a b a",
+            "",
+            "!!!",
+        ] {
+            for query in ["café alpha", "a a b", "αβγ 東京", "ﬃ İ", "a", ""] {
+                let full = normalized_tokens(query);
+                let terms = informative_terms(&full);
+                let tokens = token_vec(content);
+                let count = terms.iter().filter(|t| tokens.contains(t)).count();
+                let expected = (count >= MIN_DISTINCT_TERM_MATCHES.min(terms.len()))
+                    .then(|| (contains_contiguous_terms(&tokens, &full), count));
+                assert_eq!(classify_candidate(content, &terms, &full), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_operation_keys_conflicts_and_maintenance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test.db");
+        open_db(&path)?;
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    remember_idempotent(&path, "retry", &input()).unwrap().id
+                })
+            })
+            .collect();
+        let ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(ids.iter().all(|id| *id == ids[0]));
+        let mut different = input();
+        different.content.push('!');
+        assert!(
+            remember_idempotent(&path, "retry", &different)
+                .unwrap_err()
+                .to_string()
+                .contains("different payload")
+        );
+        different.scope = "project:other".into();
+        assert_ne!(remember_idempotent(&path, "retry", &different)?.id, ids[0]);
+        let observation = remember_batch(&path, &[input(), input()])?;
+        assert_ne!(observation[0].id, observation[1].id);
+        let mut invalid = input();
+        invalid.kind = "derived".into();
+        invalid.source_id = Some(999999);
+        assert!(remember_idempotent(&path, "failed", &invalid).is_err());
+        remember_idempotent(&path, "failed", &input())?;
+        verify_integrity(&path)?;
+        forget(&path, "project:kernel", ids[0])?;
+        assert!(remember_idempotent(&path, "retry", &input()).is_err());
+        assert_eq!(maintain(&path, 1)?, 1);
+        assert_eq!(maintain(&path, 1)?, 0);
+        verify_integrity(&path)?;
+        let conn = open_db(&path)?;
+        conn.execute(
+            "UPDATE memory_scope_counts SET active=active+1 WHERE scope='project:kernel'",
+            [],
+        )?;
+        assert!(verify_integrity(&path).is_err());
+        Ok(())
+    }
 }

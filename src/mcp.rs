@@ -341,7 +341,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "remember",
             "Persist a source or derived fact in a required namespace such as user:alice or project:repo-name. Derived records must cite a source id or URI; superseding a fact preserves history and closes its prior validity interval.",
-            json!({"type":"object","properties":{"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["scope","kind","content"]}),
+            json!({"type":"object","properties":{"operation_key":{"type":"string","maxLength":256},"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["scope","kind","content"]}),
         ),
         tool(
             "remember_batch",
@@ -455,6 +455,13 @@ fn call_tool(
             Ok(serde_json::to_value(code::index_status(db_path, &repo)?)?)
         }
         "remember" => {
+            if let Some(key) = optional_str(&args, "operation_key") {
+                let input: memory::MemoryInput = serde_json::from_value(args.clone())?;
+                let session = ensure_memory_session(db_path, memory_session)?;
+                return Ok(serde_json::to_value(
+                    session.remember_idempotent(key, &input)?,
+                )?);
+            }
             let result = ensure_memory_session(db_path, memory_session)?.remember(
                 required_str(&args, "scope")?,
                 required_str(&args, "kind")?,

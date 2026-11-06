@@ -1311,7 +1311,7 @@ fn schema_three_database_migrates_to_scope_counts_and_keeps_every_memory() {
     let raw = Connection::open(&path).unwrap();
     raw.execute_batch(
         "DROP TRIGGER memories_count_insert; DROP TRIGGER memories_count_soft_delete;
-         DROP TRIGGER memories_count_delete; DROP TABLE memory_scope_counts;
+         DROP TRIGGER memories_count_delete; DROP TABLE memory_scope_counts; DROP TABLE memory_operations;
          UPDATE metadata SET value='3' WHERE key='schema_version';
          PRAGMA user_version=3;",
     )
@@ -1349,7 +1349,7 @@ fn schema_three_database_migrates_to_scope_counts_and_keeps_every_memory() {
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let after: i64 = migrated
         .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
         .unwrap();

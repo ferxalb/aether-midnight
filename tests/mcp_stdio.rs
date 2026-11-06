@@ -415,6 +415,7 @@ fn killed_writer_rolls_back_memory_counters_and_schema() {
         conn.execute_batch(
             "BEGIN IMMEDIATE;
             UPDATE memories SET deleted_at='2025-01-01T00:00:00Z';
+            INSERT INTO memory_operations(scope,operation_key,payload_hash,memory_id) VALUES('project:crash','interrupted',X'00',1);
             CREATE TABLE interrupted_schema(value TEXT);",
         )
         .unwrap();
@@ -470,10 +471,68 @@ fn killed_writer_rolls_back_memory_counters_and_schema() {
         )
         .unwrap();
     assert_eq!(state, ("dots://durable".into(), 1, false, "ok".into()));
+    let operations: i64 = conn
+        .query_row("SELECT count(*) FROM memory_operations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(operations, 0);
+    aether_midnight::memory::verify_integrity(&database).unwrap();
     assert_eq!(
         aether_midnight::memory::recall(&database, "project:crash", "durable provenance", None, 10)
             .unwrap()
             .len(),
         1
     );
+}
+
+#[test]
+fn cli_and_mcp_share_operation_key_identity_and_conflicts() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("keys.sqlite3");
+    let cli = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .arg("--db")
+        .arg(&database)
+        .args([
+            "remember",
+            "--scope",
+            "project:keys",
+            "--content",
+            "retry marker",
+            "--operation-key",
+            "one",
+        ])
+        .output()
+        .unwrap();
+    assert!(cli.status.success());
+    let record: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .arg("--db")
+        .arg(&database)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    write_request(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+    );
+    read_response(&mut stdout);
+    for (id, content) in [(2, "retry marker"), (3, "conflict marker")] {
+        write_request(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"remember","arguments":{"scope":"project:keys","kind":"source","content":content,"operation_key":"one"}}}),
+        );
+        let response = read_response(&mut stdout);
+        assert_eq!(response["result"]["isError"], id == 3);
+        if id == 2 {
+            let replay: Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(replay, record);
+        }
+    }
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
 }

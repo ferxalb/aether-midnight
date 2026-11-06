@@ -72,7 +72,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -105,7 +105,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "4");
+    assert_eq!(schema, "5");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -161,7 +161,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -238,7 +238,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
@@ -246,7 +246,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "4");
+    assert_eq!(schema_version, "5");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,
@@ -323,7 +323,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 4);
+    assert_eq!(reopened_version, 5);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()
@@ -1546,4 +1546,29 @@ fn memory_batch_inserts_all_records_and_indexes_them_together() {
     let rows = memory::recall(&database, "project:batch", "service API timeout", None, 10).unwrap();
     assert!(rows.iter().any(|row| row.memory.id == inserted[0].id));
     assert!(rows.iter().any(|row| row.memory.id == inserted[1].id));
+}
+
+#[test]
+fn operation_ledger_migration_failure_rolls_back_and_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("ledger.sqlite3");
+    let conn = crate::db::open_db(&path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE memory_operations; PRAGMA user_version=4;
+        UPDATE metadata SET value='4' WHERE key='schema_version';
+        CREATE VIEW memory_operations AS SELECT 1;",
+    )
+    .unwrap();
+    drop(conn);
+    assert!(crate::db::open_db(&path).is_err());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    conn.execute_batch("DROP VIEW memory_operations").unwrap();
+    drop(conn);
+    crate::db::open_db(&path).unwrap();
+    crate::memory::verify_integrity(&path).unwrap();
 }

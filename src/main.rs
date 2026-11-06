@@ -86,6 +86,8 @@ enum Commands {
     /// Persist a raw source or a provenance-linked derived fact. Scope must be namespaced.
     Remember {
         #[arg(long)]
+        operation_key: Option<String>,
+        #[arg(long)]
         scope: String,
         #[arg(long,value_enum,default_value_t=MemoryKind::Source)]
         kind: MemoryKind,
@@ -132,6 +134,13 @@ enum Commands {
     },
     /// Optimize FTS segments, checkpoint WAL, and physically compact SQLite pages.
     Compact,
+    /// Scrub a bounded tombstone batch and merge up to 16 FTS pages per index.
+    Maintain {
+        #[arg(long, default_value_t = 128)]
+        max_records: usize,
+    },
+    /// Verify SQLite, FTS membership and namespace counters.
+    VerifyIntegrity,
     /// Report local runtime/database diagnostics.
     Diagnose,
     /// Run the fixed local retrieval/index/RG/resource benchmark and emit JSON.
@@ -334,6 +343,7 @@ fn main() -> Result<()> {
         Commands::RepoMap { repo } => print_json(&code::repo_map(&db_path, &repo)?)?,
         Commands::IndexStatus { repo } => print_json(&code::index_status(&db_path, &repo)?)?,
         Commands::Remember {
+            operation_key,
             scope,
             kind,
             content,
@@ -348,6 +358,24 @@ fn main() -> Result<()> {
                 MemoryKind::Source => "source",
                 MemoryKind::Derived => "derived",
             };
+            if let Some(key) = operation_key {
+                print_json(&memory::remember_idempotent(
+                    &db_path,
+                    &key,
+                    &memory::MemoryInput {
+                        scope,
+                        kind: kind.to_string(),
+                        content,
+                        source_uri,
+                        source_id,
+                        supersedes_id,
+                        observed_at,
+                        valid_from,
+                        valid_to,
+                    },
+                )?)?;
+                return Ok(());
+            }
             print_json(&memory::remember(
                 &db_path,
                 &scope,
@@ -378,6 +406,13 @@ fn main() -> Result<()> {
         }
         Commands::Forget { scope, id } => {
             print_json(&serde_json::json!({"forgotten":memory::forget(&db_path,&scope,id)?}))?
+        }
+        Commands::Maintain { max_records } => {
+            print_json(&serde_json::json!({"scrubbed": memory::maintain(&db_path, max_records)?}))?;
+        }
+        Commands::VerifyIntegrity => {
+            memory::verify_integrity(&db_path)?;
+            print_json(&serde_json::json!({"integrity":"ok"}))?;
         }
         Commands::Compact => {
             memory::compact(&db_path)?;
