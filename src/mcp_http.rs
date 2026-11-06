@@ -63,12 +63,31 @@ pub fn serve(db_path: &Path, bind: SocketAddr, cancellation: Arc<AtomicBool>) ->
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(15));
+                wait_for_connection(&listener);
             }
             Err(e) => return Err(e.into()),
         }
     }
     Ok(())
+}
+
+/// Sleeps until a connection is pending or the cancellation poll interval
+/// elapses. Polling the listener (rather than sleeping a fixed interval)
+/// removes up to 15 ms of accept latency from every request while still
+/// observing cancellation promptly.
+fn wait_for_connection(listener: &TcpListener) {
+    use std::os::fd::AsRawFd;
+    let mut fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `fd` is a valid pollfd for the duration of the call.
+    let ready = unsafe { libc::poll(&mut fd, 1, 100) };
+    if ready < 0 {
+        // EINTR or a transient failure: back off briefly instead of spinning.
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn connection(
