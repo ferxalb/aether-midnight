@@ -40,7 +40,7 @@ const MEMORY_RANKED_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_u
               AND (m.valid_from IS NULL OR m.valid_from<=?3)
               AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY f.rank,f.rid DESC";
-// A coroutine scans newest first before the exact top-k sort. LIMIT -1 prevents flattening
+// Diagnostic-only alternative: scan newest first before the exact top-k sort. LIMIT -1 prevents flattening
 // without truncating any match. On broad single terms, ties no longer replace the top-k heap
 // on every row. Multi-term stages retain the direct scan: the coroutine costs more there.
 const MEMORY_RANKED_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,f.rank
@@ -84,8 +84,11 @@ const MEMORY_RECALL_ROWID_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) enum RecallCandidateOrder {
-    /// Production: class-staged exact top-k (see `recall_staged`).
+    /// Production: original direct scan; class-staged exact top-k (see `recall_staged`).
     Staged,
+    /// Forced exact scan paths for paired diagnostics; never approximate.
+    StagedDirect,
+    StagedDescending,
     /// v0.3.1 single-statement BM25 window, kept for paired A/B measurement.
     Ranked,
     RowIdAscending,
@@ -94,9 +97,25 @@ pub(crate) enum RecallCandidateOrder {
 }
 
 impl RecallCandidateOrder {
+    // Namespace size and query length do not predict BM25 tie density. A score probe also
+    // initializes BM25's global posting-list statistics and misses later score variation.
+    // Keep the original scan as the safe default; descending remains a diagnostic strategy.
+    fn staged_sql(self, full_term_count: usize) -> Option<&'static str> {
+        match self {
+            Self::Staged | Self::StagedDirect | Self::StagedDescending => Some(
+                if matches!(self, Self::StagedDescending) && full_term_count == 1 {
+                    MEMORY_RANKED_DESC_SQL
+                } else {
+                    MEMORY_RANKED_SQL
+                },
+            ),
+            _ => None,
+        }
+    }
+
     fn sql(self) -> &'static str {
         match self {
-            Self::Staged => MEMORY_RANKED_SQL,
+            Self::Staged | Self::StagedDirect | Self::StagedDescending => MEMORY_RANKED_SQL,
             Self::Ranked => MEMORY_RECALL_SQL,
             Self::RowIdAscending => MEMORY_RECALL_ROWID_ASC_SQL,
             Self::RowIdDescending => MEMORY_RECALL_ROWID_DESC_SQL,
@@ -107,6 +126,8 @@ impl RecallCandidateOrder {
     fn label(self) -> &'static str {
         match self {
             Self::Staged => "staged_exact_bm25",
+            Self::StagedDirect => "staged_direct",
+            Self::StagedDescending => "staged_descending",
             Self::Ranked => "bm25_rank",
             Self::RowIdAscending => "rowid_ascending",
             Self::RowIdDescending => "rowid_descending",
@@ -510,6 +531,31 @@ impl MemorySession {
         Ok(())
     }
 
+    /// Diagnostic counters, sampled outside the timed call by the scan A/B benchmark.
+    pub(crate) fn cache_read_counters(&self) -> (Option<u64>, Option<u64>) {
+        let snapshot = sqlite_cache_snapshot(&self.connection);
+        (snapshot.hits, snapshot.misses)
+    }
+
+    /// Bounded planner experiment only: scoring even 16 rows initializes global BM25 IDF.
+    pub(crate) fn benchmark_score_probe(&self, scope: &str, query: &str) -> Result<usize> {
+        let terms = normalized_tokens(query);
+        if terms.len() != 1 {
+            bail!("score probe requires one token");
+        }
+        let (active, total) = scope_sizes(&self.connection, scope)?;
+        let expression = scoped_match(scope, &all_terms_expr(&[&terms[0]]), active * 2 < total);
+        let mut statement = self.connection.prepare_cached(
+            "SELECT rank FROM memory_fts WHERE memory_fts MATCH ?1
+             AND rank MATCH 'bm25(0.0,1.0)' ORDER BY rowid LIMIT 16",
+        )?;
+        let scores = statement
+            .query_map([expression], |row| row.get::<_, f64>(0))?
+            .map(|score| score.map(f64::to_bits))
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        Ok(scores.len())
+    }
+
     pub(crate) fn page_cache_used_bytes(&self) -> Option<u64> {
         sqlite_db_status(&self.connection, rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED)
     }
@@ -538,7 +584,7 @@ impl MemorySession {
         if query_terms.is_empty() {
             return Ok(Vec::new());
         }
-        let match_query = if matches!(candidate_order, RecallCandidateOrder::Staged)
+        let match_query = if candidate_order.staged_sql(full_terms.len()).is_some()
             && query_terms.len() == 1
             && full_terms.len() == 1
         {
@@ -561,14 +607,9 @@ impl MemorySession {
         };
         let mut plans = Vec::new();
         for order in orders {
-            let stage_sql = if matches!(order, RecallCandidateOrder::Staged)
-                && query_terms.len() == 1
-                && full_terms.len() == 1
-            {
-                MEMORY_RANKED_DESC_SQL
-            } else {
-                order.sql()
-            };
+            let stage_sql = order
+                .staged_sql(full_terms.len())
+                .unwrap_or_else(|| order.sql());
             let sql = format!("EXPLAIN QUERY PLAN {stage_sql}");
             let mut statement = self.connection.prepare(&sql)?;
             let rows = statement
@@ -890,7 +931,7 @@ fn recall_on_profiled(
         phase.finish();
     }
 
-    if matches!(candidate_order, RecallCandidateOrder::Staged) {
+    if let Some(stage_sql) = candidate_order.staged_sql(full_terms.len()) {
         let results = recall_staged(
             conn,
             scope,
@@ -899,6 +940,7 @@ fn recall_on_profiled(
             &query_terms,
             limit.clamp(1, 100),
             broad_terms,
+            stage_sql,
             profile.as_deref_mut(),
         )?;
         finish_profile_total(
@@ -1339,6 +1381,7 @@ fn stage_candidate(
 #[allow(clippy::too_many_arguments)]
 fn run_ranked_stage(
     conn: &Connection,
+    sql: &str,
     match_query: &str,
     scope: &str,
     at: &str,
@@ -1359,11 +1402,6 @@ fn run_ranked_stage(
     };
     loop {
         let phase = ProfileTimer::start(profile.as_deref_mut(), "sqlite_candidate_step");
-        let sql = if query_terms.len() == 1 && full_terms.len() == 1 {
-            MEMORY_RANKED_DESC_SQL
-        } else {
-            MEMORY_RANKED_SQL
-        };
         let mut statement = conn.prepare_cached(sql)?;
         let mut rows = statement.query(params![match_query, scope, at, fetch as i64])?;
         let (mut fetched, mut rejected) = (0usize, 0usize);
@@ -1499,6 +1537,7 @@ fn recall_staged(
     query_terms: &[String],
     limit: usize,
     broad_terms: BroadTermPolicy,
+    stage_sql: &str,
     mut profile: Option<&mut MemoryRecallProfile>,
 ) -> Result<Vec<MemorySearchResult>> {
     let phase = ProfileTimer::start(profile.as_deref_mut(), "fts_query_construction");
@@ -1600,6 +1639,7 @@ fn recall_staged(
         let truncated = match kind {
             StageKind::Ranked => run_ranked_stage(
                 conn,
+                stage_sql,
                 &match_query,
                 scope,
                 at,

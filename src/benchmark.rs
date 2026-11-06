@@ -1674,6 +1674,25 @@ fn current_rss_bytes() -> Option<u64> {
 /// confounded by hardware or build. Output contains workload definitions and aggregate
 /// measurements only (no host, user, or path identifiers).
 pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> Result<Value> {
+    run_retrieval_ab_impl(size, namespace_count, samples, false, false)
+}
+
+pub fn run_retrieval_scan_ab(
+    size: usize,
+    namespace_count: usize,
+    samples: usize,
+    tied: bool,
+) -> Result<Value> {
+    run_retrieval_ab_impl(size, namespace_count, samples, true, tied)
+}
+
+fn run_retrieval_ab_impl(
+    size: usize,
+    namespace_count: usize,
+    samples: usize,
+    scan_ab: bool,
+    tied: bool,
+) -> Result<Value> {
     if !(1_000..=100_000).contains(&size) || !matches!(namespace_count, 1 | 4) || samples == 0 {
         bail!("retrieval A/B requires 1000..=100000 records, 1 or 4 namespaces, and samples > 0");
     }
@@ -1713,7 +1732,11 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
         batch.push(memory::MemoryInput {
             scope: scopes[index % scopes.len()].to_string(),
             kind: "source".into(),
-            content: words.join(" "),
+            content: if tied {
+                format!("memoryload{index:06} namespace workload record {index}")
+            } else {
+                words.join(" ")
+            },
             source_uri: Some("benchmark://zipf".into()),
             source_id: None,
             supersedes_id: None,
@@ -1729,7 +1752,7 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
     code::wal_checkpoint(&db_path)?;
     let scope = scopes[(size / 2) % scopes.len()];
     let natural = format!("what is the {planted} and w2000");
-    let classes: Vec<(&str, String)> = vec![
+    let mut classes: Vec<(&str, String)> = vec![
         ("broad_ubiquitous_single_term", "w0".into()),
         ("broad_mid_single_term", "w10".into()),
         ("selective_single_term", "w2000".into()),
@@ -1739,11 +1762,32 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
         ("planted_contiguous_phrase", planted.clone()),
         ("natural_language_with_stop_words", natural),
     ];
+    if scan_ab {
+        if tied {
+            classes = vec![("tied_single_term", "namespace".into())];
+        } else {
+            classes.truncate(3);
+        }
+    }
     let mut reports = Vec::new();
     for (class, query) in classes {
         let mut strategies = serde_json::Map::new();
         let mut top_ids: Vec<(String, Vec<i64>, String)> = Vec::new();
-        let run = |session: &memory::MemorySession, label: &str| match label {
+        let run = |session: &memory::MemorySession, label: &str, scope: &str| match label {
+            "staged_direct" => session.recall_ordered(
+                scope,
+                &query,
+                None,
+                10,
+                memory::RecallCandidateOrder::StagedDirect,
+            ),
+            "staged_descending" => session.recall_ordered(
+                scope,
+                &query,
+                None,
+                10,
+                memory::RecallCandidateOrder::StagedDescending,
+            ),
             "staged_recent_opt_in" => {
                 session.recall_with_policy(scope, &query, None, 10, memory::BroadTermPolicy::Recent)
             }
@@ -1764,24 +1808,59 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
         };
         // Interleave strategies per sample and rotate their order so that page-cache and
         // allocator state is shared symmetrically instead of favoring whichever runs last.
-        let labels = ["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"];
+        let labels = if scan_ab {
+            ["staged_direct", "staged_descending", "staged"]
+        } else {
+            ["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"]
+        };
         for label in labels {
             for _ in 0..3 {
-                run(&session, label)?;
+                run(&session, label, scope)?;
             }
         }
         let mut wall: Vec<Vec<f64>> = vec![Vec::with_capacity(samples); labels.len()];
         let mut cpu = vec![0.0f64; labels.len()];
+        let mut cpu_samples = vec![Vec::with_capacity(samples); labels.len()];
+        let mut cache_hits = vec![Vec::with_capacity(samples); labels.len()];
+        let mut cache_misses = vec![Vec::with_capacity(samples); labels.len()];
         let mut last: Vec<Vec<memory::MemorySearchResult>> = vec![Vec::new(); labels.len()];
         for sample in 0..samples {
             for offset in 0..labels.len() {
                 let index = (sample + offset) % labels.len();
+                let cache_before = scan_ab.then(|| session.cache_read_counters());
                 let cpu_started = code::process_cpu_seconds();
                 let started = Instant::now();
-                last[index] = run(&session, labels[index])?;
+                last[index] = run(
+                    &session,
+                    labels[index],
+                    if scan_ab {
+                        scopes[sample % scopes.len()]
+                    } else {
+                        scope
+                    },
+                )?;
                 wall[index].push(started.elapsed().as_secs_f64() * 1000.0);
                 if let (Some(end), Some(start)) = (code::process_cpu_seconds(), cpu_started) {
-                    cpu[index] += (end - start) * 1000.0;
+                    let elapsed = (end - start) * 1000.0;
+                    cpu[index] += elapsed;
+                    cpu_samples[index].push(elapsed);
+                }
+                if let Some((hits, misses)) = cache_before {
+                    let (after_hits, after_misses) = session.cache_read_counters();
+                    cache_hits[index].push(after_hits.zip(hits).map(|(a, b)| a.saturating_sub(b)));
+                    cache_misses[index]
+                        .push(after_misses.zip(misses).map(|(a, b)| a.saturating_sub(b)));
+                }
+            }
+            if scan_ab {
+                let ids = |results: &[memory::MemorySearchResult]| {
+                    results
+                        .iter()
+                        .map(|result| result.memory.id)
+                        .collect::<Vec<_>>()
+                };
+                if ids(&last[0]) != ids(&last[1]) || ids(&last[0]) != ids(&last[2]) {
+                    bail!("exact scan strategies disagree on sample {sample}");
                 }
             }
         }
@@ -1793,6 +1872,18 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
             let mut entry = distribution(&wall[index]);
             if let Some(object) = entry.as_object_mut() {
                 object.remove("samples_ms");
+                if scan_ab {
+                    object.insert("wall_ms_in_sample_order".into(), json!(wall[index]));
+                    object.insert("cpu_ms_in_sample_order".into(), json!(cpu_samples[index]));
+                    object.insert(
+                        "cache_hits_in_sample_order".into(),
+                        json!(cache_hits[index]),
+                    );
+                    object.insert(
+                        "cache_misses_in_sample_order".into(),
+                        json!(cache_misses[index]),
+                    );
+                }
                 object.insert(
                     "cpu_ms_per_query".into(),
                     (cpu[index] / samples as f64).into(),
@@ -1807,14 +1898,34 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
                 coverage,
             ));
         }
-        // Staged vs v0.3.1 only: the opt-in recent policy is a deliberately different contract.
+        // In scan mode every sample above was checked; the legacy mode compares staged
+        // against v0.3.1 only (opt-in recent deliberately has a different contract).
         let identical_top_10 = top_ids[0].1 == top_ids[1].1;
         let shared = top_ids[0]
             .1
             .iter()
             .filter(|id| top_ids[1].1.contains(id))
             .count();
+        let diagnostics = if scan_ab {
+            let mut probe_ms = Vec::new();
+            let mut distinct_scores = 0;
+            for _ in 0..20 {
+                let start = Instant::now();
+                distinct_scores = session.benchmark_score_probe(scope, &query)?;
+                probe_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            json!({
+                "direct_plan": session.recall_query_plan_ordered(scope, &query, memory::RecallCandidateOrder::StagedDirect)?,
+                "descending_plan": session.recall_query_plan_ordered(scope, &query, memory::RecallCandidateOrder::StagedDescending)?,
+                "page_cache_used_bytes": session.page_cache_used_bytes(),
+                "sixteen_row_score_probe_ms": distribution(&probe_ms),
+                "probe_distinct_scores": distinct_scores,
+            })
+        } else {
+            Value::Null
+        };
         reports.push(json!({
+            "scan_diagnostics": diagnostics,
             "query_class": class,
             "query": query,
             "strategies": strategies,
@@ -1827,8 +1938,10 @@ pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> 
             "records": size,
             "namespaces": namespace_count,
             "queried_namespace_records": size / namespace_count,
-            "vocabulary": VOCABULARY,
-            "distribution": "zipf s=1",
+            "vocabulary": if tied { Value::Null } else { json!(VOCABULARY) },
+            "distribution": if tied { "tied memory workload" } else { "zipf s=1" },
+            "scan_ab": scan_ab,
+            "query_namespace_distribution": if scan_ab { "round-robin" } else { "fixed namespace" },
             "samples_per_strategy": samples,
             "result_limit": 10,
             "cache": "warm persistent connection, default 2 MiB SQLite page cache",

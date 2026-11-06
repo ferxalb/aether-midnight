@@ -1504,6 +1504,23 @@ fn newest_first_rank_scan_preserves_ties_and_widens_past_ineligible_winners() {
     let oracle = Oracle::new(load_corpus(&path));
     for limit in [1, 10, 79, 80, 100] {
         assert_oracle_agreement(&session, &oracle, scope, "status", limit);
+        let forced = session
+            .recall_ordered(
+                scope,
+                "status",
+                Some(FAR_FUTURE),
+                limit,
+                RecallCandidateOrder::StagedDescending,
+            )
+            .unwrap();
+        assert_eq!(
+            ids(&forced),
+            oracle
+                .rank(scope, "status", FAR_FUTURE, limit)
+                .iter()
+                .map(|hit| hit.id)
+                .collect::<Vec<_>>()
+        );
     }
     let results = session
         .recall(scope, "status", Some(FAR_FUTURE), 10)
@@ -1515,10 +1532,78 @@ fn newest_first_rank_scan_preserves_ties_and_widens_past_ineligible_winners() {
             .all(|hit| hit.candidate_coverage == CandidateCoverage::ExactTopK)
     );
     let plan = session
-        .recall_query_plan_ordered(scope, "status", RecallCandidateOrder::Staged)
+        .recall_query_plan_ordered(scope, "status", RecallCandidateOrder::StagedDescending)
         .unwrap();
     assert!(
         plan.iter().any(|step| step.contains("CO-ROUTINE")),
         "{plan:?}"
     );
+}
+
+#[test]
+fn production_uses_direct_scan_and_both_exact_paths_survive_score_variation_and_mutation() {
+    let scope = "project:scan-planner";
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("scan-planner.sqlite3");
+    let mut session = memory::MemorySession::open(&path).unwrap();
+    // A cheap first-16-score probe sees ties, but cannot predict the later varied scores.
+    let mut inputs = (0..16)
+        .map(|_| input(scope, "status evidence"))
+        .collect::<Vec<_>>();
+    for index in 0..600 {
+        let mut record = input(
+            if index % 4 == 0 {
+                "project:other"
+            } else {
+                scope
+            },
+            format!(
+                "{} {}",
+                "status ".repeat(1 + index % 7),
+                "padding ".repeat(1 + index % 41)
+            ),
+        );
+        if index % 5 == 0 {
+            record.valid_to = Some("2000-01-01T00:00:00Z".into());
+        }
+        inputs.push(record);
+    }
+    insert_all(&mut session, &inputs);
+    assert_eq!(session.benchmark_score_probe(scope, "status").unwrap(), 1);
+    let check = |session: &memory::MemorySession| {
+        let oracle = Oracle::new(load_corpus(&path));
+        for limit in [1, 10, 100] {
+            let expected = oracle
+                .rank(scope, "status", FAR_FUTURE, limit)
+                .iter()
+                .map(|hit| hit.id)
+                .collect::<Vec<_>>();
+            for order in [
+                RecallCandidateOrder::Staged,
+                RecallCandidateOrder::StagedDirect,
+                RecallCandidateOrder::StagedDescending,
+            ] {
+                let found = session
+                    .recall_ordered(scope, "status", Some(FAR_FUTURE), limit, order)
+                    .unwrap();
+                assert_eq!(ids(&found), expected, "{order:?}, limit {limit}");
+            }
+        }
+    };
+    check(&session);
+    let id = session.remember_batch(&[input(scope, "status")]).unwrap()[0].id;
+    check(&session);
+    assert!(session.forget(scope, id).unwrap());
+    check(&session);
+    let plan = session
+        .recall_query_plan_ordered(scope, "status", RecallCandidateOrder::Staged)
+        .unwrap();
+    let direct = session
+        .recall_query_plan_ordered(scope, "status", RecallCandidateOrder::StagedDirect)
+        .unwrap();
+    let descending = session
+        .recall_query_plan_ordered(scope, "status", RecallCandidateOrder::StagedDescending)
+        .unwrap();
+    assert_eq!(plan, direct);
+    assert_ne!(plan, descending);
 }

@@ -163,6 +163,12 @@ enum Commands {
     },
     /// Paired staged-vs-v0.3.1 recall measurement on a deterministic Zipf corpus.
     BenchRetrieval {
+        /// Interleave original, descending and production exact stages; assert identical results.
+        #[arg(long)]
+        scan_ab: bool,
+        /// Use the tied bench-memory corpus instead of Zipf (requires --scan-ab).
+        #[arg(long, requires = "scan_ab")]
+        tied_corpus: bool,
         #[arg(long, default_value_t = 100_000)]
         size: usize,
         #[arg(long, default_value_t = 1)]
@@ -355,15 +361,18 @@ fn main() -> Result<()> {
             )?)?;
         }
         Commands::BenchRetrieval {
+            scan_ab,
+            tied_corpus,
             size,
             namespace_count,
             samples,
         } => {
-            print_json(&benchmark::run_retrieval_ab(
-                size,
-                namespace_count,
-                samples,
-            )?)?;
+            let result = if scan_ab {
+                benchmark::run_retrieval_scan_ab(size, namespace_count, samples, tied_corpus)?
+            } else {
+                benchmark::run_retrieval_ab(size, namespace_count, samples)?
+            };
+            print_json(&result)?;
         }
         Commands::FtsEval {
             repo,
