@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aether_midnight::{benchmark, code, db, mcp, memory};
+use aether_midnight::{auth, benchmark, code, db, mcp, mcp_http, memory};
 
 #[derive(Parser)]
 #[command(
@@ -186,7 +186,86 @@ enum Commands {
         samples: usize,
     },
     /// Serve the local MCP tool interface over newline-delimited stdio JSON-RPC.
-    Mcp,
+    Mcp {
+        #[command(flatten)]
+        policy: PolicyArgs,
+    },
+    /// Serve MCP over loopback-only Streamable HTTP (for clients such as AETHER Dots).
+    ServeHttp {
+        /// Loopback address to bind. Port 0 picks a free port (printed on stdout).
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: std::net::SocketAddr,
+    },
+    /// Manage bearer tokens required by `serve-http` (hashed at rest, revocable).
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Mint a token; the plaintext is printed once on stdout.
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Memory scope the token may touch (repeatable). A single literal
+        /// scope is also injected into calls that omit one.
+        #[arg(long = "memory-scope")]
+        memory_scopes: Vec<String>,
+        /// Allow every memory scope (explicit opt-in).
+        #[arg(long)]
+        all_scopes: bool,
+        /// Comma-separated tools (default: recall,list_memories,remember).
+        #[arg(long, value_delimiter = ',')]
+        tools: Option<Vec<String>>,
+        #[arg(long)]
+        read_only: bool,
+        /// Repository roots for code tools (repeatable); required for code tools.
+        #[arg(long = "repo-root")]
+        repo_roots: Vec<PathBuf>,
+        #[arg(long)]
+        ttl_secs: Option<u64>,
+    },
+    /// List tokens (never prints secrets).
+    List,
+    /// Revoke by id or name; effective on the next request.
+    Revoke { token: String },
+}
+
+#[derive(clap::Args, Clone)]
+struct PolicyArgs {
+    /// Expose only read/recall tools (no remember, forget, or indexing).
+    #[arg(long)]
+    read_only: bool,
+    /// Comma-separated allowlist of tool names (default: all, subject to --read-only).
+    #[arg(long, value_delimiter = ',')]
+    allow_tools: Option<Vec<String>>,
+    /// Memory namespaces tools may touch; a trailing * matches a prefix (repeatable).
+    #[arg(long = "memory-scope")]
+    memory_scopes: Option<Vec<String>>,
+    /// Directory roots that repo_path must be inside (repeatable).
+    #[arg(long = "repo-root")]
+    repo_roots: Option<Vec<PathBuf>>,
+}
+
+impl PolicyArgs {
+    fn into_policy(self) -> mcp::Policy {
+        let allowed_tools = match (self.allow_tools, self.read_only) {
+            (Some(list), true) => {
+                let ro = mcp::Policy::read_only_tools();
+                Some(list.into_iter().filter(|t| ro.contains(t)).collect())
+            }
+            (Some(list), false) => Some(list),
+            (None, true) => Some(mcp::Policy::read_only_tools()),
+            (None, false) => None,
+        };
+        mcp::Policy {
+            allowed_tools,
+            memory_scopes: self.memory_scopes,
+            repo_roots: self.repo_roots,
+        }
+    }
 }
 
 #[derive(Clone, ValueEnum)]
@@ -381,12 +460,89 @@ fn main() -> Result<()> {
         } => {
             print_json(&benchmark::evaluate_fts5(&repo, &manifest, samples)?)?;
         }
-        Commands::Mcp => mcp::run_stdio(&db_path, cancellation)?,
+        Commands::Mcp { policy } => mcp::run_stdio(&db_path, &policy.into_policy(), cancellation)?,
+        Commands::Token { action } => token_command(&db_path, action)?,
+        Commands::ServeHttp { bind } => mcp_http::serve(&db_path, bind, cancellation)?,
     }
     Ok(())
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn token_command(db_path: &std::path::Path, action: TokenAction) -> Result<()> {
+    match action {
+        TokenAction::Create {
+            name,
+            memory_scopes,
+            all_scopes,
+            tools,
+            read_only,
+            repo_roots,
+            ttl_secs,
+        } => {
+            let code_tools = ["search_code", "open_range", "repo_map", "index_status"];
+            let mut tools = tools.unwrap_or_else(|| {
+                let mut t = vec!["recall".to_owned(), "list_memories".to_owned()];
+                if !read_only {
+                    t.push("remember".to_owned());
+                }
+                t
+            });
+            if read_only {
+                let ro = mcp::Policy::read_only_tools();
+                tools.retain(|t| ro.contains(t));
+            }
+            let memory_tools = [
+                "remember",
+                "remember_batch",
+                "recall",
+                "list_memories",
+                "forget",
+            ];
+            if tools.iter().any(|t| memory_tools.contains(&t.as_str()))
+                && memory_scopes.is_empty()
+                && !all_scopes
+            {
+                anyhow::bail!("memory tools need --memory-scope <scope> (or --all-scopes)");
+            }
+            if tools.iter().any(|t| code_tools.contains(&t.as_str())) && repo_roots.is_empty() {
+                anyhow::bail!("code tools need at least one --repo-root");
+            }
+            let known: Vec<String> = mcp::tools()
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_owned))
+                .collect();
+            if let Some(bad) = tools.iter().find(|t| !known.contains(t)) {
+                anyhow::bail!("unknown tool {bad:?}");
+            }
+            let policy = mcp::Policy {
+                allowed_tools: Some(tools),
+                memory_scopes: (!all_scopes).then_some(memory_scopes),
+                repo_roots: (!repo_roots.is_empty()).then_some(repo_roots),
+            };
+            let (record, token) = auth::create(db_path, &name, policy, ttl_secs)?;
+            eprintln!("created token {} ({}); shown once", record.id, record.name);
+            println!("{token}");
+        }
+        TokenAction::List => {
+            for t in auth::list(db_path)? {
+                println!(
+                    "{}\t{}\t{}\tscopes={:?}\ttools={:?}",
+                    t.id,
+                    t.name,
+                    if t.revoked { "revoked" } else { "active" },
+                    t.policy.memory_scopes,
+                    t.policy.allowed_tools
+                );
+            }
+        }
+        TokenAction::Revoke { token } => {
+            let n = auth::revoke(db_path, &token)?;
+            eprintln!("revoked {n} token(s)");
+        }
+    }
     Ok(())
 }
