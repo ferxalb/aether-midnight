@@ -72,7 +72,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -105,7 +105,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "3");
+    assert_eq!(schema, "4");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -161,7 +161,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -229,7 +229,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
@@ -237,7 +237,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "3");
+    assert_eq!(schema_version, "4");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,
@@ -314,7 +314,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 3);
+    assert_eq!(reopened_version, 4);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()
@@ -1473,19 +1473,20 @@ fn default_memory_recall_finds_exact_phrase_at_every_matching_position() {
             });
         assert_eq!(
             exact_phrase.candidate_coverage,
-            memory::CandidateCoverage::Bm25TopK,
+            memory::CandidateCoverage::ExactTopK,
             "exact-phrase evidence at matching position {target_position}/{FANOUT} was omitted"
         );
-        assert_eq!(
-            results
-                .iter()
-                .map(|result| result.memory.content.as_str())
-                .collect::<Vec<_>>(),
-            ranked
-                .iter()
-                .map(|result| result.memory.content.as_str())
-                .collect::<Vec<_>>()
-        );
+        // Both put the exact phrase first; the filler that follows differs only because equal
+        // BM25 ties now resolve to the most recently remembered rows instead of index order.
+        assert_eq!(results[0].memory.content, query);
+        assert_eq!(ranked[0].memory.content, query);
+        assert_eq!(results.len(), ranked.len());
+        assert!(results[1..].iter().all(|result| {
+            result
+                .memory
+                .content
+                .starts_with(&format!("helioscase{case} low value"))
+        }));
     }
 }
 

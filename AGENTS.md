@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-This is a Rust 2024 Cargo project. Core implementation lives in `src/`: `code.rs` handles repository indexing and retrieval, `memory.rs` manages explicit memories, `db.rs` owns SQLite persistence and migrations, and `mcp.rs` implements the MCP interface. Unit tests are in `src/tests.rs` and module-local test blocks; the CLI integration test is in `tests/mcp_stdio.rs`. User and architecture documentation is in `docs/`, client examples in `examples/`, and benchmark and maintenance scripts in `scripts/`.
+This is a Rust 2024 Cargo project. Core implementation lives in `src/`: `code.rs` handles repository indexing and retrieval, `memory.rs` manages explicit memories, `db.rs` owns SQLite persistence and migrations, and `mcp.rs` implements the MCP interface. Unit tests are in `src/tests.rs`, `src/retrieval_tests.rs` (exhaustive BM25 oracle and adversarial memory-retrieval cases), and module-local test blocks; the CLI integration test is in `tests/mcp_stdio.rs`. User and architecture documentation is in `docs/`, client examples in `examples/`, and benchmark and maintenance scripts in `scripts/`.
 
 ## Build, Test, and Development
 
@@ -24,6 +24,10 @@ Add regression tests alongside the affected unit tests in `src/` or in `tests/` 
 ## Commits and Pull Requests
 
 Recent commits use concise subjects, often with Conventional Commit prefixes such as `feat:`. Use a clear imperative summary, optionally scoped (for example, `fix: preserve partial index status`). Pull requests should explain user-visible behavior and design choices, list validation commands and results, link related issues when available, and update relevant docs or changelog entries. Include benchmark evidence when changing performance claims or indexing behavior.
+
+## Retrieval Changes
+
+Any change to memory candidate generation or ranking must (1) keep `src/retrieval_tests.rs` passing, including exact agreement with the exhaustive oracle for up to four informative terms, (2) leave every metric and per-query rank of the frozen suites in `benchmark/` unchanged unless the change is a deliberate, documented contract change (never edit labels to improve a score), and (3) report paired before/after numbers from `bench-retrieval` and `bench-memory` run on the same host, including classes that got slower. Do not make a non-exact shortcut the default; opt-in shortcuts must be labeled through `candidate_coverage`. `docs/retrieval-v04.md` records the guarantees, rejected experiments, and the pending native macOS gate.
 
 ## Data and Documentation
 

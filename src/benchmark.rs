@@ -1667,3 +1667,176 @@ fn current_rss_bytes() -> Option<u64> {
         .ok()?;
     Some(kb.saturating_mul(1024))
 }
+
+/// Paired staged-vs-v0.3.1 recall measurement on a deterministic Zipf corpus.
+///
+/// Both strategies run in the same process against the same database, so differences are not
+/// confounded by hardware or build. Output contains workload definitions and aggregate
+/// measurements only (no host, user, or path identifiers).
+pub fn run_retrieval_ab(size: usize, namespace_count: usize, samples: usize) -> Result<Value> {
+    if !(1_000..=100_000).contains(&size) || !matches!(namespace_count, 1 | 4) || samples == 0 {
+        bail!("retrieval A/B requires 1000..=100000 records, 1 or 4 namespaces, and samples > 0");
+    }
+    const VOCABULARY: usize = 3_000;
+    let scopes = ["bench:alpha", "bench:beta", "bench:gamma", "bench:delta"];
+    let scopes = &scopes[..namespace_count];
+    let mut cumulative = Vec::with_capacity(VOCABULARY);
+    let mut total = 0.0;
+    for rank in 0..VOCABULARY {
+        total += 1.0 / (rank as f64 + 1.0);
+        cumulative.push(total);
+    }
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let temp = TempDir::new().context("create isolated retrieval A/B directory")?;
+    let db_path = temp.path().join("retrieval-ab.sqlite3");
+    let mut session = memory::MemorySession::open(&db_path)?;
+    let mut batch = Vec::with_capacity(memory::MAX_MEMORY_BATCH_RECORDS);
+    let mut planted = String::new();
+    for index in 0..size {
+        let length = 12 + (next() % 29) as usize;
+        let words = (0..length)
+            .map(|_| {
+                let target = (next() >> 11) as f64 / (1u64 << 53) as f64 * total;
+                let word = cumulative.partition_point(|value| *value < target);
+                format!("w{}", word.min(VOCABULARY - 1))
+            })
+            .collect::<Vec<_>>();
+        if index == size / 2 {
+            planted = words[2..5.min(words.len())].join(" ");
+        }
+        batch.push(memory::MemoryInput {
+            scope: scopes[index % scopes.len()].to_string(),
+            kind: "source".into(),
+            content: words.join(" "),
+            source_uri: Some("benchmark://zipf".into()),
+            source_id: None,
+            supersedes_id: None,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+        });
+        if batch.len() == memory::MAX_MEMORY_BATCH_RECORDS || index + 1 == size {
+            session.remember_batch(&batch)?;
+            batch.clear();
+        }
+    }
+    code::wal_checkpoint(&db_path)?;
+    let scope = scopes[(size / 2) % scopes.len()];
+    let natural = format!("what is the {planted} and w2000");
+    let classes: Vec<(&str, String)> = vec![
+        ("broad_ubiquitous_single_term", "w0".into()),
+        ("broad_mid_single_term", "w10".into()),
+        ("selective_single_term", "w2000".into()),
+        ("two_heavy_terms", "w3 w5".into()),
+        ("heavy_plus_rare", "w10 w2000".into()),
+        ("three_mixed_terms", "w50 w300 w2000".into()),
+        ("planted_contiguous_phrase", planted.clone()),
+        ("natural_language_with_stop_words", natural),
+    ];
+    let mut reports = Vec::new();
+    for (class, query) in classes {
+        let mut strategies = serde_json::Map::new();
+        let mut top_ids: Vec<(String, Vec<i64>, String)> = Vec::new();
+        let run = |session: &memory::MemorySession, label: &str| match label {
+            "staged_recent_opt_in" => {
+                session.recall_with_policy(scope, &query, None, 10, memory::BroadTermPolicy::Recent)
+            }
+            "staged" => session.recall_ordered(
+                scope,
+                &query,
+                None,
+                10,
+                memory::RecallCandidateOrder::Staged,
+            ),
+            _ => session.recall_ordered(
+                scope,
+                &query,
+                None,
+                10,
+                memory::RecallCandidateOrder::Ranked,
+            ),
+        };
+        // Interleave strategies per sample and rotate their order so that page-cache and
+        // allocator state is shared symmetrically instead of favoring whichever runs last.
+        let labels = ["staged", "v0_3_1_bm25_window", "staged_recent_opt_in"];
+        for label in labels {
+            for _ in 0..3 {
+                run(&session, label)?;
+            }
+        }
+        let mut wall: Vec<Vec<f64>> = vec![Vec::with_capacity(samples); labels.len()];
+        let mut cpu = vec![0.0f64; labels.len()];
+        let mut last: Vec<Vec<memory::MemorySearchResult>> = vec![Vec::new(); labels.len()];
+        for sample in 0..samples {
+            for offset in 0..labels.len() {
+                let index = (sample + offset) % labels.len();
+                let cpu_started = code::process_cpu_seconds();
+                let started = Instant::now();
+                last[index] = run(&session, labels[index])?;
+                wall[index].push(started.elapsed().as_secs_f64() * 1000.0);
+                if let (Some(end), Some(start)) = (code::process_cpu_seconds(), cpu_started) {
+                    cpu[index] += (end - start) * 1000.0;
+                }
+            }
+        }
+        for (index, label) in labels.iter().enumerate() {
+            let coverage = last[index]
+                .first()
+                .map(|result| format!("{:?}", result.candidate_coverage))
+                .unwrap_or_else(|| "NoResults".into());
+            let mut entry = distribution(&wall[index]);
+            if let Some(object) = entry.as_object_mut() {
+                object.remove("samples_ms");
+                object.insert(
+                    "cpu_ms_per_query".into(),
+                    (cpu[index] / samples as f64).into(),
+                );
+                object.insert("coverage".into(), coverage.clone().into());
+                object.insert("result_count".into(), last[index].len().into());
+            }
+            strategies.insert((*label).into(), entry);
+            top_ids.push((
+                (*label).into(),
+                last[index].iter().map(|result| result.memory.id).collect(),
+                coverage,
+            ));
+        }
+        // Staged vs v0.3.1 only: the opt-in recent policy is a deliberately different contract.
+        let identical_top_10 = top_ids[0].1 == top_ids[1].1;
+        let shared = top_ids[0]
+            .1
+            .iter()
+            .filter(|id| top_ids[1].1.contains(id))
+            .count();
+        reports.push(json!({
+            "query_class": class,
+            "query": query,
+            "strategies": strategies,
+            "top_10_identical_between_strategies": identical_top_10,
+            "top_10_overlap": shared,
+        }));
+    }
+    Ok(json!({
+        "workload": {
+            "records": size,
+            "namespaces": namespace_count,
+            "queried_namespace_records": size / namespace_count,
+            "vocabulary": VOCABULARY,
+            "distribution": "zipf s=1",
+            "samples_per_strategy": samples,
+            "result_limit": 10,
+            "cache": "warm persistent connection, default 2 MiB SQLite page cache",
+        },
+        "platform": {"os": std::env::consts::OS, "arch": std::env::consts::ARCH, "sqlite": rusqlite::version()},
+        "database_bytes": code::database_bytes(&db_path),
+        "peak_rss_bytes": code::peak_rss_bytes(),
+        "current_rss_bytes_after_run": current_rss_bytes(),
+        "classes": reports,
+    }))
+}

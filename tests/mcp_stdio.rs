@@ -306,7 +306,7 @@ fn mcp_recall_finds_middle_exact_phrase_and_reports_candidate_coverage() {
         serde_json::from_str(recalled["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(rows[0]["memory"]["content"], "where is nebula");
     assert_eq!(rows[0]["match_reason"], "memory_exact_phrase");
-    assert_eq!(rows[0]["candidate_coverage"], "bm25_top_k");
+    assert_eq!(rows[0]["candidate_coverage"], "exact_top_k");
 
     drop(stdin);
     assert!(child.wait().unwrap().success());
