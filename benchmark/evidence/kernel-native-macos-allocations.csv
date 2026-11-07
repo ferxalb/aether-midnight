@@ -1,0 +1,9 @@
+"class","samples","mean_rust_allocation_calls","mean_rust_allocated_bytes"
+"broad_ubiquitous_single_term",10,425.5,34603.4
+"broad_mid_single_term",10,389.1,33694
+"selective_single_term",10,403.6,34438
+"two_heavy_terms",10,381.4,30168
+"heavy_plus_rare",10,483.5,40251
+"three_mixed_terms",10,916.6,95711.1
+"planted_contiguous_phrase",10,1184.5,129844.9
+"natural_language_with_stop_words",10,1371.9,145691.1

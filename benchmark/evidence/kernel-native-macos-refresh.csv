@@ -1,0 +1,5 @@
+"variant","operation","samples","p50_ms","p95_ms","p99_ms","all_searches_fresh"
+"baseline","direct_file_refresh_visibility",30,10.35823200000019,11.316142000000085,11.431232999999708,true
+"baseline","full_reconciliation_visibility",30,284.7816410000004,294.93263899999977,295.6330569999999,true
+"candidate","direct_file_refresh_visibility",30,10.650677000000996,12.082329000000058,12.503053000000097,true
+"candidate","full_reconciliation_visibility",30,300.4858860000006,330.2835309999992,343.5163289999998,true

@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "9d39467b5c5531bb53464b3f1ce4254304ef6077",
+  "candidate_commit": "667cea3ad1cb3c475d5deeaf675f5eb374fcdf09",
+  "branch": "perf/midnight-v03-end-to-end-engine",
+  "measured_at": "2026-11-05",
+  "host": {
+    "os_kernel": "redacted by maintainer",
+    "cpu": "redacted by maintainer",
+    "ram_bytes_reported": "redacted by maintainer",
+    "filesystem": "redacted by maintainer",
+    "rustc": "redacted by maintainer",
+    "sqlite": "redacted by maintainer",
+    "release_profile": "redacted by maintainer",
+    "profiling_profile": "redacted by maintainer"
+  },
+  "retrieval": {
+    "workload": "bench-memory broad one-term query namespace, limit 10, 100000 total records in four scopes; queried scope has 25025 active records",
+    "warm_persistent_recall_n": 100,
+    "baseline_ranked_ms_p50_p95_p99": [
+      23.725,
+      26.508,
+      28.368
+    ],
+    "candidate_three_run_medians_ms_p50_p95_p99": [
+      6.892,
+      7.434,
+      8.409
+    ],
+    "candidate_three_run_ranges_ms": {
+      "p50": [
+        6.764,
+        7.016
+      ],
+      "p95": [
+        7.324,
+        7.53
+      ],
+      "p99": [
+        7.511,
+        9.938
+      ]
+    },
+    "candidate_profiled_n100_ms_p50_p95_p99": {
+      "ranked_total": [
+        27.01,
+        29.723,
+        32.231
+      ],
+      "balanced_total": [
+        7.144,
+        8.439,
+        16.164
+      ],
+      "ranked_sql_candidate_step": [
+        26.846,
+        29.541,
+        32.066
+      ],
+      "balanced_sql_candidate_step": [
+        6.963,
+        8.226,
+        15.955
+      ],
+      "ranked_hydration": [
+        0.031,
+        0.037,
+        0.049
+      ],
+      "balanced_hydration": [
+        0.034,
+        0.047,
+        0.051
+      ]
+    },
+    "balanced_candidates": 50,
+    "balanced_scan_loops": 2,
+    "balanced_sqlite_vm_steps": 1330,
+    "ranked_sqlite_vm_steps": 1315,
+    "ranked_cache_misses": 565,
+    "balanced_cache_misses": 162,
+    "selective_one_term_profiled_ms_p50_p95_p99": [
+      0.828,
+      0.98,
+      1.075
+    ],
+    "query_plans": {
+      "ranked": [
+        "SCAN memory_fts VIRTUAL TABLE INDEX 32:rM2",
+        "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)"
+      ],
+      "balanced": [
+        "SCAN memory_fts VIRTUAL TABLE INDEX 64:rM2",
+        "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
+        "SCAN memory_fts VIRTUAL TABLE INDEX 192:rM2",
+        "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)"
+      ]
+    },
+    "sqlite_scanstatus_note": "NVISIT counts plan-loop output rows; it does not expose internal FTS term postings examined.",
+    "cache_screen": {
+      "sizes_kib_alternating": [
+        2048,
+        8192,
+        4096,
+        16384,
+        16384,
+        4096,
+        8192,
+        2048
+      ],
+      "samples_per_group": 100,
+      "result_ids_stable": true,
+      "sqlite_cache_used_bytes": 801408,
+      "process_rss_bytes": 15585280,
+      "latency_improvement": "none material; cache limit increased actual cache use did not increase"
+    }
+  },
+  "scale": {
+    "persistent_recall_ms_p50_p95_p99": {
+      "1000": [
+        0.459,
+        0.71,
+        0.796
+      ],
+      "10000": [
+        1.08,
+        1.377,
+        1.472
+      ],
+      "100000_three_run_medians": [
+        6.892,
+        7.434,
+        8.409
+      ]
+    },
+    "database_bytes_after_measured_operations": {
+      "1000": 446464,
+      "10000": 2691072,
+      "100000": 25559040
+    },
+    "sampled_cumulative_process_peak_rss_bytes": 10260480,
+    "100000_separate_run_peak_rss_bytes": [
+      9478144,
+      9744384
+    ]
+  },
+  "persistent_mcp_end_to_end": {
+    "fixture": "10027 fictional memories, including 10000 background records",
+    "requests_per_suite_run": 10165,
+    "dev_and_heldout_write_latency_ms_p50_p95_p99_ranges": {
+      "remember_n10027": {
+        "p50": [
+          0.085,
+          0.087
+        ],
+        "p95": [
+          0.213,
+          0.253
+        ],
+        "p99": [
+          1.977,
+          2.565
+        ]
+      },
+      "forget_n31": {
+        "p50": [
+          0.043,
+          0.065
+        ],
+        "p95": [
+          0.075,
+          0.114
+        ],
+        "p99": [
+          0.267,
+          0.278
+        ]
+      }
+    },
+    "process_cpu_seconds": [
+      1.298,
+      1.37
+    ],
+    "rss_before_close_bytes": [
+      9224192,
+      9416704
+    ],
+    "database_wal_shm_bytes_before_close": 10482616,
+    "database_wal_shm_bytes_after_close": 5369856
+  },
+  "retrieval_quality": {
+    "original_v2_development_n14_baseline_and_candidate_identical": {
+      "recall_at_1": 0.5,
+      "recall_at_5": 0.958333,
+      "recall_at_10": 0.958333,
+      "precision_at_5": 0.316667,
+      "mrr": 0.875,
+      "ndcg_at_10": 0.879221,
+      "evidence_completeness_at_10": 0.95,
+      "false_positive_rate": 0.0,
+      "namespace_leaks": 0
+    },
+    "v2_heldout_n11_baseline_and_candidate_identical": {
+      "recall_at_1": 0.625,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "precision_at_5": 0.3,
+      "mrr": 0.916667,
+      "ndcg_at_10": 0.922152,
+      "evidence_completeness_at_10": 1.0,
+      "temporal_accuracy_at_10": 1.0,
+      "false_positive_rate": 0.333333,
+      "namespace_leaks": 0
+    },
+    "supplemental_development_n15": {
+      "recall_at_1": 0.5,
+      "recall_at_5": 0.923077,
+      "recall_at_10": 0.923077,
+      "precision_at_5": 0.307692,
+      "mrr": 0.884615,
+      "ndcg_at_10": 0.858754,
+      "evidence_completeness_at_10": 0.909091,
+      "temporal_accuracy_at_10": 1.0,
+      "false_positive_rate": 0.0,
+      "namespace_leaks": 0
+    },
+    "supplemental_status_query": {
+      "candidate_latency_ms_p50_p95": [
+        1.907,
+        2.166
+      ],
+      "ranked_baseline_latency_ms_p50_p95": [
+        8.136,
+        9.193
+      ],
+      "recall_at_10_both": 0.5,
+      "precision_at_5_both": 0.2,
+      "limitation": "The second labeled fact is Spanish and contains no shared query token; lexical retrieval misses it under both strategies. The candidate path changes which irrelevant background rows fill the remaining positions."
+    }
+  },
+  "wal_checkpoint_experiment": {
+    "workload": "10027 persistent MCP remember calls per run, three sequential runs per threshold in counterbalanced order",
+    "probe": "PRAGMA wal_checkpoint(NOOP) after each completed call; probe does not checkpoint",
+    "latency_threshold_for_outlier_ms": 4,
+    "per_run_percentile_medians_ms_p50_p95_p99_p99_9": {
+      "1000_pages": [
+        0.097,
+        0.278,
+        1.962,
+        3.159
+      ],
+      "256_pages": [
+        0.094,
+        0.509,
+        1.55,
+        3.874
+      ],
+      "4096_pages": [
+        0.086,
+        0.194,
+        0.354,
+        6.524
+      ]
+    },
+    "median_max_uncheckpointed_frames": {
+      "1000_pages": 999,
+      "256_pages": 255,
+      "4096_pages": 4095
+    },
+    "checkpoint_progress_events_per_10027_calls": {
+      "1000_pages": 106,
+      "256_pages": 411,
+      "4096_pages": 26
+    },
+    "outlier_calls_at_least_4ms_across_three_runs": {
+      "1000_pages": 28,
+      "1000_page_outliers_with_checkpoint_progress": 23,
+      "256_pages": 33,
+      "256_page_outliers_with_checkpoint_progress": 27,
+      "4096_pages": 83,
+      "4096_page_outliers_with_checkpoint_progress": 78
+    },
+    "decision": "Retain SQLite default 1000 pages. 256 pages lowers p99 but raises p95 to about the 0.5 ms goal and performs nearly four times as many checkpoint events; 4096 pages permits about four times the uncheckpointed WAL frames and has a worse p99.9 despite a lower p99. The default meets p95/p99 goals in these runs, with rare checkpoint-correlated tails still present.",
+    "limitations": "MCP end-to-end request timing is measured; transaction commit, checkpoint, sync, and lock-wait durations are not separately timed. Event correlation does not prove checkpoint I/O is the sole cause."
+  },
+  "unavailable_or_not_run": [
+    "FTS5 internal term-posting count",
+    "allocator allocation counts and per-query temporary heap peak",
+    "physical index-page reads and established cold OS page cache",
+    "1000-record-per-query expanded labeled evaluation, confidence intervals, and semantic answer scoring",
+    "macOS hardware comparison, one-million-memory run, and large payload stress",
+    "multi-process contention, long-reader checkpoint starvation, abrupt-process crash tests, and power-loss durability tests",
+    "code indexing, targeted refresh, and concurrent code/memory workload reruns"
+  ],
+  "raw_local_artifacts": "benchmark/runs/v03-20261105/ (git-ignored; see docs/performance.md for filenames and commands)",
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
+}

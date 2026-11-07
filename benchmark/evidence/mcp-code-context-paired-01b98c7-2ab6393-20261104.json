@@ -1,0 +1,358 @@
+{
+  "baseline": {
+    "all_warm_searches_expected_hit": true,
+    "binary_sha256": "redacted by maintainer",
+    "binary_source_commit": "01b98c76ff1241d8e4a8459cf9e42445c8e72d16",
+    "binary_version": "aether-midnight 0.1.0",
+    "first_search_tool_latency": {
+      "n": 5,
+      "p50_ms": 13.856367000002479,
+      "p95_ms": 13.983113999998409,
+      "p99_ms": 13.983113999998409,
+      "samples_ms": [
+        13.579140000004486,
+        13.67988200000525,
+        13.856367000002479,
+        13.8887909999994,
+        13.983113999998409
+      ]
+    },
+    "first_useful_context_initialize_plus_search": {
+      "n": 5,
+      "p50_ms": 72.13486100000921,
+      "p95_ms": 72.79265799999735,
+      "p99_ms": 72.79265799999735,
+      "samples_ms": [
+        70.32750000000476,
+        70.82973900000411,
+        72.13486100000921,
+        72.3229889999999,
+        72.79265799999735
+      ]
+    },
+    "fresh_process_initialize_plus_search": {
+      "n": 5,
+      "p50_ms": 112.511425,
+      "p95_ms": 114.02979600000002,
+      "p99_ms": 114.02979600000002,
+      "samples_ms": [
+        110.14303100000001,
+        111.26474399999996,
+        112.511425,
+        113.843003,
+        114.02979600000002
+      ]
+    },
+    "full_index_one_worker": {
+      "catalog_complete": true,
+      "cpu_seconds": {
+        "n": 5,
+        "p50_seconds": 4.225469984,
+        "p95_seconds": 4.428585727,
+        "p99_seconds": 4.428585727,
+        "samples_seconds": [
+          4.16773586,
+          4.199868357,
+          4.225469984,
+          4.240188025,
+          4.428585727
+        ]
+      },
+      "database_bytes_main_wal_shm": {
+        "n": 5,
+        "p50_bytes": 18722816,
+        "p95_bytes": 18722816,
+        "p99_bytes": 18722816,
+        "samples_bytes": [
+          18722816,
+          18722816,
+          18722816,
+          18722816,
+          18722816
+        ]
+      },
+      "structural_complete": true,
+      "wall": {
+        "n": 5,
+        "p50_ms": 3919.645146,
+        "p95_ms": 4102.1288620000005,
+        "p99_ms": 4102.1288620000005,
+        "samples_ms": [
+          3858.236354,
+          3885.910311,
+          3919.645146,
+          3992.812626,
+          4102.1288620000005
+        ]
+      }
+    },
+    "idle_cpu_percent_one_core": {
+      "n": 5,
+      "p50_percent": 0.0,
+      "p95_percent": 0.0,
+      "p99_percent": 0.0,
+      "samples_percent": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "physical_footprint_sampled_peak": {
+      "n": 5,
+      "p50_bytes": 8671232,
+      "p95_bytes": 8765440,
+      "p99_bytes": 8765440,
+      "samples_bytes": [
+        6483968,
+        6537216,
+        8671232,
+        8679424,
+        8765440
+      ]
+    },
+    "protocol_success": true,
+    "resident_sampled_peak": {
+      "n": 5,
+      "p50_bytes": 18632704,
+      "p95_bytes": 18726912,
+      "p99_bytes": 18726912,
+      "samples_bytes": [
+        16445440,
+        16498688,
+        18632704,
+        18640896,
+        18726912
+      ]
+    },
+    "run_id": "20261105T022335Z_2ab6393d4693_smoke_2dec74fd",
+    "status": "completed",
+    "warm_search_code": {
+      "n": 25,
+      "p50_ms": 12.23951500000453,
+      "p95_ms": 13.875608000006423,
+      "p99_ms": 14.625445000007176,
+      "samples_ms": [
+        11.913069000001997,
+        11.936804999990613,
+        11.938165999993089,
+        11.944795000005115,
+        12.003161999999179,
+        12.030109000008338,
+        12.032930000003716,
+        12.059000000007813,
+        12.115554000004636,
+        12.157427999994752,
+        12.21606100000372,
+        12.217745000000946,
+        12.23951500000453,
+        12.289601999995625,
+        12.303418000001898,
+        12.513419000001136,
+        12.70819200000517,
+        12.808204999998907,
+        13.08864499999629,
+        13.14490999999407,
+        13.401770000001534,
+        13.41458000000273,
+        13.638063999991346,
+        13.875608000006423,
+        14.625445000007176
+      ]
+    }
+  },
+  "created_at_utc": "2026-11-05T02:26:28.493351+00:00",
+  "current": {
+    "all_warm_searches_expected_hit": true,
+    "binary_sha256": "redacted by maintainer",
+    "binary_source_commit": "2ab6393d4693d0c27e83297604d1fe05739deb3f",
+    "binary_version": "aether-midnight 0.1.0",
+    "first_search_tool_latency": {
+      "n": 5,
+      "p50_ms": 13.974885999999742,
+      "p95_ms": 14.043650000004959,
+      "p99_ms": 14.043650000004959,
+      "samples_ms": [
+        13.784638000004179,
+        13.806788000010783,
+        13.974885999999742,
+        13.97511499999382,
+        14.043650000004959
+      ]
+    },
+    "first_useful_context_initialize_plus_search": {
+      "n": 5,
+      "p50_ms": 70.01377899999284,
+      "p95_ms": 72.60719599999277,
+      "p99_ms": 72.60719599999277,
+      "samples_ms": [
+        69.69026099999098,
+        69.7502820000011,
+        70.01377899999284,
+        71.78148100000215,
+        72.60719599999277
+      ]
+    },
+    "fresh_process_initialize_plus_search": {
+      "n": 5,
+      "p50_ms": 112.77193899999999,
+      "p95_ms": 113.91325999999997,
+      "p99_ms": 113.91325999999997,
+      "samples_ms": [
+        106.86416100000001,
+        108.43277200000001,
+        112.77193899999999,
+        113.908275,
+        113.91325999999997
+      ]
+    },
+    "full_index_one_worker": {
+      "catalog_complete": true,
+      "cpu_seconds": {
+        "n": 5,
+        "p50_seconds": 4.124461111,
+        "p95_seconds": 4.138003229,
+        "p99_seconds": 4.138003229,
+        "samples_seconds": [
+          4.093969022,
+          4.106362367,
+          4.124461111,
+          4.136157592,
+          4.138003229
+        ]
+      },
+      "database_bytes_main_wal_shm": {
+        "n": 5,
+        "p50_bytes": 18718720,
+        "p95_bytes": 18718720,
+        "p99_bytes": 18718720,
+        "samples_bytes": [
+          18718720,
+          18718720,
+          18718720,
+          18718720,
+          18718720
+        ]
+      },
+      "structural_complete": true,
+      "wall": {
+        "n": 5,
+        "p50_ms": 3814.03391,
+        "p95_ms": 3871.18927,
+        "p99_ms": 3871.18927,
+        "samples_ms": [
+          3782.7224229999997,
+          3810.4676609999997,
+          3814.03391,
+          3832.5679729999997,
+          3871.18927
+        ]
+      }
+    },
+    "idle_cpu_percent_one_core": {
+      "n": 5,
+      "p50_percent": 0.0,
+      "p95_percent": 0.0,
+      "p99_percent": 0.0,
+      "samples_percent": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "physical_footprint_sampled_peak": {
+      "n": 5,
+      "p50_bytes": 6508544,
+      "p95_bytes": 8667136,
+      "p99_bytes": 8667136,
+      "samples_bytes": [
+        4231168,
+        6488064,
+        6508544,
+        8617984,
+        8667136
+      ]
+    },
+    "protocol_success": true,
+    "resident_sampled_peak": {
+      "n": 5,
+      "p50_bytes": 16494592,
+      "p95_bytes": 18653184,
+      "p99_bytes": 18653184,
+      "samples_bytes": [
+        14217216,
+        16474112,
+        16494592,
+        18604032,
+        18653184
+      ]
+    },
+    "run_id": "20261105T022507Z_2ab6393d4693_smoke_3bc15575",
+    "status": "completed",
+    "warm_search_code": {
+      "n": 25,
+      "p50_ms": 12.152426000000105,
+      "p95_ms": 13.234890999996196,
+      "p99_ms": 13.543063999989613,
+      "samples_ms": [
+        11.877920000003428,
+        11.884984000005261,
+        11.903944000010824,
+        11.94774900000084,
+        11.951829999986785,
+        11.953935000008187,
+        11.976203999992663,
+        12.017095999993899,
+        12.067219000002183,
+        12.104557000000682,
+        12.111300999990249,
+        12.124166000006653,
+        12.152426000000105,
+        12.161973000004878,
+        12.169326000005753,
+        12.20059899999626,
+        12.269732999996563,
+        12.554062999996063,
+        12.865241999989507,
+        12.896625999999856,
+        13.046742000000222,
+        13.105477999999948,
+        13.11714300000233,
+        13.234890999996196,
+        13.543063999989613
+      ]
+    }
+  },
+  "fixture": {
+    "eligible_files": 10000,
+    "eligible_source_bytes": 104857600,
+    "expected_path": "src/00000.rs",
+    "query": "benchmark_target_00000",
+    "seed": 20261103
+  },
+  "host": {
+    "architecture": "redacted by maintainer",
+    "cpu_model": "redacted by maintainer",
+    "logical_cores": "redacted by maintainer",
+    "memory_bytes": "redacted by maintainer",
+    "os": "redacted by maintainer",
+    "physical_cores": "redacted by maintainer",
+    "sqlite_version": "redacted by maintainer"
+  },
+  "runner": {
+    "mode": "smoke",
+    "percentiles": "sorted nearest-index ceil((n-1)*p), matching committed benchmark conventions",
+    "samples_per_measurement": 5,
+    "script": "scripts/performance_campaign.py",
+    "update_workers": 1,
+    "worker_counts": [
+      1
+    ]
+  },
+  "schema_version": 1,
+  "title": "Paired persistent MCP code retrieval and 10k-file indexing on Intel macOS",
+  "privacy_redaction": "Host, runtime, account, and local-path identifiers were redacted; recorded workload measurements are retained."
+}
