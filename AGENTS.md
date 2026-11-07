@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-This is a Rust 2024 Cargo project. Core implementation lives in `src/`: `code.rs` handles repository indexing and retrieval, `memory.rs` manages explicit memories, `db.rs` owns SQLite persistence and migrations, and `mcp.rs` implements the MCP interface (shared dispatch and permission `Policy`) and `mcp_http.rs` the loopback-only HTTP transport used by AETHER Dots; `tests/mcp_http.rs` covers it. Unit tests are in `src/tests.rs`, `src/retrieval_tests.rs` (exhaustive BM25 oracle and adversarial memory-retrieval cases), and module-local test blocks; the CLI integration test is in `tests/mcp_stdio.rs`. User and architecture documentation is in `docs/`, client examples in `examples/`, and `scripts/native_kernel_pair.rs` (macOS cross-process comparison), and the Rust measurement/oracle harness `src/bin/midnight-harness.rs`.
+This is a Rust 2024 Cargo project. Core implementation lives in `src/`: `code.rs` handles repository indexing and retrieval, `memory.rs` manages explicit memories, `db.rs` owns SQLite persistence and migrations, and `mcp.rs` implements the MCP interface (shared dispatch and permission `Policy`) and `mcp_http.rs` the loopback-only HTTP transport used by AETHER Dots; `tests/mcp_http.rs` covers it. Unit tests are in `src/tests.rs`, `src/retrieval_tests.rs` (exhaustive BM25 oracle and adversarial memory-retrieval cases), and module-local test blocks; the CLI integration test is in `tests/mcp_stdio.rs`. User and architecture documentation is in `docs/`, client examples in `examples/`, and the Rust measurement/oracle harness `src/bin/midnight-harness.rs`.
 
 ## Build, Test, and Development
 

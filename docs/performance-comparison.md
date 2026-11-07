@@ -28,4 +28,4 @@ The 10k-file fixture passed the proposed ≤3,000 ms p95 index, ≤128 MiB peak 
 
 Exploratory measurements that do not meet the repeated-sample standard are omitted from this paired comparison.
 
-Raw local samples, host state, binary hashes, SQLite sidecar peaks, phase timings, retrieval ranks, and failure records are preserved in the `benchmark/runs/` artifacts linked from [the investigation](performance-investigation.md).
+Raw local samples, host state, binary hashes, SQLite sidecar peaks, phase timings, retrieval ranks, and failure records are preserved in the `benchmark/runs/` artifacts.

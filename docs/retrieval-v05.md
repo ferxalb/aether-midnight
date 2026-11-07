@@ -1,6 +1,6 @@
 # v0.5 exact recall: descending FTS scan
 
-> Historical experiment: the production default introduced here is superseded by [the v0.5 correction](retrieval-v05-correction.md), which restores the original direct scan after paired regression diagnosis. Measurements below remain unchanged.
+> Historical experiment: the production default introduced here is superseded by the v0.5 correction. Measurements below remain unchanged.
 
 This is a bounded improvement on `767dbba`, not completion of the v0.5 latency goals. Work stayed on the existing `main` branch at the operator's request; pushing that branch was explicitly authorized. Native macOS was available. Raw results and experimental programs remain in ignored local storage; only workload definitions and aggregate measurements are published here.
 

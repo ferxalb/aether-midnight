@@ -1,9 +1,9 @@
 # Performance contract and benchmark results
 
-> **v0.5 update:** [the correction record](retrieval-v05-correction.md) restores the original exact scan default and documents interleaved regression diagnosis. The earlier descending-scan experiment remains in [the v0.5 retrieval record](retrieval-v05.md).
+> **v0.5 update:** the v0.5 correction restores the original exact scan default and documents interleaved regression diagnosis. The earlier descending-scan experiment remains in [the v0.5 retrieval record](retrieval-v05.md).
 > **v0.4 update:** current memory-recall measurements and the paired v0.3.1 comparison are in [the v0.4 retrieval record](retrieval-v04.md). Older sections here describe earlier strategies.
 
-This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md) and [the investigation](performance-investigation.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
+This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
 ## Measurement handling
 
@@ -159,7 +159,7 @@ The historical local smoke run (Python tooling since removed) used the same gene
 
 The code retrieval path is essentially unchanged, with no observed regression; the 10k-file one-worker full-index p95 is 3.87 s and is not evidence for the proposed 3-second multiworker target. Percentiles from n=5 have low resolution; the p95/p99 values are the largest observations. This campaign does not include direct-file refresh latency or simultaneous code-index and memory-recall load.
 
-The direct-file path has a separate focused comparison from the since-removed Python runner, recorded in [`refresh-file-10k-2ab6393-20261104.json`](../benchmark/evidence/refresh-file-10k-2ab6393-20261104.json). It created one Rust target plus 9,999 small background files, indexed the 10,000-file repository, and then ran 30 paired updates in one MCP session. Each timer starts after writing the changed source and covers the index/refresh tool call plus a `search_code` call that verifies the new result is fresh.
+The direct-file path has a separate focused comparison from the since-removed Python runner. It created one Rust target plus 9,999 small background files, indexed the 10,000-file repository, and then ran 30 paired updates in one MCP session. Each timer starts after writing the changed source and covers the index/refresh tool call plus a `search_code` call that verifies the new result is fresh.
 
 | 10k-file update-to-visible path | p50 / p95 / p99 (ms) | n | Result status |
 | --- | ---: | ---: | --- |

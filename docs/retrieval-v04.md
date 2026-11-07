@@ -152,8 +152,8 @@ The 93%-of-records exact case is the remaining bottleneck: ranking tens of thous
 - Small corpora (about 1k records) pay roughly 0.4 to 0.7 ms more on phrase and natural-language queries.
 - Lexical only; morphology and paraphrase recall are not addressed.
 - Global BM25 statistics across namespaces.
-- Native Intel macOS measurements are now recorded in [the stabilization report](stabilization-v04.md); broad exact queries still fail the documented native latency targets. Apple Silicon remains untested. The Linux results above remain platform-specific.
-- The intermittent explicit-refresh advisory-lock failure was reproduced with an inherited descriptor and fixed with an explicit unlock guard. The original test passed 50 repeated runs; see [stabilization evidence](stabilization-v04.md).
+- Native Intel macOS measurements were recorded in the v0.4 stabilization run (since removed); broad exact queries still fail the documented native latency targets. Apple Silicon remains untested. The Linux results above remain platform-specific.
+- The intermittent explicit-refresh advisory-lock failure was reproduced with an inherited descriptor and fixed with an explicit unlock guard. The original test passed 50 repeated runs.
 - The 1M-record workload was not run (the benchmark caps at 100k by design).
 
 ## Reproduce
