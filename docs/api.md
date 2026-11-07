@@ -34,7 +34,7 @@ The optional `recall` argument `broad_terms` (`exact`, the default, or `recent`)
 
 Use `bench-memory --namespace-count 1` for one large namespace or `--namespace-count 4` for the distributed workload. Both use the same total record counts and report warm recall, storage, CPU, RSS, and retrieval-quality measurements.
 
-To reproduce the 10k-file full-reconciliation versus direct-refresh visibility workload, run `python3 scripts/benchmark_refresh_file.py --files 10000 --samples 30`; it emits JSON and never contacts a service.
+To reproduce the 10k-file full-reconciliation versus direct-refresh visibility workload, run `target/release/aether-midnight refresh-file --repo "$FIXTURE" --path src/00000.rs  # measure under /usr/bin/time -l
 
 ## MCP
 

@@ -11,7 +11,7 @@ The `codex/v031-reliable-memory-retrieval` branch named in the assignment was no
 Evidence (reproduced; Linux x86_64, 4 vCPU, 100k records, one namespace). The first row is the project binary (bundled SQLite 3.54.1); the isolation rows used the same corpus shape in a stock SQLite 3.53.1 harness, so treat their ratios as indicative:
 
 | Measurement | Result |
-|---|---|
+| --- | --- |
 | v0.3.1 recall of a term in every record, p50 / p95 | 76.9 / 98.5 ms (`bench-memory --namespace-count 1`) |
 | Enumerating the same 93k matches with `count(*)` (no ranking) | about 3 ms |
 | `ORDER BY rowid LIMIT 50` on the same matches | 0.02 ms |
@@ -61,7 +61,7 @@ Not guaranteed:
 ## Decision record
 
 | Approach | Latency | Index size / write cost | Exactness | Complexity | Verdict |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | A. v0.3.1: one FTS5 BM25 window, rerank in Rust | 95 ms (100k, one ns, broad term) | none | exact BM25 order, but the 50-row window is chosen by BM25 while the final order is class-first, so single-term documents and high-BM25 non-phrase documents crowd out targets (reproduced) | lowest | baseline |
 | B. Class-staged exact FTS5 (chosen) | up to 19.5× faster at 100k (p50); phrase and natural-language queries at 1k are 0.5 to 0.8× (slower) | +1 page, +about 0.07 ms per `remember` | exact top-k for ≤4 terms, proven against the oracle | one planner function, one 4-line migration | **selected** |
 | C. Sidecar impact-ordered postings with WAND / Block-Max WAND | not built; would make broad single terms sub-10 ms | estimate only: about 1.6M `(term, doc, tf)` rows for 100k records, roughly 35 to 40 MB against a 26 MB database, and an index update per remember | exact | a second search engine to migrate, repair, and keep consistent with FTS5 | rejected: cost not justified while B meets the measured need except for one class |
@@ -103,7 +103,7 @@ Result lists can differ from v0.3.1 only where many rows tie exactly: v0.3.1's c
 100k records, p50 / p95 / p99 in ms (v0.3.1 in parentheses):
 
 | Query class | one namespace | four namespaces |
-|---|---|---|
+| --- | --- | --- |
 | Term in 93% of records | 47.9 / 56.7 / 58.9 (95.2 / 119.1 / 132.0) | 18.9 / 22.5 / 26.4 (29.6 / 38.7 / 41.5) |
 | Term in 24% of records | 11.3 / 15.4 / 16.5 (26.6 / 33.4 / 42.5) | 5.9 / 8.5 / 9.5 (8.5 / 12.2 / 13.9) |
 | Selective single term (0.15%) | 0.25 / 0.36 / 0.86 (4.85 / 5.86 / 7.65) | 0.99 / 1.68 / 1.75 (1.75 / 3.05 / 5.17) |
@@ -118,7 +118,7 @@ At 10k records every class is faster at p50 (1.9 to 6.8× in one namespace; 1.3 
 Standard `bench-memory` workload (a term in every record; every record ties), recall p50 / p95 / p99 ms, v0.3.1 against v0.4:
 
 | Records | One namespace | Four namespaces |
-|---|---|---|
+| --- | --- | --- |
 | 1k | 1.46 / 2.06 / 4.82 → 1.00 / 1.09 / 1.69 | 1.02 / 1.28 / 1.54 → 0.87 / 1.12 / 1.42 |
 | 10k | 7.86 / 10.02 / 12.49 → 5.98 / 6.72 / 8.35 | 3.38 / 5.10 / 6.93 → 2.78 / 3.06 / 4.22 |
 | 100k | 76.5 / 93.3 / 109.0 → 59.7 / 69.8 / 81.0 | 24.8 / 31.6 / 32.7 → 21.7 / 27.1 / 32.3 |
@@ -136,7 +136,7 @@ Opt-in `broad_terms: "recent"` for a term in 93% of records: 4.1 ms at 100k in o
 ## Targets
 
 | Target (Intel Mac reference, p95) | Result on this Linux host (v0.3.1 in parentheses) |
-|---|---|
+| --- | --- |
 | 1k recall ≤ 2 ms | met for every class: 0.14 to 1.91 ms (v0.3.1: 0.27 to 1.99) |
 | 10k recall ≤ 5 ms | met for every class except the 93% term in one namespace, 5.7 ms (11.4); all others ≤ 3.3 ms |
 | 100k, four namespaces ≤ 15 ms | met for every class except the 93% term, 22.5 ms (38.7); two heavy terms 13.9 (37.2) |
@@ -166,13 +166,13 @@ cargo build --release --locked
 
 # paired A/B (staged vs v0.3.1 vs opt-in recent), per size and layout
 ./target/release/aether-midnight bench-retrieval --size 100000 --namespace-count 1 --samples 100 > /tmp/ab.json
-python3 scripts/show_retrieval_ab.py /tmp/ab.json
+# the JSON above already contains the paired staged/v0.3.1 numbers
 
 # standard memory scaling workload
 ./target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespace-count 1
 
 # frozen quality suites through a persistent MCP process
-python3 scripts/evaluate_memory_retrieval.py --fixture benchmark/memory_quality_v1.json --split heldout
+target/release/midnight-harness memory-quality --fixture benchmark/memory_quality_v1.json --split heldout
 ```
 
 For a v0.3.1 binary, build `bdc940f` in a separate worktree and run the same commands. Do not commit raw output: it contains host and path identifiers.

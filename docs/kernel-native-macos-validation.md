@@ -23,7 +23,7 @@ settings (`lto=thin`, one codegen unit, stripped). Compilation and correctness
 jobs finished before acceptance timing. No latency samples are removed.
 Percentiles use `sorted[ceil((n - 1) * p)]`.
 The two committed dependency lockfiles are identical. Binary provenance comes
-from the detached builds and retained hashes: existing Python wrappers label
+from the detached builds and retained hashes: the former Python wrappers labeled
 the invoking checkout commit, which is not the baseline binary's source commit.
 Their checkout labels are not used to identify the baseline in this report.
 
@@ -83,7 +83,7 @@ cell below is p50/p95/p99 ms for the ubiquitous Zipf term; CPU is mean ms/query
 in baseline/control/candidate order.
 
 | Records/namespaces, trial | Baseline | Identical control | Candidate | CPU B/control/C |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 10k/1, 1 | 5.49/5.61/5.81 | 5.48/5.62/5.86 | 5.58/5.81/6.22 | 5.44/5.44/5.53 |
 | 10k/1, 2 | 5.20/5.39/6.09 | 5.18/5.31/6.85 | 5.17/5.29/5.48 | 5.17/5.13/5.11 |
 | 10k/4, 1 | 2.54/3.94/5.57 | 2.53/3.81/5.55 | 2.60/3.62/5.71 | 2.57/2.55/2.62 |
@@ -115,7 +115,7 @@ CPU for setup plus operations (not CPU/query), peak RSS and writes. Recall
 p50/p95/p99 ms baseline → candidate:
 
 | Records/namespaces | Baseline | Candidate | Whole-workload CPU seconds B → C |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 10k/1 | 7.39/7.79/8.00 | 7.30/7.44/7.84 | 1.919 → 1.881 |
 | 10k/4 | 3.33/3.47/3.85 | 3.30/3.47/3.63 | 1.243 → 1.245 |
 | 100k/1 | 66.73/70.96/72.79 | 65.39/69.34/70.82 | 16.913 → 16.722 |
@@ -165,7 +165,7 @@ baseline/candidate campaigns, not an isolated attribution of small differences.
 retain slower configurations.
 
 | Workers | Full-index p95 ms B → C | 3,000 ms gate |
-|---|---|---|
+| --- | --- | --- |
 | 1 | 3806.17 → 4013.36 | Fail both |
 | 2 | 2755.84 → 2737.68 | Pass both |
 | 4 | 2254.04 → 2359.87 | Pass both |
@@ -178,7 +178,7 @@ p95 RSS high-water MiB 25.63 → 25.57. No worker or resource budget was enlarge
 to turn a failure into a pass.
 
 | Operation | n per binary | Baseline p50/p95/p99 ms | Candidate p50/p95/p99 ms | Gate |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | First grounded context, empty DB | 5 | 177.73/183.00/183.00 | 167.17/177.09/177.09 | Pass: p50 ≤1000, p95 ≤3000 |
 | Warm persistent code search | 25 | 11.76/13.11/13.14 | 12.06/13.22/13.49 | Pass: p95 ≤50 |
 | Campaign one-file visibility | 5 | 471.21/478.20/478.20 | 474.23/495.15/495.15 | Pass: p95 ≤1000 |

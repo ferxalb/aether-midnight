@@ -18,15 +18,13 @@ diskutil info -plist / | plutil -p -
 pmset -g therm
 memory_pressure -Q
 cargo build --release --locked
-python3 scripts/performance_campaign.py --mode smoke --workers 1,2,4,6 \
-  --update-workers 4 --interval-ms 50 --max-duration-s 600
+target/release/aether-midnight bench --repo "$FIXTURE" --heldout-repo benchmark/retrieval_fixture --samples 5 --index-samples 5
 ```
 
 The smoke mode uses one sample per measurement. For a standard run, use five samples and a longer bounded window:
 
 ```sh
-python3 scripts/performance_campaign.py --mode standard --workers 1,2,4,6,12 \
-  --update-workers 4 --interval-ms 50 --max-duration-s 1800
+target/release/aether-midnight bench --repo "$FIXTURE" --heldout-repo benchmark/retrieval_fixture --samples 5 --index-samples 5
 ```
 
 For one controlled optimization comparison, keep the same binary configuration except for the intended source change, workload seed, selected worker count, output code version, power conditions, and cache condition. Save each output directory; never direct it to `benchmark/results.json`.

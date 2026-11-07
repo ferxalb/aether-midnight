@@ -1,6 +1,7 @@
 # Native macOS kernel validation commands
 
 Companion to [the validation report](kernel-native-macos-validation.md).
+
 ## Reproduction
 
 Run from the repository root; all destinations below are ignored. Build first,
@@ -23,19 +24,16 @@ benchmark/runs/native-kernel/baseline/target/release/examples/native_pair \
   benchmark/runs/native-kernel/bin/baseline \
   benchmark/runs/native-kernel/bin/candidate benchmark/runs/native-kernel/trial-N
 # For both binaries and each of the four frozen memory fixture JSON files:
-python3 scripts/evaluate_memory_retrieval.py --binary BINARY \
-  --fixture FIXTURE --split all --repeats 1 --output PRIVATE_OUTPUT
+target/release/midnight-harness memory-quality --binary BINARY --fixture FIXTURE --split all --repeats 1 --json-output PRIVATE_OUTPUT
 # For each default binary, namespace count 1 and 4:
 BINARY bench-memory --sizes 10000,100000 --namespace-count N
 # For each default binary, size 10000/100000 and namespace count 1/4:
 BINARY bench-retrieval --size SIZE --namespace-count N --samples 100
 # For each default binary, separately and sequentially:
-python3 scripts/performance_campaign.py --mode standard --workers 1,2,4,6,12 \
-  --update-workers 4 --interval-ms 50 --max-duration-s 1800 \
-  --binary BINARY --output-root PRIVATE_OUTPUT
-python3 scripts/benchmark_refresh_file.py --binary BINARY --files 10000 \
+target/release/aether-midnight bench --repo "$FIXTURE" --heldout-repo benchmark/retrieval_fixture --samples 5 --index-samples 5
+target/release/aether-midnight refresh-file --repo "$FIXTURE" --path src/00000.rs  # measure under /usr/bin/time -l
   --samples 30 --output PRIVATE_OUTPUT
-python3 scripts/generate_fixture.py --output benchmark/runs/native-kernel/code-fixture
+target/release/midnight-harness generate-fixture --output benchmark/runs/native-kernel/code-fixture
 BINARY bench --repo benchmark/runs/native-kernel/code-fixture \
   --heldout-repo benchmark/retrieval_fixture --samples 100 --index-samples 5 \
   --stress-cycles 10

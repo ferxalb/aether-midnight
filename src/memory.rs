@@ -932,6 +932,39 @@ fn recall_on_profiled(
     query: &str,
     at: Option<&str>,
     limit: usize,
+    profile: Option<&mut MemoryRecallProfile>,
+    candidate_order: RecallCandidateOrder,
+    broad_terms: BroadTermPolicy,
+) -> Result<Vec<MemorySearchResult>> {
+    // Hold one deferred read transaction so FTS5's per-row docsize statements do not each run the
+    // autocommit halt/commit path. A caller-owned transaction is reused and left untouched; ours is
+    // rolled back (nothing is written) on every exit, including errors, by the guard's drop.
+    let owned = if conn.is_autocommit() {
+        Some(conn.unchecked_transaction()?)
+    } else {
+        None
+    };
+    let result = recall_on_profiled_inner(
+        conn,
+        scope,
+        query,
+        at,
+        limit,
+        profile,
+        candidate_order,
+        broad_terms,
+    );
+    drop(owned);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recall_on_profiled_inner(
+    conn: &Connection,
+    scope: &str,
+    query: &str,
+    at: Option<&str>,
+    limit: usize,
     mut profile: Option<&mut MemoryRecallProfile>,
     candidate_order: RecallCandidateOrder,
     broad_terms: BroadTermPolicy,
@@ -2359,5 +2392,76 @@ mod kernel_tests {
         )?;
         assert!(verify_integrity(&path).is_err());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod read_transaction_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn recall_owns_its_read_transaction_only_when_autocommit_and_cleans_up_on_error() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("tx.sqlite3");
+        remember(
+            &db,
+            "user:tx",
+            "source",
+            "alpha beta gamma",
+            Some("t://1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let conn = open_db(&db).unwrap();
+
+        // Autocommit caller: success and error both leave the connection in autocommit.
+        assert_eq!(
+            recall_on(&conn, "user:tx", "alpha", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(conn.is_autocommit());
+        assert!(recall_on(&conn, "user:tx", "   ", None, 10).is_err());
+        assert!(conn.is_autocommit());
+
+        // Caller-owned transaction: reused, never committed or rolled back by recall.
+        conn.execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            recall_on(&conn, "user:tx", "alpha", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!conn.is_autocommit());
+        assert!(recall_on(&conn, "user:tx", "   ", None, 10).is_err());
+        assert!(!conn.is_autocommit());
+        conn.execute_batch("COMMIT").unwrap();
+
+        // A writer on another connection is not blocked after recall returns.
+        remember(
+            &db,
+            "user:tx",
+            "source",
+            "alpha delta",
+            Some("t://2"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            recall_on(&conn, "user:tx", "alpha", None, 10)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

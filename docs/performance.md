@@ -15,8 +15,7 @@ For a low-impact local smoke run, build the current release binary and write a u
 
 ```sh
 cargo build --release --locked
-python3 scripts/performance_campaign.py --mode smoke --workers 1,2,4,6 \
-  --update-workers 4 --interval-ms 50 --max-duration-s 600
+target/release/aether-midnight bench --repo "$FIXTURE" --heldout-repo benchmark/retrieval_fixture --samples 5 --index-samples 5
 ```
 
 For local reproduction guidance, see the [benchmark guide](macos-benchmark-guide.md).
@@ -27,11 +26,8 @@ The legacy real-repository runners default to five index samples and 25 query sa
 git clone --depth 1 https://github.com/torvalds/linux.git /tmp/aether-repos/linux
 git clone --depth 1 https://github.com/microsoft/vscode.git /tmp/aether-repos/vscode
 RUN_DIR=$(mktemp -d benchmark/runs/linux-real.XXXXXX)
-python3 scripts/run_repository_benchmarks.py --index-samples 5 --query-samples 25 \
-  --repo linux=/tmp/aether-repos/linux --repo vscode=/tmp/aether-repos/vscode > "$RUN_DIR/real-repositories.json"
-python3 scripts/run_incremental_repositories.py --samples 5 \
-  --repo linux=/tmp/aether-repos/linux@init/main.c \
-  --repo vscode=/tmp/aether-repos/vscode@src/vs/code/electron-main/app.ts > "$RUN_DIR/incremental-repositories.json"
+target/release/aether-midnight bench --repo /tmp/aether-repos/linux --samples 5 > "$RUN_DIR/real-repositories.json"
+target/release/aether-midnight refresh-file --repo /tmp/aether-repos/linux --path init/main.c  # run under /usr/bin/time -l for wall, CPU and peak RSS
 ```
 
 These legacy real-repository scripts have narrower instrumentation than the new process/cgroup telemetry campaign. The timestamped campaign is the recommended general workflow.
@@ -149,7 +145,7 @@ The synthetic 1k/10k/100k per-operation profile is recorded separately in [`memo
 
 ## Paired persistent MCP code retrieval
 
-The local `scripts/performance_campaign.py` smoke run used the same generated 10,000-file / 100 MiB code fixture (seed `20261103`), one indexing worker, and five independent sessions for each release binary. Each session measured the first useful context and five subsequent `search_code` tool calls (n=25 warm searches). Both indexes completed catalog and structural indexing; all measured searches hit the expected file. The paired summary and raw warm samples are in [`mcp-code-context-paired-01b98c7-2ab6393-20261104.json`](../benchmark/evidence/mcp-code-context-paired-01b98c7-2ab6393-20261104.json).
+The historical local smoke run (Python tooling since removed) used the same generated 10,000-file / 100 MiB code fixture (seed `20261103`), one indexing worker, and five independent sessions for each release binary. Each session measured the first useful context and five subsequent `search_code` tool calls (n=25 warm searches). Both indexes completed catalog and structural indexing; all measured searches hit the expected file. The paired summary and raw warm samples are in [`mcp-code-context-paired-01b98c7-2ab6393-20261104.json`](../benchmark/evidence/mcp-code-context-paired-01b98c7-2ab6393-20261104.json).
 
 | Persistent MCP code measurement | Baseline | v0.2 | Samples |
 | --- | ---: | ---: | --- |
@@ -163,7 +159,7 @@ The local `scripts/performance_campaign.py` smoke run used the same generated 10
 
 The code retrieval path is essentially unchanged, with no observed regression; the 10k-file one-worker full-index p95 is 3.87 s and is not evidence for the proposed 3-second multiworker target. Percentiles from n=5 have low resolution; the p95/p99 values are the largest observations. This campaign does not include direct-file refresh latency or simultaneous code-index and memory-recall load.
 
-The direct-file path has a separate focused comparison using [`scripts/benchmark_refresh_file.py`](../scripts/benchmark_refresh_file.py) and [`refresh-file-10k-2ab6393-20261104.json`](../benchmark/evidence/refresh-file-10k-2ab6393-20261104.json). It created one Rust target plus 9,999 small background files, indexed the 10,000-file repository, and then ran 30 paired updates in one MCP session. Each timer starts after writing the changed source and covers the index/refresh tool call plus a `search_code` call that verifies the new result is fresh.
+The direct-file path has a separate focused comparison from the since-removed Python runner, recorded in [`refresh-file-10k-2ab6393-20261104.json`](../benchmark/evidence/refresh-file-10k-2ab6393-20261104.json). It created one Rust target plus 9,999 small background files, indexed the 10,000-file repository, and then ran 30 paired updates in one MCP session. Each timer starts after writing the changed source and covers the index/refresh tool call plus a `search_code` call that verifies the new result is fresh.
 
 | 10k-file update-to-visible path | p50 / p95 / p99 (ms) | n | Result status |
 | --- | ---: | ---: | --- |
@@ -174,7 +170,7 @@ Direct refresh reduced p95 by 96.7% (29.9× faster) on this generated fixture, u
 
 ## FTS5 tokenizer comparison and lifecycle stress
 
-The fixed fixture also compared contentless FTS5 trigram and `unicode61 remove_diacritics 2` using Python SQLite 3.53.1; the release build uses bundled SQLite 3.54.1. Build and final index-size values are single observations (n=1, anecdotal); each tokenizer’s four-query retrieval score is also anecdotal (n=4). Warm search used 100 samples per content query (n=400 aggregate), and exact path lookup used n=100.
+The fixed fixture also compared contentless FTS5 trigram and `unicode61 remove_diacritics 2` using a Python SQLite 3.53.1 harness (since removed); the release build uses bundled SQLite 3.54.1. Build and final index-size values are single observations (n=1, anecdotal); each tokenizer’s four-query retrieval score is also anecdotal (n=4). Warm search used 100 samples per content query (n=400 aggregate), and exact path lookup used n=100.
 
 | Tokenizer | Build ms (n=1) | Index bytes / source ratio (n=1) | Warm search p50 / p95 / p99 ms (n=400) | Recall@5 / MRR (n=4) |
 | --- | ---: | ---: | ---: | ---: |
@@ -275,11 +271,10 @@ target/release/aether-midnight bench-memory --sizes 1000,10000,100000
 LIBSQLITE3_FLAGS=SQLITE_ENABLE_STMT_SCANSTATUS cargo build --profile profiling \
   --features sqlite-scanstatus,retrieval-experiments --locked
 target/profiling/aether-midnight bench-memory --sizes 100000 --profile-recall
-python3 scripts/evaluate_memory_retrieval.py --fixture benchmark/memory_quality_single_term_v1.json \
-  --split dev --repeats 3 --output /tmp/memory-retrieval-v03-dev.json
+target/release/midnight-harness memory-quality --fixture benchmark/memory_quality_single_term_v1.json --split dev --repeats 3 --json-output /tmp/memory-retrieval-v03-dev.json
 ```
 
-The WAL probe uses Python's `sqlite3` module and requires its linked SQLite library to be at least 3.51.0. Earlier versions can interpret the unknown `NOOP` checkpoint mode as `PASSIVE`; the evaluator rejects them before collecting measurements.
+The native `midnight-harness memory-quality` command no longer samples WAL progress; WAL and database sizes come from `diagnose` and `bench-memory`.
 
 For the WAL experiment, build with `--features retrieval-experiments`, then run the same evaluator with `AETHER_WAL_AUTOCHECKPOINT_PAGES=256`, `1000`, and `4096`. Each run creates its own disposable database. The existing Windows/macOS campaigns, full 200-query evaluation, large-payload stress, multi-process contention, long-reader checkpoint starvation, and separate internal commit timing remain unmeasured.
 
@@ -314,14 +309,10 @@ The compact, host-redacted result summary is [`memory-retrieval-v031-20261105.js
 
 ```sh
 cargo build --release --locked
-python3 scripts/evaluate_memory_retrieval.py --binary target/release/aether-midnight \
-  --fixture benchmark/memory_quality_v2.json --split all --repeats 3
-python3 scripts/evaluate_memory_retrieval.py --binary target/release/aether-midnight \
-  --fixture benchmark/memory_quality_single_term_v1.json --split all --repeats 3
-python3 scripts/evaluate_memory_retrieval.py --binary target/release/aether-midnight \
-  --fixture benchmark/memory_retrieval_adversarial_v1.json --split all --repeats 1 \
-  --insertion-order forward
+target/release/midnight-harness memory-quality --binary target/release/aether-midnight --fixture benchmark/memory_quality_v2.json --split all --repeats 3
+target/release/midnight-harness memory-quality --binary target/release/aether-midnight --fixture benchmark/memory_quality_single_term_v1.json --split all --repeats 3
+target/release/midnight-harness memory-quality --binary target/release/aether-midnight --fixture benchmark/memory_retrieval_adversarial_v1.json --split all --repeats 1 --insertion-order forward
 target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespace-count 4
 target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespace-count 1
-python3 scripts/benchmark_refresh_file.py --files 10000 --samples 30
+target/release/aether-midnight refresh-file --repo "$FIXTURE" --path src/00000.rs  # measure under /usr/bin/time -l
 ```

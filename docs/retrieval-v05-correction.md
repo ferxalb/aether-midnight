@@ -34,7 +34,7 @@ The paired matrix uses 200 samples/path except 400 for 100k/four-namespace tied 
 For ubiquitous single terms, p50/p95/p99 milliseconds. “Before path” forces descending, exactly as `36eb46c` did for these queries. “Corrected” is production; the final column forces the original SQL as a same-run control. Process RSS is shared by all three strategies and cannot be attributed to an individual path.
 
 | Records / namespaces / corpus | Before path | Corrected | Original control p99 | Mean CPU ms before → corrected | Shared peak RSS MiB |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 10,000 / 1 / tied | 5.48/5.79/7.00 | 6.93/7.38/9.81 | 7.72 | 5.48 → 6.95 | 16.32 |
 | 10,000 / 1 / zipf | 5.71/6.02/6.41 | 5.34/5.64/6.18 | 5.95 | 5.72 → 5.35 | 17.11 |
 | 10,000 / 4 / tied | 2.35/2.49/2.63 | 2.61/2.75/2.92 | 3.00 | 2.36 → 2.61 | 15.84 |
@@ -49,7 +49,7 @@ No universal p99 improvement is established. The four-namespace tied maximum sti
 The other single-term Zipf classes (same interleaved runs), p50/p95/p99 ms:
 
 | Records / namespaces / class | Descending | Corrected | CPU ms before → corrected |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 10,000 / 1 / broad_mid_single_term | 1.56/1.64/1.80 | 1.46/1.53/1.58 | 1.56 → 1.46 |
 | 10,000 / 1 / selective_single_term | 0.24/0.28/0.39 | 0.23/0.25/0.33 | 0.25 → 0.23 |
 | 10,000 / 4 / broad_mid_single_term | 1.00/1.08/1.16 | 0.91/0.99/1.10 | 1.01 → 0.92 |
@@ -64,7 +64,7 @@ The other single-term Zipf classes (same interleaved runs), p50/p95/p99 ms:
 Actual `36eb46c` and corrected binaries, sequential same-host runs. `bench-memory`: 100 persistent recall samples, 30 persistent writes per size/layout. CPU covers the whole workload, including setup and writes; peak RSS is cumulative across sizes. Database sizes are after measured operations. Values are p50/p95/p99 milliseconds.
 
 | Records / namespaces | Recall before → corrected | Remember before → corrected | Whole-workload CPU seconds | Peak RSS MiB | DB bytes both |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 10,000 / 1 | 5.49/5.73/6.25 → 6.51/6.85/7.50 | 0.10/0.24/0.29 → 0.10/0.23/0.27 | 1.72 → 1.89 | 18.04 → 16.64 | 2,711,552 |
 | 100,000 / 1 | 51.69/54.98/58.97 → 65.15/67.51/67.96 | 0.10/0.20/0.26 → 0.10/0.19/0.27 | 14.70 → 16.97 | 29.36 → 28.54 | 26,001,408 |
 | 10,000 / 4 | 2.45/2.78/2.96 → 2.47/2.57/2.85 | 0.11/0.28/0.35 → 0.09/0.25/0.27 | 1.37 → 1.22 | 19.50 → 16.67 | 2,695,168 |
@@ -73,7 +73,7 @@ Actual `36eb46c` and corrected binaries, sequential same-host runs. `bench-memor
 The original eight-class `bench-retrieval`, 100k records, 40 samples/strategy/class. All classes are listed, including slower ones. Multi-term SQL did not change; differences there are observations rather than evidence of a new algorithmic effect.
 
 | Namespaces / class | Before p50/p95/p99 ms | Corrected p50/p95/p99 ms | CPU ms before → corrected |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 / broad_ubiquitous_single_term | 55.08/56.98/57.63 | 50.55/51.95/52.73 | 54.72 → 50.59 |
 | 1 / broad_mid_single_term | 12.76/13.80/13.89 | 11.93/12.65/13.05 | 12.77 → 11.99 |
 | 1 / selective_single_term | 0.38/0.56/0.58 | 0.34/0.38/0.49 | 0.40 → 0.35 |
@@ -100,7 +100,7 @@ All **83 frozen queries** retain every non-latency quality metric, per-query ran
 Two persistent MCP processes, one per binary, share each seeded database. Recall order alternates per sample; namespace rotates; all decoded results are asserted identical. Each corpus/layout uses 150 paired samples. Seeding uses a separate process, excluded from child CPU/RSS measurements. Child CPU includes startup and three warm calls; RSS is sampled before shutdown. Values are p50/p95/p99 ms.
 
 | Records / namespaces / corpus | Before | Corrected | Child CPU seconds | RSS MiB | DB bytes |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 10,000 / 1 / tied | 5.22/5.43/6.03 | 6.79/6.98/7.46 | 0.86 → 1.10 | 12.57 → 12.48 | 2,424,832 |
 | 10,000 / 1 / zipf | 5.49/5.67/6.03 | 5.14/5.44/5.63 | 0.90 → 0.84 | 12.59 → 12.60 | 4,235,264 |
 | 10,000 / 4 / tied | 2.34/2.47/2.52 | 2.58/2.72/4.08 | 0.42 → 0.46 | 12.78 → 12.77 | 2,433,024 |
@@ -115,7 +115,7 @@ Memory lifecycle: 100 cycles/600 calls per binary; evidence, supersession and ab
 Code-refresh stability: 100 files/2,000 initial symbols, 30 refresh → grounded search → reconciliation cycles per binary. Every search found the changed file and every reconciliation completed.
 
 | Operation | Before p50/p95/p99 ms | Corrected p50/p95/p99 ms |
-|---|---|---|
+| --- | --- | --- |
 | refresh_ms | 2.36/4.36/5.24 | 2.34/2.93/5.53 |
 | search_ms | 2.20/2.50/2.94 | 2.18/2.44/2.88 |
 | incremental_reconcile_ms | 4.72/5.76/6.45 | 4.73/5.89/6.11 |

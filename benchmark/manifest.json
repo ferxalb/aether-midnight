@@ -3,7 +3,7 @@
     "seed": 20261103,
     "eligible_files": 10000,
     "eligible_bytes": 104857600,
-    "generator": "scripts/generate_fixture.py"
+    "generator": "midnight-harness generate-fixture"
   },
   "queries": [
     {

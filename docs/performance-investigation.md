@@ -33,7 +33,7 @@ Machine model, operating-system revision, storage, power, and host-wide memory d
 | Average CPU use p50 / p95 | 1.92 / 1.92 cores | 2.08 / 2.12 cores | Process CPU seconds divided by measured wall time |
 | Current RSS after warm MCP calls | — | 18.7 MB p50 / 20.9 MB p95 | Sampled within the persistent MCP child; its 2-second idle interval added no observed CPU time |
 
-Decimal MB are used in this table. The RSS high-water and physical footprint are separate operating-system accounting values. The Python collector and filesystem cache are outside the direct-child scope. No allocator live-heap profiler was attached.
+Decimal MB are used in this table. The RSS high-water and physical footprint are separate operating-system accounting values. The measuring client and filesystem cache are outside the direct-child scope. No allocator live-heap profiler was attached.
 
 ### Confirmed memory-flow properties
 
@@ -55,7 +55,7 @@ Decimal MB are used in this table. The RSS high-water and physical footprint are
 | Duplicated text buffers | Source bytes become an owned `String` without a conversion copy. The writer still clones text to assemble FTS payloads; the timer is about 9 ms for this fixture. Removing it is a small possible saving, not a leading measured bottleneck, and was left unchanged. |
 | SQLite cache, WAL, or temporary files | WAL grew during indexing and is visible in watched sidecar samples. No runaway sidecar growth was observed; the final summed database size was stable. SQLite cache bytes are not separately exposed by this build. |
 | OS file cache | The source tree and temporary database are on local filesystem details withheld. OS caches were not flushed, so later samples can benefit from filesystem cache. Host-wide `vm_stat`, swap, and memory-pressure snapshots are recorded, but their changes cannot be attributed solely to Midnight. |
-| Benchmark harness / subprocess overhead | The legacy runners included Linux-only assumptions and fixed high defaults. The new campaign excludes the Python wrapper from process memory and CPU, separates fresh CLI startup from persistent MCP query latency, and records child scope explicitly. |
+| Benchmark harness / subprocess overhead | The legacy runners included Linux-only assumptions and fixed high defaults. Current measurements come from `midnight-harness`, which excludes the client from process memory and CPU, separates fresh CLI startup from persistent MCP query latency, and records child scope explicitly. |
 | Unexpected parallelism | Worker count is set per run. Six workers produced the best measured throughput plateau on this Mac; 12 workers used more CPU for no useful throughput increase. |
 | Measurement defect | Historical Linux `getrusage` peak values were below later sampled RSS and are therefore invalid as peak RSS. The new collector reports sampled RSS, lifetime counters, physical footprint, and cgroup data as distinct fields. |
 
@@ -63,7 +63,7 @@ These findings do not establish behavior on Linux Kernel or VS Code today. The r
 
 ## Sampling method and limitations
 
-`scripts/measure_process.py` samples one direct child every 50 ms. On macOS it uses `proc_pidinfo(PROC_PIDTASKINFO)` for current resident size, CPU/fault/thread/context-switch counters and `proc_pid_rusage(RUSAGE_INFO_V4)` for physical footprint, lifetime maximum footprint, page-ins, and I/O counters. It also captures host-wide `vm_stat`, swap usage, `memory_pressure`, power, and thermal snapshots before and after each measured child. `/usr/bin/time -l` or Instruments can be used for independent confirmation; `vmmap` is intentionally not spawned repeatedly in the timed path.
+The historical (now removed) Python sampler polled one direct child every 50 ms; current tooling reads `wait4` rusage (wall, user+system CPU, peak RSS) for Midnight itself. On macOS it uses `proc_pidinfo(PROC_PIDTASKINFO)` for current resident size, CPU/fault/thread/context-switch counters and `proc_pid_rusage(RUSAGE_INFO_V4)` for physical footprint, lifetime maximum footprint, page-ins, and I/O counters. It also captures host-wide `vm_stat`, swap usage, `memory_pressure`, power, and thermal snapshots before and after each measured child. `/usr/bin/time -l` or Instruments can be used for independent confirmation; `vmmap` is intentionally not spawned repeatedly in the timed path.
 
 On Linux it reads `/proc/<pid>/status`, `/proc/<pid>/stat`, `/proc/<pid>/io`, and periodically `/proc/<pid>/smaps_rollup` for PSS, private, anonymous, file-backed, and swap values. When exposed, it also samples cgroup v2 memory, CPU, I/O, pressure, and event counters. cgroup values cover the sandbox/container and may include the wrapper or other processes, so they are not represented as per-process values.
 

@@ -146,10 +146,10 @@ To run a bounded local smoke test:
 
 ```sh
 cargo build --release --locked
-python3 scripts/performance_campaign.py --mode smoke
+target/release/aether-midnight bench --repo "$FIXTURE" --heldout-repo benchmark/retrieval_fixture --samples 5 --index-samples 5
 ```
 
-The script writes timestamped raw output to `benchmark/runs/`, which Git ignores. Committed benchmark history in `benchmark/` is not modified.
+Write raw output under `benchmark/runs/`, which Git ignores. Committed benchmark history in `benchmark/` is not modified.
 
 ## Platform support
 
@@ -198,4 +198,4 @@ Contributor guidelines are in [AGENTS.md](AGENTS.md).
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE). Third-party dependency licenses are listed in [THIRD_PARTY_LICENSES.json](THIRD_PARTY_LICENSES.json), which you can regenerate with `python3 scripts/license_inventory.py`.
+Licensed under the [Apache License 2.0](LICENSE). Third-party dependency licenses are listed in [THIRD_PARTY_LICENSES.json](THIRD_PARTY_LICENSES.json), which you can regenerate with `target/release/midnight-harness license-inventory --force`.

@@ -102,8 +102,7 @@ BINARY bench-memory --sizes 10000,100000 --namespace-count 1
 BINARY bench-memory --sizes 10000,100000 --namespace-count 4
 BINARY bench-retrieval --size 100000 --namespace-count 1 --samples 50
 BINARY bench-retrieval --size 100000 --namespace-count 4 --samples 50
-python3 scripts/evaluate_memory_retrieval.py --binary BINARY \
-  --fixture benchmark/memory_quality_v1.json --split all --repeats 3
+target/release/midnight-harness memory-quality --binary BINARY --fixture benchmark/memory_quality_v1.json --split all --repeats 3
 ```
 
 Repeat the evaluator for `memory_quality_v2`, `memory_quality_single_term_v1`, and `memory_retrieval_adversarial_v1`. Compare all non-latency quality metrics, per-query ranks and complete top-10 lists, not just aggregate recall. Do not publish raw outputs with host or path identifiers.
