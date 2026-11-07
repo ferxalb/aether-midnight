@@ -380,3 +380,93 @@ fn two_server_processes_share_one_database_without_losing_acknowledged_writes() 
     let rows: Vec<Value> = serde_json::from_str(&text).unwrap();
     assert_eq!(rows.len(), 100);
 }
+
+#[test]
+fn http_scoped_replays_survive_concurrent_reads_maintenance_and_restart() {
+    let temp = TempDir::new().unwrap();
+    let db = temp.path().join("m.sqlite3");
+    let token_a = mint(&db, "a", &["--memory-scope", "project:a"]);
+    let token_b = mint(&db, "b", &["--memory-scope", "project:b"]);
+    let mut server = start(&db, &[]);
+    let payload = |scope: &str| {
+        json!({"operation_key":"shared-key","scope":scope,"kind":"source",
+            "content":"persistent scoped replay marker","source_uri":"test://native-validation"})
+    };
+    let (err, original) = call(&server, &token_a, "remember", payload("project:a"));
+    assert!(!err, "{original}");
+    let original: Value = serde_json::from_str(&original).unwrap();
+    let (err, other) = call(&server, &token_b, "remember", payload("project:b"));
+    assert!(!err, "{other}");
+    let other: Value = serde_json::from_str(&other).unwrap();
+    assert_ne!(original["id"], other["id"]);
+    let mut conflict = payload("project:a");
+    conflict["content"] = json!("conflicting payload");
+    let (err, text) = call(&server, &token_a, "remember", conflict);
+    assert!(err && text.contains("different payload"), "{text}");
+
+    let barrier = std::sync::Barrier::new(3);
+    std::thread::scope(|threads| {
+        threads.spawn(|| {
+            barrier.wait();
+            for index in 0..30 {
+                let (err, text) = call(&server, &token_a, "remember", payload("project:a"));
+                assert!(!err, "{text}");
+                assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), original);
+                let (err, text) = call(
+                    &server,
+                    &token_a,
+                    "remember",
+                    json!({"scope":"project:a","kind":"source",
+                        "operation_key":format!("writer-{index}"),
+                        "content":format!("concurrent mutation {index}")}),
+                );
+                assert!(!err, "{text}");
+            }
+        });
+        threads.spawn(|| {
+            barrier.wait();
+            for _ in 0..30 {
+                let (err, text) = call(
+                    &server,
+                    &token_a,
+                    "recall",
+                    json!({"scope":"project:a","query":"persistent scoped replay marker"}),
+                );
+                assert!(!err, "{text}");
+                let result: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(result[0]["memory"]["id"], original["id"]);
+                assert!(
+                    result
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|row| { row["memory"]["scope"] == "project:a" })
+                );
+            }
+        });
+        threads.spawn(|| {
+            barrier.wait();
+            for _ in 0..30 {
+                aether_midnight::memory::maintain(&db, 10).unwrap();
+            }
+        });
+    });
+    assert_eq!(
+        unsafe { libc::kill(server.child.id() as i32, libc::SIGINT) },
+        0
+    );
+    assert!(server.child.wait().unwrap().success());
+    drop(server);
+    let restarted = start(&db, &[]);
+    let (err, text) = call(&restarted, &token_a, "remember", payload("project:a"));
+    assert!(!err, "{text}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), original);
+    let (err, text) = call(
+        &restarted,
+        &token_a,
+        "list_memories",
+        json!({"scope":"project:a","limit":500}),
+    );
+    assert!(!err, "{text}");
+    assert_eq!(serde_json::from_str::<Vec<Value>>(&text).unwrap().len(), 31);
+}
