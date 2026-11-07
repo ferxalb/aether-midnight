@@ -41,6 +41,14 @@ Midnight stores explicit memories and index metadata locally. Changes to storage
 
 Treat benchmark, profiling, diagnostic, and campaign output as private by default. Before tracking or sharing it, remove personal or third-party host and account identifiers, machine and runtime fingerprints, local absolute paths and usernames, environment-variable values, credentials, provider project or run identifiers, and billing, cost, or reservation records. Keep unredacted raw runs in ignored local storage. Public reports may include workload definitions, aggregate measurements, sample counts, and non-identifying platform categories only. Review the staged diff and the resulting JSON or Markdown for these fields before committing; do not copy raw output into issues, pull requests, documentation, or chat reports.
 
+## Rules for HISTORY TRACKER
+
+- Each entry is a heading: `## YYYY-MM-DD (n) — Short title`, followed by a body of one or more short paragraphs or bullets.
+- `(n)` is the modification's ordinal within its date, starting at `(1)` for the first change of that day. A new entry on an existing date takes the next number.
+- Entries are ordered newest first: dates descend, and within a date `(n)` descends from top to bottom.
+- State what changed, the measured effect or the decision, and where the evidence or docs live. Keep claims consistent with `docs/performance.md`; do not paste raw benchmark output or host/account identifiers.
+- Never renumber or rewrite past entries except to fix a broken reference; corrections go in a new entry.
+
 ## The Projects Future
 
 The Projects are evolving very quickly. Don't limit yourself—if there are major changes to the core, don't restrict it, but stay on the same track; let it happen and allow it, and edit these rules, which may change as the project progresses, and edit your rules whenever necessary.
