@@ -316,3 +316,22 @@ target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespac
 target/release/aether-midnight bench-memory --sizes 1000,10000,100000 --namespace-count 1
 target/release/aether-midnight refresh-file --repo "$FIXTURE" --path src/00000.rs  # measure under /usr/bin/time -l
 ```
+
+## Exact KNN and embedding throughput (v0.1 Phase 3, 2026-11-07)
+
+Measured with the compiled release CLI through its real entry point (`target/release/aether-midnight memory search … --mode semantic`), one process and one request per measurement, `/usr/bin/time -l` for wall, CPU (user + sys) and peak RSS. Platform category: macOS x86_64, 6-core/12-thread desktop CPU, 24 GiB RAM, local SSD. Seeding went through Midnight (MCP `remember_batch`, then `embed`); the databases were reused for every run. Ordering was identical across all 15 runs per size, and the top-10 matched an independent brute-force oracle (ties of mathematically equal scores resolve by ascending id, as specified).
+
+**Scan cost, isolated from model load.** To keep the 4 s local-model load out of the figure, vectors were embedded through the OpenRouter code path against a loopback mock that returns deterministic 384-d bag-of-words vectors (scan cost does not depend on vector values). The query is one loopback request. Each size is a separate memory namespace (15 runs each; milliseconds):
+
+| Vectors (384 d, f32) | Wall median (min–max) | CPU median | Peak RSS median |
+| ---: | ---: | ---: | ---: |
+| 100 | 230 (230–240) | 220 | 15.9 MiB |
+| 10,000 | 250 (250–260) | 240 | 16.2 MiB |
+| 100,000 | 470 (460–470) | 450 | 19.5 MiB |
+| 100,000, lexical mode (no embedding stage) | 110 | – | 14.5 MiB |
+
+The fixed ≈ 220 ms is process start, the remote client (rustls platform-verifier initialisation) and the loopback request; it is the same for every size. The scan adds ≈ 20 ms at 10,000 vectors and ≈ 240 ms at 100,000 (≈ 2.4 µs per vector including the SQLite read, BLOB copy and dot product), linear as expected for exact search. Memory stays flat because vectors stream from SQLite and only a bounded top-k is kept. Clock resolution is 10 ms, so the 10,000 figure is ±10 ms.
+
+**Local model, 10,000 vectors (real `multilingual-e5-small`).** `embed --namespace` over 10,000 short synthetic memories took 117 s wall, 1,245 s CPU (12 threads) and 1.56 GiB peak RSS (≈ 85 texts/s; 100 memories: 5.0 s including model load). `memory search --mode semantic` took a median of 3.98 s wall for both 100 and 10,000 stored vectors (9 runs each, 1.52 GiB RSS): model load dominates, and the 10,000-vector scan is below the 10 ms clock resolution. A fresh process per query pays that load; a long-lived caller should prefer the persistent MCP path once semantic modes are exposed there.
+
+Not measured: ANN, concurrent queries, Apple silicon, Linux, real cloud-provider latency (network and provider dependent), cold-cache disk. Lexical quality baselines are unchanged (see `docs/v0.1-status.md`).

@@ -2,12 +2,14 @@
 
 pub mod auth;
 pub mod benchmark;
+pub mod cloud;
 pub mod code;
 pub mod db;
 pub mod embed;
 pub mod mcp;
 pub mod mcp_http;
 pub mod memory;
+pub mod runtime;
 mod text_index;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -18,14 +18,14 @@ It needs no server, account, API key, model, or network connection.
 
 ### What it does not do
 
-- **Semantic search is opt-in.** Default search is lexical (whole tokens, no arbitrary substrings). `--mode semantic|hybrid` needs a locally installed model and stored embeddings; see [docs/embeddings.md](docs/embeddings.md).
+- **Semantic search is opt-in.** Default search is lexical (whole tokens, no arbitrary substrings). `--mode semantic|hybrid` needs stored embeddings from the pinned local model (`runtime install`, `models pull`) or from an explicitly selected cloud provider (`--provider openrouter|rainy`, which sends the embedded text to that provider); see [docs/embeddings.md](docs/embeddings.md).
 - **No automatic capture.** Midnight never records conversations. It stores only what you tell it to store.
 - **No file watching.** After you change files, run `index` again (or `refresh-file` for one file).
-- **No UI, cloud sync, or LLM.**
+- **No UI, cloud sync, or LLM generation.** Cloud embeddings are the only optional network use besides the two explicit downloads (`runtime install`, `models pull`).
 
 ## Quick start
 
-You need a Rust toolchain with Cargo that supports edition 2024 (Rust 1.85 or later). SQLite is bundled, so you install nothing else.
+You need a Rust toolchain with Cargo that supports edition 2024 (Rust 1.98 or later, the minimum of the `rainy-sdk` dependency) and a C compiler (for `aws-lc-sys`). SQLite is bundled, so you install nothing else.
 
 ```sh
 git clone https://github.com/ferxalbs/aether-midnight.git

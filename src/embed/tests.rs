@@ -418,7 +418,12 @@ fn model_revision_change_replaces_vectors_and_old_vectors_are_not_used() {
     )
     .unwrap();
     assert!(r.info.degraded);
-    assert!(r.info.notice.as_deref().unwrap().contains("do not match"));
+    // The query must not be embedded against a different space; the notice names both spaces.
+    let notice = r.info.notice.as_deref().unwrap();
+    assert!(
+        notice.contains("different embedding space") && notice.contains("test-hash@r1"),
+        "{notice}"
+    );
     let report =
         embed_memories(&db, "project:a", &mut HashEmbedder::new("r2"), &no_cancel()).unwrap();
     assert_eq!((report.replaced_other_model, report.embedded), (1, 1));

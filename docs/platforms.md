@@ -8,6 +8,9 @@
 | Node.js client | Node.js with built-in child-process and readline modules | pending (not run) |
 | Bun client | Bun using Node-compatible built-ins | pending (not run) |
 | Go client | Go standard library | pending (not run) |
+| ONNX Runtime 1.23.2 (local embeddings) | Pinned official Microsoft archive, installed by `runtime install` with SHA-256 verification; dynamic loading | **macOS x86_64: installed, loaded and used for real inference from a clean environment.** No pin exists for other platforms; none is claimed. |
+| Local model `multilingual-e5-small` @ `614241f6…` | Pinned revision, SHA-256 verified by `models pull`/`verify` and at load | macOS x86_64: pulled, verified, tamper-tested, used for hybrid search. |
+| Cloud embeddings (`rainy-sdk` 0.6.51; OpenRouter, Rainy) | Rust ≥ 1.98, C compiler for `aws-lc-sys`; HTTPS | Built and tested on macOS x86_64 against a loopback mock only. No live provider call was made in the release run unless a credential was configured (see `v0.1-status.md`). |
 | MCP wire protocol | stdio JSON-RPC subset pinned to 2025-11-25 | Linux historical round trips plus native macOS process-start and persistent-session measurements in `benchmark/runs/`. |
 
 Published measurements are limited to their recorded test environments and do not establish behavior on every platform. Host and hardware identifiers are intentionally omitted. No sanitizers or allocator profiler were run.
@@ -15,7 +18,7 @@ Published measurements are limited to their recorded test environments and do no
 ## Pending verification
 
 - host model withheld native desktop host with identifiers withheld: smoke and standard fixture campaigns run; see [comparison](performance-comparison.md)
-- Apple Silicon macOS: pending (not run)
+- Apple Silicon macOS: pending (not run); an arm64 ONNX Runtime exists upstream but Midnight (runtime install, model, cloud) has not been run on it
 - Go: pending (not run)
 - Node.js: pending (not run)
 - Bun: pending (not run)

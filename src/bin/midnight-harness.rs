@@ -241,6 +241,59 @@ fn generate_fixture(output: &Path) -> Result<Value> {
 }
 
 // ---------- license inventory ----------
+/// Components that are not Cargo packages: the runtime and model that Midnight fetches on explicit
+/// user command (`runtime install`, `models pull`). Midnight's own release artifacts redistribute
+/// none of them; the pins below are the values the binary verifies at install/load time.
+fn non_crate_components() -> Value {
+    json!([
+        {
+            "kind": "native-runtime",
+            "name": "ONNX Runtime",
+            "version": "1.23.2",
+            "platform": "macos-x86_64",
+            "license": "MIT",
+            "license_text": "LICENSE in the release archive (copied beside the library by `runtime install`)",
+            "third_party_notices": "ThirdPartyNotices.txt in the release archive (copied beside the library); it lists the runtime's own bundled third-party licences",
+            "source": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz",
+            "archive_sha256": "d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6",
+            "library_sha256": "8c9c78de65ea3786f987c0d980e9c1b13a3a5fbc6b3e2965ba05b450e6e4c054",
+            "obtained_by": "`aether-midnight runtime install` (explicit, SHA-256 verified); not bundled in Midnight binaries",
+            "linked": "dynamically at run time (ort-load-dynamic), only for local embeddings"
+        },
+        {
+            "kind": "model-weights",
+            "name": "intfloat/multilingual-e5-small",
+            "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+            "license": "MIT",
+            "license_evidence": "Hugging Face model card metadata `license: mit` at the pinned revision",
+            "source": "https://huggingface.co/intfloat/multilingual-e5-small",
+            "files": [
+                {"path":"onnx/model.onnx","bytes":470268510,"sha256":"ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"},
+                {"path":"tokenizer.json","bytes":17082730,"sha256":"0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"},
+                {"path":"config.json","bytes":655,"sha256":"69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959"},
+                {"path":"special_tokens_map.json","bytes":167,"sha256":"d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7"},
+                {"path":"tokenizer_config.json","bytes":443,"sha256":"a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b"}
+            ],
+            "obtained_by": "`aether-midnight models pull` (explicit, pinned revision, SHA-256 verified); not bundled",
+            "citation": "Wang et al., Multilingual E5 Text Embeddings: A Technical Report, arXiv:2402.05672"
+        },
+        {
+            "kind": "remote-service",
+            "name": "OpenRouter embeddings API",
+            "license": "service terms (no code or weights are redistributed)",
+            "source": "https://openrouter.ai/api/v1/embeddings",
+            "note": "used only when `--provider openrouter` is selected; text is sent to the provider under the user's own account"
+        },
+        {
+            "kind": "remote-service",
+            "name": "Rainy-compatible embeddings API",
+            "license": "service terms (no code or weights are redistributed)",
+            "source": "endpoint chosen by the user (`--endpoint`) or the rainy-sdk default",
+            "note": "used only when `--provider rainy` is selected; transport is the Apache-2.0 `rainy-sdk` crate listed under packages"
+        }
+    ])
+}
+
 fn license_inventory(output: &Path, force: bool) -> Result<Value> {
     if output.exists() && !force {
         bail!(
@@ -285,8 +338,9 @@ fn license_inventory(output: &Path, force: bool) -> Result<Value> {
         (a["name"].as_str(), a["version"].as_str())
             .cmp(&(b["name"].as_str(), b["version"].as_str()))
     });
-    let doc = json!({"schema_version":1,"generated_from":"Cargo.lock via cargo metadata --locked",
-        "package_count":entries.len(),"packages":entries});
+    let doc = json!({"schema_version":2,"generated_from":"Cargo.lock via cargo metadata --locked",
+        "package_count":entries.len(),"packages":entries,
+        "non_crate_components":non_crate_components()});
     std::fs::write(output, serde_json::to_string_pretty(&doc)? + "\n")?;
     Ok(json!({"wrote_packages":entries.len(),"output":output}))
 }

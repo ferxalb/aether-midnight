@@ -1,26 +1,49 @@
-# Local embeddings and hybrid retrieval (v0.1 Phase 2)
+# Embeddings and hybrid retrieval (v0.1 Phases 2–3)
 
-Midnight can add semantic retrieval on top of its existing FTS5/BM25 search. It is **opt-in, local,
-and never required**: every lexical command behaves exactly as before and never loads the model.
+Midnight can add semantic retrieval on top of its existing FTS5/BM25 search. It is **opt-in and
+never required**: every lexical command behaves exactly as before and never loads a model, the ONNX
+Runtime, or a network client. Embeddings come from the local model (default) or, only when you
+select it explicitly, a cloud provider (see [Cloud providers](#cloud-providers)).
 
 ## Model
 
 | | |
 | --- | --- |
 | Name | `multilingual-e5-small` (`intfloat/multilingual-e5-small`, MIT) |
+| Pinned revision | `614241f622f53c4eeff9890bdc4f31cfecc418b3` (Hugging Face commit; never `main`) |
 | Dimensions | 384, L2-normalised, cosine = dot product |
 | Input | `query:` / `passage:` prefixes applied automatically; tokenizer truncates at 512 tokens |
 | Runtime | FastEmbed-rs `=5.13.0` over ONNX Runtime, CPU provider only |
 
 Files live in `AETHER_MIDNIGHT_MODELS_DIR` (default `<OS app-data>/aether-midnight/models`) in the
-Hugging Face cache layout. Inference reads those files only; there is no network access outside
-`models pull`.
+Hugging Face cache layout. Inference reads those files only; the only network access is the explicit
+`models pull` and `runtime install`.
+
+### Integrity
+
+`models pull` downloads exactly the pinned revision and then checks all five files (size and SHA-256)
+against pins compiled into the binary (`MODEL_FILE_PINS` in `src/embed.rs`; the two large files'
+hashes are the Hugging Face LFS object ids). Anything else is rejected:
+
+* `models list` accepts only the pinned snapshot, by exact byte size; other cached revisions are
+  ignored and reported as `ignored_revisions`.
+* `models verify` hashes every file offline. `doctor` runs the same check.
+* Loading the model hashes each file in memory before it reaches the tokenizer or ONNX Runtime, so a
+  file modified after `pull` cannot be used; semantic commands then degrade with the reason.
+
+Bumping the pin is a code change that must update the table, `docs/v0.1-status.md` and the licence
+inventory. Vectors stored under another revision string are never mixed with the new one (see
+[Embedding-space isolation](#embedding-space-isolation)).
 
 ## Commands
 
 ```sh
-aether-midnight models list                      # installed? revision?
-aether-midnight models pull multilingual-e5-small # the ONLY command that uses the network (~470 MB)
+aether-midnight runtime install                  # explicit, SHA-256-verified ONNX Runtime (macOS x86_64)
+aether-midnight models pull multilingual-e5-small # explicit, pinned + verified (~470 MB)
+aether-midnight models list                      # installed? pinned revision? providers?
+aether-midnight models verify                    # hash every model file against its pin (offline)
+aether-midnight runtime status                   # path, version, compatibility, checksum; exit 1 if unusable
+aether-midnight doctor                           # database + optional runtime/model/cloud diagnostics
 
 aether-midnight memory add --namespace project:app "El servidor usa caché de disco"
 aether-midnight embed --namespace project:app     # incremental; safe to interrupt (exit 130)
@@ -83,13 +106,124 @@ owners and for any other model/revision, and skips unchanged items by hash.
 
 ## ONNX Runtime
 
-`ort` has no prebuilt binaries for every target (none for macOS x86_64), so the runtime is loaded
-dynamically. Set `ORT_DYLIB_PATH` or put `libonnxruntime.{dylib,so}` / `onnxruntime.dll` in
-`<models dir>/onnxruntime/`, `/opt/homebrew/lib`, `/usr/local/lib` or `/usr/lib`. FastEmbed 5.13 /
-`ort` rc.11 needs ONNX Runtime ≥ 1.22 (1.23.2 verified). A missing library is an error, not a crash,
-and lexical commands never look for it.
+`ort` ships no prebuilt library for macOS x86_64 and Microsoft publishes no ONNX Runtime ≥ 1.24 for
+that target, so Midnight pins **ONNX Runtime 1.23.2** (FastEmbed 5.13 / `ort` rc.11 need ≥ 1.22) and
+loads it dynamically. Midnight binaries do **not** embed or redistribute it.
+
+`aether-midnight runtime install` is the only way Midnight obtains it, and it is explicit:
+
+1. Refuses platforms without a pin (currently only `macos-x86_64` has one).
+2. Downloads the official Microsoft archive named in `src/runtime.rs` over HTTPS, capped at the
+   pinned size (11,676,322 bytes).
+3. Compares the archive SHA-256 with the pin (`d10359e1…85a6`, equal to the digest GitHub publishes
+   for the release asset) before decompressing anything.
+4. Extracts only three named members (the library, `LICENSE`, `ThirdPartyNotices.txt`) and checks
+   the library's own SHA-256 (`8c9c78de…c054`).
+5. Writes them to `<models dir>/onnxruntime/` with a `manifest.json`. A failed install leaves
+   nothing behind; re-running with a valid install is a no-op.
+
+Library lookup order: `ORT_DYLIB_PATH`, the managed install, then `/opt/homebrew/lib`,
+`/usr/local/lib`, `/usr/lib`. A managed library whose hash differs from the pin is rejected. A
+library from `ORT_DYLIB_PATH` or a system path is accepted if it loads, exports `OrtGetApiBase` and
+reports version ≥ 1.22, but it is *not* checksum-verified by Midnight and is reported that way.
+
+`runtime status` and `doctor` load the candidate with `dlopen` and report, with remedies: not found,
+unloadable (for example an arm64 library on an x86_64 host — the loader's message is included),
+not an ONNX Runtime, too old, or tampered. Embedding commands run the same check first, so a bad
+runtime is an actionable error (or a degraded notice for search), never a crash. Lexical commands
+never look for the library.
+
+Other platforms: Linux and Apple silicon builds of the same release exist upstream, but Midnight has
+not been run there, so `runtime install` does not offer them and no support is claimed.
+
+## Cloud providers
+
+Local embeddings stay the default. Selecting `--provider openrouter` or `--provider rainy` on
+`embed` or on a `--mode semantic|hybrid` search sends the text being embedded (memories, code chunks
+of the named repository, or the search query) to that provider. Nothing is sent otherwise: lexical
+modes never touch a provider, the provider is never inferred from the environment, and a missing
+credential is an error instead of a fallback to another provider or model.
+
+```sh
+export OPENROUTER_API_KEY=…            # read from the environment only; never printed or stored
+aether-midnight embed --namespace project:app --repo . \
+    --provider openrouter --model openai/text-embedding-3-small --dimensions 1536
+aether-midnight memory search --namespace project:app "disk cache" --mode hybrid \
+    --provider openrouter --model openai/text-embedding-3-small --dimensions 1536
+
+export RAINY_API_KEY=…
+aether-midnight embed --namespace project:app \
+    --provider rainy --model <model> --dimensions <n> [--endpoint https://host/v1]
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--provider local\|openrouter\|rainy` | Default `local`. |
+| `--model` | Required for remote providers; never defaulted or substituted. |
+| `--dimensions` | Required for remote providers. Declares the vector size, is sent as `dimensions`, and every response is checked against it. |
+| `--endpoint` | API base without `/embeddings`. OpenRouter: `https://openrouter.ai/api/v1` (default). Rainy: the `rainy-sdk` default unless set. HTTPS only; plain HTTP is accepted by the SDK on loopback addresses (used by the mock tests). |
+| `--timeout-secs` | Per-request timeout, default 30, maximum 300. |
+| `--param KEY=JSON` | Optional request fields, allow-listed per provider: OpenRouter `input_type`, `provider` (routing object), `user`; Rainy `user`. Anything else is rejected. |
+
+Credentials: `OPENROUTER_API_KEY` for `openrouter`, `RAINY_API_KEY` for `rainy`. `doctor` reports
+only whether each is set.
+
+**Transport.** One transport serves both providers: [`rainy-sdk`](https://crates.io/crates/rainy-sdk)
+0.6.51 (`RainyClient::create_embeddings`, `AuthConfig::with_api_base_url`). It speaks the
+OpenAI-compatible `POST {base}/embeddings` contract that OpenRouter documents, sends a Bearer token,
+disables redirects (a credential is never forwarded to another host), enforces the timeout, bounds
+response (8 MiB) and error bodies (64 KiB) and keeps the key in a `SecretString`. Midnight turns off
+the SDK's retry setting and sends exactly one request per batch of 16 texts. See
+[v0.1-status.md](v0.1-status.md) for the compatibility evaluation, its cost and the known limits.
+
+**Request shape.** `{"model", "input": [texts…], "encoding_format": "float", "dimensions": n}` plus the
+allow-listed `--param` fields. Inputs are sent verbatim (no E5 `query:`/`passage:` prefixes — that is
+the local model's contract) and truncated to 8,000 characters. Responses are placed by their
+`index`, not arrival order; the batch must return exactly one vector per input.
+
+**Validation.** A batch is rejected whole (nothing stored) if the response has the wrong number of
+vectors, an out-of-range or duplicate `index`, base64 where floats were requested, a vector whose
+length differs from `--dimensions`, a non-finite value, or an all-zero vector. Valid vectors are
+L2-normalised so cosine similarity stays a dot product.
+
+**Errors** are bounded (≤ 240 characters), control characters are stripped, and the API key is
+redacted. They are classified as auth (401/403), payment (402), rate limit (429, with `retry-after`
+when present), server (5xx), timeout, network, rejected request, malformed response or dimension
+mismatch. There is no automatic retry: `embed` is incremental, so re-running it resumes after the
+vectors already committed.
+
+**Degraded operation.** If a provider call fails during `--mode semantic|hybrid`, the command still
+exits 0 with lexical results, `degraded: true`, `mode_used: "lexical"`, a `notice` that names the
+failure category, and a `warning:` line on stderr. If `embed` fails part-way it exits non-zero, keeps
+the vectors committed before the failure, and says lexical search is unaffected.
+
+### Embedding-space isolation
+
+Every stored vector carries `model`, `revision` and `dims`; queries select vectors by exact equality
+on all three (plus scope) in SQL. For remote providers:
+
+* `model` = `<provider>:<model id>` (for example `openrouter:openai/text-embedding-3-small`);
+* `revision` = `remote-<12 hex>`, a fingerprint of the endpoint and the `--param` set, because either
+  can change what the same model name returns;
+* `dims` = `--dimensions`.
+
+Consequences: changing provider, model, endpoint, parameters or dimensions selects a different space.
+A search in a different space does **not** embed the query (nothing is sent) and degrades to lexical
+with a notice that names the stored space and the requested one. Switching is an explicit action:
+`embed` with the new settings deletes the scope's vectors of any other identity (`replaced_other_model`
+in its report) and re-embeds. A scope therefore holds one space at a time. Memory namespaces and
+repositories remain isolated from each other, as before, and `embed --namespace A` never sends
+namespace B's text.
+
+### Workflow
+
+Embedding is never automatic. After `memory add` or `index`, run `embed` for the scope you want
+searchable semantically; unchanged items are skipped by content hash. Search with the same provider
+flags you embedded with.
 
 ## Privacy
 
-Vectors are derived from stored text and are stored in the same local database (`0600`). They are
+Local vectors are derived from stored text and are stored in the same local database (`0600`). They are
 removed with their source rows, but, like memory content, may linger in SQLite pages until `compact`.
+Vectors from a cloud provider are stored the same way, but their source text was sent to that provider
+under your own account and is subject to its retention terms; Midnight cannot recall it.

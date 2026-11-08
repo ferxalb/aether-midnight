@@ -2,6 +2,7 @@
 name = "aether-midnight"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
 license = "Apache-2.0"
 description = "A local-first memory and code retrieval engine for AI agents"
 default-run = "aether-midnight"
@@ -31,6 +32,11 @@ time = { version = "0.3.55", features = ["formatting", "parsing"] }
 tempfile = "3.27.0"
 unicode-normalization = "0.1"
 fastembed = { version = "=5.13.0", default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
+flate2 = "1.1"
+native-tls = "0.2"
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+rainy-sdk = { version = "=0.6.51", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 hf-hub = { version = "=0.4.3", default-features = false, features = ["ureq", "native-tls"] }
 
 [dev-dependencies]

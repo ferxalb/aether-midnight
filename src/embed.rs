@@ -4,7 +4,8 @@
 //! Design rules:
 //! * Lexical operations never touch this module's model code. The ONNX Runtime is loaded only by
 //!   [`FastEmbedder::load_installed`], and only after SQLite reports stored vectors for the scope.
-//! * Models are downloaded only by [`pull_model`] (`models pull`). Inference reads local files.
+//! * Models are downloaded only by [`pull_model`] (`models pull`), at a pinned revision whose files
+//!   are SHA-256 verified. Inference reads local files and re-verifies them as it loads them.
 //! * Isolation is enforced in SQL: every vector query filters by `kind`, `scope`, and the exact
 //!   model identity before a single vector is read, and joins the live source row.
 
@@ -32,12 +33,37 @@ const BATCH: usize = 16;
 const CHUNK_MAX_LINES: usize = 40;
 const CHUNK_MAX_BYTES: usize = 2000;
 const MAX_CHUNKS_PER_FILE: usize = 400;
-const MODEL_FILES: [&str; 5] = [
-    "onnx/model.onnx",
-    "tokenizer.json",
-    "config.json",
-    "special_tokens_map.json",
-    "tokenizer_config.json",
+/// Immutable Hugging Face commit of `intfloat/multilingual-e5-small` (MIT) that Midnight is
+/// verified against. `models pull` fetches exactly this revision, never `main`.
+pub const MODEL_REVISION: &str = "614241f622f53c4eeff9890bdc4f31cfecc418b3";
+/// `(path, size in bytes, SHA-256)` of every model file at [`MODEL_REVISION`]. The two LFS files'
+/// hashes are the Hugging Face LFS object ids; the three small files were hashed after download.
+pub const MODEL_FILE_PINS: [(&str, u64, &str); 5] = [
+    (
+        "onnx/model.onnx",
+        470_268_510,
+        "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665",
+    ),
+    (
+        "tokenizer.json",
+        17_082_730,
+        "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+    ),
+    (
+        "config.json",
+        655,
+        "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",
+    ),
+    (
+        "special_tokens_map.json",
+        167,
+        "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",
+    ),
+    (
+        "tokenizer_config.json",
+        443,
+        "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
+    ),
 ];
 
 // ---------------------------------------------------------------- model management
@@ -59,74 +85,105 @@ pub struct ModelStatus {
     pub repo: &'static str,
     pub dimensions: usize,
     pub max_input_tokens: usize,
+    pub pinned_revision: &'static str,
     pub installed: bool,
     pub revision: Option<String>,
     pub path: Option<PathBuf>,
+    /// Files absent or whose size differs from the pin (full hashes: `models verify`).
     pub missing_files: Vec<String>,
+    /// Other cached revisions that are ignored because they are not the pinned one.
+    pub ignored_revisions: Vec<String>,
 }
 
 fn repo_cache_dir(dir: &Path) -> PathBuf {
     dir.join(format!("models--{}", MODEL_REPO.replace('/', "--")))
 }
 
-/// Locate a complete snapshot of the model inside `dir` without touching the network.
+/// Locate the pinned snapshot inside `dir` without touching the network. Presence and exact byte
+/// sizes are checked here (cheap); SHA-256 is checked by [`verify_model`] and at model load.
 pub fn model_status(dir: &Path) -> ModelStatus {
-    let repo = repo_cache_dir(dir);
-    let snapshots = repo.join("snapshots");
-    let mut candidates: Vec<String> = Vec::new();
-    if let Ok(main) = std::fs::read_to_string(repo.join("refs").join("main")) {
-        candidates.push(main.trim().to_string());
-    }
-    if let Ok(entries) = std::fs::read_dir(&snapshots) {
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        names.sort();
-        candidates.extend(names);
-    }
-    let mut missing = MODEL_FILES
+    let snapshots = repo_cache_dir(dir).join("snapshots");
+    let path = snapshots.join(MODEL_REVISION);
+    let missing: Vec<String> = MODEL_FILE_PINS
         .iter()
-        .map(|f| f.to_string())
-        .collect::<Vec<_>>();
-    for revision in candidates {
-        if revision.is_empty() || revision.contains(['/', '\\']) {
-            continue;
-        }
-        let path = snapshots.join(&revision);
-        let absent: Vec<String> = MODEL_FILES
-            .iter()
-            .filter(|f| !path.join(f).is_file())
-            .map(|f| f.to_string())
-            .collect();
-        if absent.is_empty() {
-            return ModelStatus {
-                name: MODEL_NAME,
-                repo: MODEL_REPO,
-                dimensions: MODEL_DIMS,
-                max_input_tokens: MAX_INPUT_TOKENS,
-                installed: true,
-                revision: Some(revision),
-                path: Some(path),
-                missing_files: Vec::new(),
-            };
-        }
-        missing = absent;
-    }
+        .filter(|(f, size, _)| std::fs::metadata(path.join(f)).map(|m| m.len()).ok() != Some(*size))
+        .map(|(f, _, _)| f.to_string())
+        .collect();
+    let mut ignored: Vec<String> = std::fs::read_dir(&snapshots)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n != MODEL_REVISION)
+                .collect()
+        })
+        .unwrap_or_default();
+    ignored.sort();
+    let installed = missing.is_empty();
     ModelStatus {
         name: MODEL_NAME,
         repo: MODEL_REPO,
         dimensions: MODEL_DIMS,
         max_input_tokens: MAX_INPUT_TOKENS,
-        installed: false,
-        revision: None,
-        path: None,
+        pinned_revision: MODEL_REVISION,
+        installed,
+        revision: installed.then(|| MODEL_REVISION.to_string()),
+        path: installed.then_some(path),
         missing_files: missing,
+        ignored_revisions: ignored,
     }
 }
 
-/// Download the model files into `dir` (the only network operation in Midnight). Idempotent: files
-/// already in the cache are reused. Does not need or load the ONNX Runtime.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Compare one file's bytes with its pin.
+fn check_pin(name: &str, bytes: &[u8]) -> Result<()> {
+    let (_, size, sha) = MODEL_FILE_PINS
+        .iter()
+        .find(|(f, _, _)| *f == name)
+        .with_context(|| format!("{name} is not a pinned model file"))?;
+    if bytes.len() as u64 != *size {
+        bail!(
+            "model file {name} has {} bytes, pinned {size}; re-run `models pull`",
+            bytes.len()
+        );
+    }
+    let actual = sha256_hex(bytes);
+    if actual != *sha {
+        bail!(
+            "model file {name} fails its SHA-256 check (expected {sha}, got {actual}); delete the model directory and re-run `models pull`"
+        );
+    }
+    Ok(())
+}
+
+/// Full integrity check of the installed pinned snapshot (reads every file once).
+pub fn verify_model(dir: &Path) -> Result<ModelStatus> {
+    let status = model_status(dir);
+    let Some(path) = status.path.clone() else {
+        bail!(
+            "model {MODEL_NAME} revision {MODEL_REVISION} is not installed or incomplete in {} (missing/size mismatch: {:?}); run `aether-midnight models pull {MODEL_NAME}`",
+            dir.display(),
+            status.missing_files
+        );
+    };
+    for (file, _, _) in MODEL_FILE_PINS {
+        let bytes =
+            std::fs::read(path.join(file)).with_context(|| format!("read model file {file}"))?;
+        check_pin(file, &bytes)?;
+    }
+    Ok(status)
+}
+
+/// Download the pinned model revision into `dir` (the only model-weight network operation).
+/// Idempotent: files already in the cache are reused. Every file is verified against its SHA-256
+/// pin before success is reported. Does not need or load the ONNX Runtime.
 pub fn pull_model(dir: &Path, progress: bool) -> Result<ModelStatus> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("create models directory {}", dir.display()))?;
@@ -135,19 +192,16 @@ pub fn pull_model(dir: &Path, progress: bool) -> Result<ModelStatus> {
         .with_progress(progress)
         .build()
         .context("initialize model downloader")?;
-    let repo = api.model(MODEL_REPO.to_string());
-    for file in MODEL_FILES {
+    let repo = api.repo(hf_hub::Repo::with_revision(
+        MODEL_REPO.to_string(),
+        hf_hub::RepoType::Model,
+        MODEL_REVISION.to_string(),
+    ));
+    for (file, _, _) in MODEL_FILE_PINS {
         repo.get(file)
-            .with_context(|| format!("download {MODEL_REPO}/{file}"))?;
+            .with_context(|| format!("download {MODEL_REPO}@{MODEL_REVISION}/{file}"))?;
     }
-    let status = model_status(dir);
-    if !status.installed {
-        bail!(
-            "download finished but model files are missing: {:?}",
-            status.missing_files
-        );
-    }
-    Ok(status)
+    verify_model(dir)
 }
 
 // ---------------------------------------------------------------- embedder abstraction
@@ -202,9 +256,13 @@ impl FastEmbedder {
                 dir.display()
             );
         };
-        ensure_ort_library(&dir)?;
-        let read = |name: &str| {
-            std::fs::read(path.join(name)).with_context(|| format!("read model file {name}"))
+        crate::runtime::ensure_loadable(&dir)?;
+        // Every file is hashed in memory before it is handed to the tokenizer or ONNX Runtime.
+        let read = |name: &str| -> Result<Vec<u8>> {
+            let bytes = std::fs::read(path.join(name))
+                .with_context(|| format!("read model file {name}"))?;
+            check_pin(name, &bytes)?;
+            Ok(bytes)
         };
         let onnx = read("onnx/model.onnx")?;
         let tokenizer_files = fastembed::TokenizerFiles {
@@ -254,45 +312,6 @@ impl TextEmbedder for FastEmbedder {
             l2_normalize(vector);
         }
         Ok(vectors)
-    }
-}
-
-/// ONNX Runtime is loaded dynamically (no prebuilt static binary exists for every target). Find a
-/// library before initialization so a missing runtime is an error, not a panic.
-fn ensure_ort_library(models: &Path) -> Result<()> {
-    let name = if cfg!(target_os = "macos") {
-        "libonnxruntime.dylib"
-    } else if cfg!(windows) {
-        "onnxruntime.dll"
-    } else {
-        "libonnxruntime.so"
-    };
-    if let Some(explicit) = std::env::var_os("ORT_DYLIB_PATH") {
-        if Path::new(&explicit).is_file() {
-            return Ok(());
-        }
-        bail!(
-            "ORT_DYLIB_PATH points to a missing file: {}",
-            Path::new(&explicit).display()
-        );
-    }
-    let candidates = [
-        models.join("onnxruntime").join(name),
-        models.join("onnxruntime").join("lib").join(name),
-        PathBuf::from("/opt/homebrew/lib").join(name),
-        PathBuf::from("/usr/local/lib").join(name),
-        PathBuf::from("/usr/lib").join(name),
-    ];
-    match candidates.iter().find(|p| p.is_file()) {
-        Some(found) => {
-            // Single-threaded CLI path: nothing else reads the environment concurrently.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", found) };
-            Ok(())
-        }
-        None => bail!(
-            "ONNX Runtime library ({name}) not found. Set ORT_DYLIB_PATH or place it at {}",
-            models.join("onnxruntime").join(name).display()
-        ),
     }
 }
 
@@ -686,6 +705,40 @@ fn has_vectors(conn: &Connection, kind: &str, scope: &str) -> Result<bool> {
     )?)
 }
 
+fn identity_has_vectors(
+    conn: &Connection,
+    kind: &str,
+    scope: &str,
+    id: &ModelIdentity,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM embeddings WHERE kind=?1 AND scope=?2
+           AND model=?3 AND revision=?4 AND dims=?5)",
+        params![kind, scope, id.name, id.revision, id.dimensions as i64],
+        |r| r.get(0),
+    )?)
+}
+
+fn stored_identities(conn: &Connection, kind: &str, scope: &str) -> String {
+    let rows: Vec<String> = conn
+        .prepare(
+            "SELECT DISTINCT model,revision,dims FROM embeddings WHERE kind=?1 AND scope=?2 ORDER BY 1,2,3 LIMIT 4",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![kind, scope], |r| {
+                Ok(format!(
+                    "{}@{} {}d",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?
+                ))
+            })?
+            .collect()
+        })
+        .unwrap_or_default();
+    rows.join(", ")
+}
+
 /// Load the model (lazily, only when vectors exist) and embed the query.
 fn prepare_query(
     conn: &Connection,
@@ -708,6 +761,20 @@ fn prepare_query(
         Ok(e) => e,
         Err(e) => return Prepared::Unavailable(format!("embedding model unavailable: {e:#}")),
     };
+    // Space isolation before any query text can leave the machine: only embed the query when
+    // vectors of exactly this provider/model/revision/dimensions exist for the scope.
+    let id = embedder.identity().clone();
+    match identity_has_vectors(conn, kind, scope, &id) {
+        Ok(true) => {}
+        Ok(false) => {
+            let stored = stored_identities(conn, kind, scope);
+            return Prepared::Unavailable(format!(
+                "stored vectors ({stored}) belong to a different embedding space than the requested {}@{} ({}d); the query was not embedded. Re-run `{embed_hint}` with the requested provider to reindex (this replaces the stored vectors)",
+                id.name, id.revision, id.dimensions
+            ));
+        }
+        Err(e) => return Prepared::Unavailable(format!("embedding store unreadable: {e:#}")),
+    }
     match embedder.embed(TextKind::Query, &[query]) {
         Ok(mut v) if v.len() == 1 => {
             let mut vector = v.remove(0);

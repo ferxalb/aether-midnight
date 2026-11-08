@@ -1,6 +1,6 @@
 # Privacy, ignored files, and storage
 
-Midnight is local-only. There is no telemetry, cloud endpoint, or network-dependent startup path. The only network operation is the explicit `models pull`, which downloads the local embedding model from Hugging Face; search, embedding and every other command run offline. Embedding inference is local (`docs/embeddings.md`). The MCP server communicates over its parent process's stdio. Benchmark baselines (`rg`) run locally.
+Midnight is local-first. There is no telemetry and no network-dependent startup path. Network use is limited to three explicit, user-invoked operations: `runtime install` (the pinned ONNX Runtime from Microsoft's GitHub release, SHA-256 verified), `models pull` (the pinned model revision from Hugging Face, SHA-256 verified), and `--provider openrouter|rainy` on `embed` or on a `--mode semantic|hybrid` search. The last one sends the text being embedded (memories of the named namespace, chunks of the named repository, or the search query) to the provider you selected, using your own API key from `OPENROUTER_API_KEY` / `RAINY_API_KEY`; it never happens by default, from the environment, from MCP/HTTP, or in lexical modes, and the key is never logged or stored. Vectors from a provider are stored locally like any other, but the provider's own retention terms govern the text it received. Everything else, including local embedding inference, runs offline (`docs/embeddings.md`). The MCP server communicates over its parent process's stdio. Benchmark baselines (`rg`) run locally.
 
 ## Stored data
 
