@@ -30,22 +30,25 @@ maintainer steps below are done. The binary is unsigned and not notarized (docum
 Detailed commands, evidence and measurements: [v0.1-status.md](v0.1-status.md).
 Installation: [installation.md](installation.md). Signing: [release-signing.md](release-signing.md).
 
-## Publish the v0.1.0-rc.3 prerelease (maintainer)
+## Publish the v0.1.0-rc.4 prerelease (maintainer)
 
-Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.3`, tag `v0.1.0-rc.3`,
-`aether-midnight-0.1.0-rc.3-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
-both read the release by that tag, so they only work once it exists.
+Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.4`, tag `v0.1.0-rc.4`,
+`aether-midnight-0.1.0-rc.4-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
+both read the release by that tag, so they only work once it exists. The workflow creates it.
 
-1. Merge to `main`, tag the commit (`git tag v0.1.0-rc.3`) and push the tag.
-2. Run the "macOS release artifacts" workflow on `main` (manual). It builds the Universal 2
-   binary, packages it, runs the offline installer smoke test and uploads the artifact.
-3. `gh run download <run-id> -n aether-midnight-macos-universal2`; verify
-   `shasum -a 256 -c *.sha256` and run `sh install.sh --archive-file ... --sha256 ... --no-runtime`
-   against it in an isolated `--prefix`.
-4. `gh release create v0.1.0-rc.3 --prerelease --title "v0.1.0-rc.3" --notes-file NOTES.md
-   <archive> <archive>.sha256 install.sh` (the notes state: unsigned, not notarized, Gatekeeper
-   rejects it, live cloud providers verified or not).
-5. Confirm the public URLs with `curl -fsSIL`, then `midnight update --check` from the prior build.
+1. Write `docs/release-notes/v<version>.md` (state: unsigned, not notarized, what was and was not
+   tested). The workflow appends the archive SHA-256 and fails if the file is missing.
+2. Commit, then tag that exact commit and push the tag:
+   `git tag v0.1.0-rc.4 && git push origin v0.1.0-rc.4`.
+3. The "macOS release artifacts" workflow runs on the tag: it builds the Universal 2 binary,
+   packages it, runs the offline installer smoke test, then a `release` job checks that the tag
+   equals `v` + the `Cargo.toml` version, and creates the GitHub Release with the archive, its
+   `.sha256` and `install.sh`. A version containing `-` (rc, beta, alpha) is published as a
+   prerelease; a plain version is not. It refuses to touch a release that already exists.
+4. Confirm the public URLs with `curl -fsSIL` and run `midnight update --check` from the prior build.
+
+Re-running by hand: "Run workflow" on the tag ref does the same. Run on a branch it only builds and
+uploads the artifact (no release). To fix the notes of a published release use `gh release edit`.
 
 ## Test the published artifact on a clean Intel Mac
 

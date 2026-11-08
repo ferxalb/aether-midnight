@@ -353,7 +353,7 @@ fn two_server_processes_share_one_database_without_losing_acknowledged_writes() 
     let version: i64 = initialized
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     drop(initialized);
     let b = std::sync::Arc::new(start(&db, &[]));
     let mut threads = Vec::new();

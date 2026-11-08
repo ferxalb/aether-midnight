@@ -588,6 +588,10 @@ fn embed_and_store_code_files(
             "DELETE FROM embeddings WHERE kind='code' AND owner_id=?1",
             [file.file_id],
         )?;
+        tx.execute(
+            "DELETE FROM embeddings_reuse WHERE owner_id=?1",
+            [file.file_id],
+        )?;
         let mut insert = tx.prepare_cached(
             "INSERT INTO embeddings(kind,scope,owner_id,chunk,line_start,line_end,model,revision,dims,source_hash,vector)
              VALUES('code',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -750,9 +754,24 @@ pub fn embed_code_with_progress(
             continue;
         }
         // Reuse any stored vector whose chunk text is identical, wherever it moved in the file.
+        // Vectors parked by the schema trigger when the file's content changed are candidates too.
+        let parked: Vec<(String, Vec<u8>)> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT source_hash,vector FROM embeddings_reuse
+                 WHERE owner_id=?1 AND model=?2 AND revision=?3 AND dims=?4 ORDER BY chunk",
+            )?;
+            stmt.query_map(
+                params![file_id, id.name, id.revision, id.dimensions as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?
+        };
         let mut by_hash: HashMap<&str, &Vec<u8>> = HashMap::new();
         for e in &existing {
             by_hash.entry(e.3.as_str()).or_insert(&e.4);
+        }
+        for (hash, blob) in &parked {
+            by_hash.entry(hash.as_str()).or_insert(blob);
         }
         let reused: Vec<Option<Vec<u8>>> = hashes
             .iter()

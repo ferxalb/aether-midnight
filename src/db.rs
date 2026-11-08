@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -85,6 +85,36 @@ const EMBEDDINGS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS embeddings (
      END;
      UPDATE metadata SET value='6' WHERE key='schema_version';
      PRAGMA user_version=6;";
+
+/// Schema 7: when a code file's content changes its vectors leave `embeddings` at once (searches
+/// see the file as not embedded, exactly as before) but are parked in `embeddings_reuse`, so the
+/// next `embed` can keep the vector of every chunk whose text did not change.
+const EMBEDDINGS_REUSE_SCHEMA: &str = "DROP TRIGGER IF EXISTS code_files_embeddings_rehash;
+     DROP TRIGGER IF EXISTS code_files_embeddings_delete;
+     CREATE TABLE IF NOT EXISTS embeddings_reuse (
+         owner_id INTEGER NOT NULL,
+         chunk INTEGER NOT NULL,
+         scope TEXT NOT NULL,
+         model TEXT NOT NULL,
+         revision TEXT NOT NULL,
+         dims INTEGER NOT NULL CHECK(dims > 0),
+         source_hash TEXT NOT NULL,
+         vector BLOB NOT NULL,
+         PRIMARY KEY(owner_id, chunk)
+     ) WITHOUT ROWID;
+     CREATE TRIGGER code_files_embeddings_delete AFTER DELETE ON code_files BEGIN
+         DELETE FROM embeddings WHERE kind='code' AND owner_id=old.id;
+         DELETE FROM embeddings_reuse WHERE owner_id=old.id;
+     END;
+     CREATE TRIGGER code_files_embeddings_rehash AFTER UPDATE OF content_hash ON code_files
+     WHEN old.content_hash IS NOT new.content_hash BEGIN
+         INSERT OR REPLACE INTO embeddings_reuse(owner_id,chunk,scope,model,revision,dims,source_hash,vector)
+             SELECT owner_id,chunk,scope,model,revision,dims,source_hash,vector
+             FROM embeddings WHERE kind='code' AND owner_id=new.id;
+         DELETE FROM embeddings WHERE kind='code' AND owner_id=new.id;
+     END;
+     UPDATE metadata SET value='7' WHERE key='schema_version';
+     PRAGMA user_version=7;";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RepoScope {
@@ -318,6 +348,10 @@ fn migrate(connection: &Connection) -> Result<()> {
                 connection.execute_batch(EMBEDDINGS_SCHEMA)?;
                 migrated_version = 6;
             }
+            if migrated_version == 6 {
+                connection.execute_batch(EMBEDDINGS_REUSE_SCHEMA)?;
+                migrated_version = 7;
+            }
             if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");
             }
@@ -396,43 +430,15 @@ pub fn repo_scope(path: &Path) -> Result<RepoScope> {
     if !root.is_dir() {
         bail!("repository path is not a directory: {}", root.display());
     }
-    let git_info = if has_git_context(&root) {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args([
-                "rev-parse",
-                "--absolute-git-dir",
-                "--git-common-dir",
-                "HEAD",
-            ])
-            .output()
-            .ok()
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
+    let facts = if has_git_context(&root) {
+        git_facts_from_files(&root).or_else(|| git_facts_via_git(&root))
     } else {
         None
     };
-    let git_dir = git_info
+    let git_dir = facts.as_ref().map(|facts| facts.git_dir.clone());
+    let common = facts
         .as_ref()
-        .and_then(|lines| lines.first())
-        .map(PathBuf::from);
-    let common = git_info
-        .as_ref()
-        .and_then(|lines| lines.get(1))
-        .map(|value| {
-            let path = PathBuf::from(value);
-            let path = if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            };
-            path.canonicalize().unwrap_or(path)
-        })
+        .map(|facts| facts.common.clone())
         .unwrap_or_else(|| root.clone());
     let branch = git_dir.as_ref().and_then(|git_dir| {
         std::fs::read_to_string(git_dir.join("HEAD"))
@@ -443,11 +449,7 @@ pub fn repo_scope(path: &Path) -> Result<RepoScope> {
                     .map(str::to_string)
             })
     });
-    let revision = git_info
-        .as_ref()
-        .and_then(|lines| lines.get(2))
-        .filter(|revision| revision.len() >= 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()))
-        .cloned();
+    let revision = facts.and_then(|facts| facts.revision);
     let repo_id = hash_bytes(common.to_string_lossy().as_bytes());
     let worktree_id = hash_bytes(root.to_string_lossy().as_bytes());
     Ok(RepoScope {
@@ -455,6 +457,133 @@ pub fn repo_scope(path: &Path) -> Result<RepoScope> {
         repo_id,
         worktree_id,
         branch,
+        revision,
+    })
+}
+
+/// What identifies a Git checkout: its git dir, the common dir shared by worktrees, and HEAD.
+#[derive(Debug, PartialEq, Eq)]
+struct GitFacts {
+    git_dir: PathBuf,
+    common: PathBuf,
+    revision: Option<String>,
+}
+
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Reads the facts straight from `.git` (a directory, or a `gitdir:` file for worktrees and
+/// submodules) so a tool call does not pay for spawning `git` (about 130 ms with the macOS shim).
+/// Returns `None` for anything unusual (`GIT_DIR`, reftable, symbolic or missing refs), and the
+/// caller then asks `git` itself.
+fn git_facts_from_files(root: &Path) -> Option<GitFacts> {
+    if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
+        return None;
+    }
+    let (base, meta) = root
+        .ancestors()
+        .find_map(|dir| dir.join(".git").symlink_metadata().ok().map(|m| (dir, m)))?;
+    let dot_git = base.join(".git");
+    let git_dir = if meta.is_dir() {
+        dot_git
+    } else if meta.is_file() {
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let target = PathBuf::from(text.lines().next()?.strip_prefix("gitdir:")?.trim());
+        if target.is_absolute() {
+            target
+        } else {
+            base.join(target)
+        }
+    } else {
+        return None;
+    };
+    let git_dir = git_dir.canonicalize().ok()?;
+    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(text) => {
+            let path = PathBuf::from(text.trim());
+            let path = if path.is_absolute() {
+                path
+            } else {
+                git_dir.join(path)
+            };
+            path.canonicalize().ok()?
+        }
+        Err(_) => git_dir.clone(),
+    };
+    if common.join("reftable").exists() {
+        return None;
+    }
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let revision = if let Some(reference) = head.strip_prefix("ref: ") {
+        let reference = reference.trim();
+        if reference.contains("..") {
+            return None;
+        }
+        let loose = [git_dir.join(reference), common.join(reference)]
+            .iter()
+            .find_map(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.trim().to_string());
+        let sha = match loose {
+            Some(text) => text,
+            None => std::fs::read_to_string(common.join("packed-refs"))
+                .ok()?
+                .lines()
+                .filter(|line| !line.starts_with('#') && !line.starts_with('^'))
+                .find_map(|line| {
+                    let (sha, name) = line.split_once(' ')?;
+                    (name.trim() == reference).then(|| sha.to_string())
+                })?,
+        };
+        if !is_object_id(&sha) {
+            return None;
+        }
+        Some(sha)
+    } else if is_object_id(head) {
+        Some(head.to_string())
+    } else {
+        return None;
+    };
+    Some(GitFacts {
+        git_dir,
+        common,
+        revision,
+    })
+}
+
+/// The original path: ask `git` itself.
+fn git_facts_via_git(root: &Path) -> Option<GitFacts> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "rev-parse",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "HEAD",
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    let git_dir = PathBuf::from(lines.first()?);
+    let common = lines.get(1).map(|value| {
+        let path = PathBuf::from(value);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        path.canonicalize().unwrap_or(path)
+    })?;
+    let revision = lines
+        .get(2)
+        .filter(|revision| revision.len() >= 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|revision| revision.to_string());
+    Some(GitFacts {
+        git_dir,
+        common,
         revision,
     })
 }
@@ -500,4 +629,68 @@ fn format_utc(value: time::OffsetDateTime) -> String {
         clock.second(),
         clock.nanosecond()
     )
+}
+
+#[cfg(test)]
+mod git_facts_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-C"])
+            .arg(dir)
+            .args(args)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    /// The file reader must agree with `git` itself on every layout it accepts.
+    #[test]
+    fn reading_git_files_matches_git_rev_parse() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo").canonicalize().unwrap_or_else(|_| {
+            std::fs::create_dir_all(temp.path().join("repo")).unwrap();
+            temp.path().join("repo").canonicalize().unwrap()
+        });
+        if !git(&repo, &["init", "-q"]) {
+            return; // no git available
+        }
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(git(&repo, &["add", "."]));
+        assert!(git(&repo, &["commit", "-q", "-m", "one"]));
+        std::fs::create_dir_all(repo.join("sub/dir")).unwrap();
+
+        let check = |dir: &Path, label: &str| {
+            let fast = git_facts_from_files(dir);
+            let slow = git_facts_via_git(dir);
+            assert!(fast.is_some(), "{label}: file reader declined");
+            assert_eq!(fast, slow, "{label}");
+        };
+        check(&repo, "loose ref");
+        check(&repo.join("sub/dir"), "subdirectory");
+        assert!(git(&repo, &["pack-refs", "--all"]));
+        check(&repo, "packed ref");
+        assert!(git(&repo, &["checkout", "-q", "--detach"]));
+        check(&repo, "detached HEAD");
+        assert!(git(&repo, &["checkout", "-q", "-"]));
+
+        let wt = temp.path().join("wt");
+        if git(
+            &repo,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "other"],
+        ) {
+            let wt = wt.canonicalize().unwrap();
+            check(&wt, "linked worktree");
+            let fast = git_facts_from_files(&wt).unwrap();
+            let main = git_facts_from_files(&repo).unwrap();
+            assert_eq!(fast.common, main.common, "worktrees share a repo identity");
+            assert_ne!(fast.git_dir, main.git_dir);
+        }
+        // Not a repository at all: the reader declines.
+        assert!(
+            git_facts_from_files(temp.path()).is_none()
+                || temp.path().ancestors().any(|a| a.join(".git").exists())
+        );
+    }
 }

@@ -72,9 +72,10 @@ impl Policy {
             .collect()
     }
 
-    /// Repository used when a code tool omits `repo_path`: the single policy root, else the
-    /// server's working directory, and only when that is itself a Git repository root. Never the
-    /// bare home directory or `/`, which GUI clients often use as the working directory.
+    /// Repository used when a code tool omits `repo_path`: the single policy root, else the nearest
+    /// Git repository root at or above the server's working directory. Never `/` or the home
+    /// directory itself (a dotfiles repository there must not turn into "index everything"),
+    /// which GUI clients often use as the working directory.
     fn default_repo(&self) -> Option<PathBuf> {
         let is_repo = |dir: &Path| dir.join(".git").exists();
         if let Some([only]) = self.repo_roots.as_deref()
@@ -82,7 +83,9 @@ impl Policy {
         {
             return Some(only.clone());
         }
-        std::env::current_dir().ok().filter(|dir| is_repo(dir))
+        let cwd = std::env::current_dir().ok()?;
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        repo_root_above(&cwd, home.as_deref().map(Path::new))
     }
 
     fn tool_allowed(&self, name: &str) -> bool {
@@ -582,6 +585,14 @@ fn ensure_memory_session<'a>(
         .context("memory database session failed to initialize")
 }
 
+/// Nearest ancestor of `dir` (inclusive) that holds `.git`, never `home` or the filesystem root.
+fn repo_root_above(dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    dir.ancestors()
+        .take_while(|ancestor| ancestor.parent().is_some() && Some(*ancestor) != home)
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 fn path_arg(args: &Value, key: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(required_str(args, key)?))
 }
@@ -627,6 +638,28 @@ mod tests {
         let response = initialize(json!(1), &json!({"protocolVersion":"2099-01-01"}));
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert!(response.get("error").is_none());
+    }
+
+    #[test]
+    fn repository_root_is_found_above_a_subdirectory_but_never_at_home() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let repo = home.join("work/app");
+        let deep = repo.join("src/ui");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert_eq!(
+            super::repo_root_above(&deep, Some(&home)),
+            Some(repo.clone())
+        );
+        assert_eq!(super::repo_root_above(&repo, Some(&home)), Some(repo));
+        // A repository at HOME (dotfiles) is not a default.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert_eq!(
+            super::repo_root_above(&home.join("work"), Some(&home)),
+            None
+        );
+        assert_eq!(super::repo_root_above(&home, Some(&home)), None);
     }
 
     #[test]

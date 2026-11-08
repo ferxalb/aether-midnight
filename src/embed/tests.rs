@@ -145,7 +145,7 @@ fn schema_v6_creates_embeddings_table_with_identity_columns() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     for column in [
         "model",
         "revision",

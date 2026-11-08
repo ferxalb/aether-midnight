@@ -75,7 +75,7 @@ lexical results, `degraded: true`, `mode_used: "lexical"`, a `notice` with the r
 `warning:` line on stderr. Partial coverage (some items not yet embedded) is reported in `notice` and
 `semantic_coverage`. When SQLite has no vectors for the scope the model is not even loaded.
 
-## Storage (schema 6)
+## Storage (schema 6, extended in 7)
 
 One table, `embeddings(kind, scope, owner_id, chunk, line_start, line_end, model, revision, dims,
 source_hash, vector)` with primary key `(kind, owner_id, chunk)`; vectors are little-endian `f32`

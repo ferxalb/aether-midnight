@@ -8,8 +8,8 @@ unsupported, and the script refuses to run there.
 ## Script install (recommended)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.3/install.sh | sh -s -- --no-runtime
-# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-rc.3-macos-universal2.tar.gz --sha256 <hex>
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.4/install.sh | sh -s -- --no-runtime
+# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-rc.4-macos-universal2.tar.gz --sha256 <hex>
 ```
 
 `scripts/install.sh` (from the repository) runs as your user (it refuses root/sudo) and:
@@ -33,7 +33,7 @@ failed after a successful binary install, 10 unsupported platform, 11 root, 12 m
 tool). `--dry-run` prints the plan. Next to the binary it also creates `midnight`, a relative symlink
 to `aether-midnight` (the program takes its display name from how it is invoked); an existing
 `midnight` that is not that link is left untouched with a warning. With no source option the script downloads the
-v0.1.0-rc.3 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
+v0.1.0-rc.4 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
 
 ### Update and uninstall
 
@@ -85,9 +85,9 @@ aether-midnight runtime install && aether-midnight doctor
 For a locally built or subsequently signed and approved archive:
 
 ```sh
-shasum -a 256 -c aether-midnight-0.1.0-rc.3-macos-universal2.tar.gz.sha256
-tar -xzf aether-midnight-0.1.0-rc.3-macos-universal2.tar.gz
-cd aether-midnight-0.1.0-rc.3-macos-universal2
+shasum -a 256 -c aether-midnight-0.1.0-rc.4-macos-universal2.tar.gz.sha256
+tar -xzf aether-midnight-0.1.0-rc.4-macos-universal2.tar.gz
+cd aether-midnight-0.1.0-rc.4-macos-universal2
 shasum -a 256 -c SHA256SUMS
 mkdir -p "$HOME/.local/bin"
 install -m 755 bin/aether-midnight "$HOME/.local/bin/aether-midnight"

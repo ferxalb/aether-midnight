@@ -1,8 +1,12 @@
 name: macOS release artifacts
 
-# Manual only. Builds, packages and uploads Universal 2 artifacts and checksums.
+# Builds, packages and uploads Universal 2 artifacts and checksums. Pushing a `v*` tag (or running
+# this by hand on a tag ref) also publishes the GitHub Release; a branch run only builds.
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -72,3 +76,51 @@ jobs:
           name: aether-midnight-macos-universal2
           path: dist/*
           if-no-files-found: error
+
+  release:
+    needs: universal2
+    # Only for tag refs; never for a branch run.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: aether-midnight-macos-universal2
+          path: dist
+
+      - name: Check the tag matches the packaged version
+        run: |
+          set -eu
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$VERSION" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $VERSION"; exit 1; }
+          NAME=aether-midnight-$VERSION-macos-universal2
+          test -f "dist/$NAME.tar.gz" && test -f "dist/$NAME.tar.gz.sha256" && test -f dist/install.sh
+          (cd dist && sha256sum -c "$NAME.tar.gz.sha256")
+          grep -q "^VERSION=$VERSION\$" dist/install.sh
+          test -f "docs/release-notes/$GITHUB_REF_NAME.md" || {
+            echo "missing docs/release-notes/$GITHUB_REF_NAME.md"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; not modifying it"; exit 1
+          fi
+          SHA=$(cut -d' ' -f1 "dist/$NAME.tar.gz.sha256")
+          cp "docs/release-notes/$GITHUB_REF_NAME.md" notes.md
+          printf '\nSHA-256 of the archive: `%s`\n' "$SHA" >> notes.md
+          PRE=""
+          case "$VERSION" in *-*) PRE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" $PRE --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" dist/install.sh
