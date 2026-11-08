@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (3) — v0.1.0-rc.1 published; `update --force`
+
+- Prerelease `v0.1.0-rc.1` published on GitHub Releases from the workflow run on the tag commit (`faf2afe`): archive, `.sha256` and `install.sh`. Verified against the public URL: `install.sh` via `curl`, checksum and internal `SHA256SUMS`, symlink, idempotent re-run, `update --check` and `--pre --dry-run` against the real GitHub API.
+- `update --force` reinstalls the selected release even at the same version. Used to exercise the real download path: a locally built x86_64 binary replaced itself with the published Universal 2 binary through GitHub's real redirects, and the `midnight` link stayed intact. Unit and process tests in `tests/cli_update.rs`.
+- Still unverified: live Rainy/OpenRouter embeddings, the arm64 slice at run time, and the browser-quarantine download on a clean Mac.
+
 ## 2026-11-08 (2) — Version 0.1.0-rc.1, `update` and `uninstall`
 
 - Version is now `0.1.0-rc.1` (tag `v0.1.0-rc.1`, archive `aether-midnight-0.1.0-rc.1-macos-universal2.tar.gz`); `scripts/install.sh` is pinned to it. The workflow smoke test also checks the `midnight` link, `update --help`, `uninstall --dry-run` and installer idempotency.

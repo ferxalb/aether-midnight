@@ -61,7 +61,7 @@ Database selection, highest precedence first: `--db`, the `.midnight/midnight.sq
 ### Update and uninstall
 
 ```sh
-midnight update [--check] [--pre] [--dry-run] [--to VERSION]   # aliases: upgrade, self-update
+midnight update [--check] [--pre] [--dry-run] [--to VERSION] [--force]   # aliases: upgrade, self-update
 midnight uninstall [--dry-run] [--yes] [--purge-config] [--purge-data] [--remove-client-entries]
 ```
 

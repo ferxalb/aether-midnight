@@ -40,6 +40,7 @@ midnight update --check     # is a newer release published? (one request to api.
 midnight update             # download, verify and install it (alias: upgrade, self-update)
 midnight update --pre       # also consider prereleases (automatic while you run one)
 midnight update --to 0.1.0-rc.1   # install an exact version, older ones included
+midnight update --force     # reinstall the current version (repair a damaged binary)
 midnight uninstall --dry-run
 midnight uninstall          # removes the program and the `midnight` link only
 midnight uninstall --purge-config --purge-data --remove-client-entries

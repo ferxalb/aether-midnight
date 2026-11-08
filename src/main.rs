@@ -100,6 +100,9 @@ enum Commands {
         /// Install exactly this version (e.g. 0.1.0-rc.1), including an older one.
         #[arg(long, value_name = "VERSION")]
         to: Option<String>,
+        /// Reinstall even when the selected release is the version you already run (repair).
+        #[arg(long)]
+        force: bool,
     },
     /// Remove the installed program (and, only if asked, its configuration and data).
     Uninstall {
@@ -746,7 +749,8 @@ pub fn main() -> Result<()> {
             pre,
             dry_run,
             to,
-        } => update_command(check, pre, dry_run, to, cli.json)?,
+            force,
+        } => update_command(check, pre, dry_run, to, force, cli.json)?,
         Commands::Uninstall {
             dry_run,
             yes,
@@ -2052,6 +2056,7 @@ fn update_command(
     pre: bool,
     dry_run: bool,
     to: Option<String>,
+    force: bool,
     json: bool,
 ) -> Result<()> {
     let current = update::current_version();
@@ -2087,11 +2092,12 @@ fn update_command(
         return Ok(());
     };
     let exact = matches!(want, update::Want::Exact(_));
-    let differs = if exact {
-        release.version != current
-    } else {
-        release.version > current
-    };
+    let differs = force
+        || if exact {
+            release.version != current
+        } else {
+            release.version > current
+        };
     if !differs {
         if json {
             print_json(

@@ -473,3 +473,30 @@ fn uninstall_refuses_a_development_build() {
     assert!(text(&out).contains("development build"), "{}", text(&out));
     assert!(Path::new(env!("CARGO_BIN_EXE_midnight")).exists());
 }
+
+#[test]
+fn force_reinstalls_the_current_version_and_without_it_nothing_happens() {
+    let install = Install::new();
+    let work = TempDir::new().unwrap();
+    let archive = make_archive(work.path(), CURRENT, CURRENT, false);
+    let server = serve(files_for(&archive, CURRENT), |o| {
+        json!([release(o, CURRENT, true)])
+    });
+    let before = fs::read(&install.bin).unwrap();
+
+    let out = install.run(&install.link, Some(&server.base), &["update"]);
+    assert!(
+        out.status.success() && text(&out).contains("up to date"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(fs::read(&install.bin).unwrap(), before);
+
+    let out = install.run(&install.link, Some(&server.base), &["update", "--force"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_ne!(
+        fs::read(&install.bin).unwrap(),
+        before,
+        "the repair installs the release's binary"
+    );
+}
