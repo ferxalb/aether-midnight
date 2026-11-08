@@ -1,4 +1,4 @@
-//! Opt-in cloud embeddings (OpenRouter and Rainy-compatible endpoints) over `rainy-sdk`.
+//! Opt-in cloud embeddings using rainy-sdk request/config types and bounded HTTP transport.
 //!
 //! Rules enforced here:
 //! * Nothing is sent unless the caller explicitly selected a remote provider; the provider is never
@@ -15,13 +15,14 @@
 use anyhow::{Result, bail};
 use rainy_sdk::{
     AuthConfig, EmbeddingEncodingFormat, EmbeddingInput, EmbeddingValue, EmbeddingsRequest,
-    RainyClient, RainyError,
+    RainyClient,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Read;
 
 use crate::embed::{ModelIdentity, TextEmbedder, TextKind, l2_normalize};
 
@@ -228,63 +229,6 @@ fn bounded(text: &str, secret: &str) -> String {
     clean
 }
 
-fn classify(error: &RainyError, secret: &str) -> CloudError {
-    let text = bounded(&error.to_string(), secret);
-    let lower = text.to_lowercase();
-    let (kind, message) = match error {
-        RainyError::Authentication { .. } | RainyError::AccessDenied { .. } => (
-            CloudErrorKind::Auth,
-            format!("authentication failed (HTTP 401/403): check the API key. {text}"),
-        ),
-        RainyError::InsufficientCredits { .. } => (
-            CloudErrorKind::Payment,
-            format!("provider reports insufficient credits (HTTP 402): {text}"),
-        ),
-        RainyError::RateLimit { retry_after, .. } => (
-            CloudErrorKind::RateLimit,
-            match retry_after {
-                Some(s) => format!("rate limited (HTTP 429); retry after {s}s: {text}"),
-                None => format!("rate limited (HTTP 429): {text}"),
-            },
-        ),
-        RainyError::Timeout { .. } => (
-            CloudErrorKind::Timeout,
-            "request timed out; raise --timeout-secs or retry".to_string(),
-        ),
-        RainyError::Network { .. } => (CloudErrorKind::Network, format!("network error: {text}")),
-        RainyError::Api { status_code, .. } if *status_code >= 500 => (
-            CloudErrorKind::Server,
-            format!("provider server error (HTTP {status_code}): {text}"),
-        ),
-        RainyError::Provider { .. } => (
-            CloudErrorKind::Server,
-            format!("upstream provider error: {text}"),
-        ),
-        RainyError::Serialization { .. } => (
-            CloudErrorKind::Malformed,
-            "provider returned a response that is not a valid embeddings payload".to_string(),
-        ),
-        // The SDK reports every other 4xx as InvalidRequest and drops the status line, so a 402
-        // whose body lacks the INSUFFICIENT_CREDITS code is recognised by its message.
-        RainyError::InvalidRequest { .. }
-            if lower.contains("credit")
-                || lower.contains("payment")
-                || lower.contains("billing")
-                || lower.contains("balance") =>
-        {
-            (
-                CloudErrorKind::Payment,
-                format!("provider reports a payment/credit problem (HTTP 402): {text}"),
-            )
-        }
-        _ => (
-            CloudErrorKind::Rejected,
-            format!("provider rejected the request: {text}"),
-        ),
-    };
-    CloudError { kind, message }
-}
-
 fn truncate_input(text: &str) -> String {
     match text.char_indices().nth(MAX_INPUT_CHARS) {
         Some((end, _)) => text[..end].to_string(),
@@ -292,8 +236,19 @@ fn truncate_input(text: &str) -> String {
     }
 }
 
+// Optional metadata is intentionally ignored; vector data remains mandatory and strictly typed.
+#[derive(Deserialize)]
+struct WireResponse {
+    data: Vec<WireEmbedding>,
+}
+#[derive(Deserialize)]
+struct WireEmbedding {
+    index: Option<usize>,
+    embedding: EmbeddingValue,
+}
+
 pub struct CloudEmbedder {
-    runtime: tokio::runtime::Runtime,
+    agent: ureq::Agent,
     client: RainyClient,
     config: CloudConfig,
     identity: ModelIdentity,
@@ -339,12 +294,15 @@ impl CloudEmbedder {
                 bounded(&e.to_string(), &api_key)
             ),
         })?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .user_agent(concat!("aether-midnight/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()?))
+            .build();
         let identity = config.identity();
         Ok(Self {
-            runtime,
+            agent,
             client,
             config,
             identity,
@@ -378,10 +336,71 @@ impl CloudEmbedder {
 
     fn embed_batch(&self, batch: &[String]) -> std::result::Result<Vec<Vec<f32>>, CloudError> {
         let request = self.request(batch);
-        let response = self
-            .runtime
-            .block_on(self.client.create_embeddings(request))
-            .map_err(|e| classify(&e, &self.secret))?;
+        // The SDK's typed decoder requires optional OpenRouter fields and its error mapping
+        // loses generic 402 statuses. Keep SDK request/config validation, but retain wire status.
+        let body = serde_json::to_vec(&request).map_err(|_| CloudError {
+            kind: CloudErrorKind::Config,
+            message: "invalid embedding request".into(),
+        })?;
+        let result = self
+            .agent
+            .post(&format!("{}/embeddings", self.client.api_base_url()))
+            .set("Authorization", &format!("Bearer {}", self.secret))
+            .set("Content-Type", "application/json")
+            .send_bytes(&body);
+        let response = match result {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(ureq::Error::Transport(error)) => {
+                let timeout = error.kind() == ureq::ErrorKind::Io
+                    && error.to_string().to_lowercase().contains("timed out");
+                return Err(CloudError {
+                    kind: if timeout { CloudErrorKind::Timeout } else { CloudErrorKind::Network },
+                    message: "provider request failed or timed out; check connectivity and --timeout-secs".into(),
+                });
+            }
+        };
+        let status = response.status();
+        if !(200..300).contains(&status) {
+            return Err(CloudError {
+                kind: match status {
+                    401 | 403 => CloudErrorKind::Auth,
+                    402 => CloudErrorKind::Payment,
+                    429 => CloudErrorKind::RateLimit,
+                    500..=599 => CloudErrorKind::Server,
+                    _ => CloudErrorKind::Rejected,
+                },
+                // Provider bodies can contain submitted text or credentials; do not echo them.
+                message: format!(
+                    "{} (HTTP {status}); check credentials, quota and provider configuration",
+                    match status {
+                        401 | 403 => "authentication failed",
+                        402 => "payment required",
+                        429 => "rate limited",
+                        500..=599 => "provider server error",
+                        _ => "provider rejected embedding request",
+                    }
+                ),
+            });
+        }
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(8 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| CloudError {
+                kind: CloudErrorKind::Network,
+                message: "failed reading provider response".into(),
+            })?;
+        let response: WireResponse = if bytes.len() > 8 * 1024 * 1024 {
+            None
+        } else {
+            serde_json::from_slice(&bytes).ok()
+        }
+        .ok_or_else(|| CloudError {
+            kind: CloudErrorKind::Malformed,
+            message: "provider returned an invalid or oversized embeddings payload".into(),
+        })?;
         let malformed = |message: String| CloudError {
             kind: CloudErrorKind::Malformed,
             message,
@@ -395,8 +414,18 @@ impl CloudEmbedder {
         }
         // Responses are placed by their `index`, not by arrival order.
         let mut slots: Vec<Option<Vec<f32>>> = vec![None; batch.len()];
-        for item in response.data {
-            let index = item.index as usize;
+        let indexed = response
+            .data
+            .iter()
+            .filter(|item| item.index.is_some())
+            .count();
+        if indexed != 0 && indexed != response.data.len() {
+            return Err(malformed(
+                "provider mixed indexed and unindexed embeddings".into(),
+            ));
+        }
+        for (position, item) in response.data.into_iter().enumerate() {
+            let index = item.index.unwrap_or(position);
             let Some(slot) = slots.get_mut(index) else {
                 return Err(malformed(format!(
                     "provider returned out-of-range index {index} for {} inputs",
@@ -430,6 +459,11 @@ impl CloudEmbedder {
                 return Err(malformed("provider returned an all-zero vector".into()));
             }
             l2_normalize(&mut vector);
+            if vector.iter().any(|v| !v.is_finite()) || vector.iter().all(|v| *v == 0.0) {
+                return Err(malformed(
+                    "provider vector cannot be normalized safely".into(),
+                ));
+            }
             *slot = Some(vector);
         }
         slots

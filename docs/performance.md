@@ -335,3 +335,52 @@ The fixed ≈ 220 ms is process start, the remote client (rustls platform-verifi
 **Local model, 10,000 vectors (real `multilingual-e5-small`).** `embed --namespace` over 10,000 short synthetic memories took 117 s wall, 1,245 s CPU (12 threads) and 1.56 GiB peak RSS (≈ 85 texts/s; 100 memories: 5.0 s including model load). `memory search --mode semantic` took a median of 3.98 s wall for both 100 and 10,000 stored vectors (9 runs each, 1.52 GiB RSS): model load dominates, and the 10,000-vector scan is below the 10 ms clock resolution. A fresh process per query pays that load; a long-lived caller should prefer the persistent MCP path once semantic modes are exposed there.
 
 Not measured: ANN, concurrent queries, Apple silicon, Linux, real cloud-provider latency (network and provider dependent), cold-cache disk. Lexical quality baselines are unchanged (see `docs/v0.1-status.md`).
+
+## v0.1 RC verification — final compatibility adapter
+
+These are the current RC measurements; the Phase 3 figures above are historical and
+used the previous SDK response/transport path. No latency improvement is claimed from
+these different workloads. Platform category: macOS x86_64. The release CLI was rebuilt
+with Rust build-path remapping; builds, package assembly and tests were idle during
+this run. Source: ignored local `target/release-candidate/measurements-final.json`.
+
+The Rust `midnight-harness release-measure --models MODELS` drives the compiled release
+CLI. Each query is a fresh child process with one request in flight. Wall time is
+monotonic elapsed time; CPU is child user+system time and RSS is child `wait4` peak,
+excluding the client/harness. Seed once through MCP `remember_batch`, embed through the
+CLI, reuse that database; all seeding, embedding and exhaustive-oracle work is outside
+query timing. All five measured ordered top-10 results at each size exactly match a
+separate exhaustive scoring pass over the stored vectors; stored counts are asserted.
+No real cloud provider is used.
+
+| Workload | Samples | Wall median (range) | CPU median | Peak RSS median |
+| --- | ---: | ---: | ---: | ---: |
+| Exact KNN, 10,000 × 384-d vectors, loopback query embed | 5 | 109.6 ms (106.5–111.6) | 100.8 ms | 15.55 MiB |
+| Exact KNN, 100,000 × 384-d vectors, loopback query embed | 5 | 483.1 ms (463.4–619.6) | 472.6 ms | 18.95 MiB |
+| Fresh-process local semantic query, one stored memory | 5 | 4.491 s (4.252–4.823) | 4.742 s | 1.46 GiB |
+
+KNN timings include process start, SDK client construction and a deterministic loopback
+embedding request; they are **not isolated pure scan times or live-provider latency**.
+The mock supplies deterministic 384-d bag-of-words vectors. Synthetic memories contain
+record numbers, payment/retry or cache/backup words and a cycling token. The query is
+`payment retry`. Exact agreement includes score ties resolved by ascending memory id.
+The local query is English against a Spanish payment-policy memory; correct rank 1,
+semantic mode and no degradation are asserted. Offline flags and dead proxies are set.
+Fresh process does not mean cold OS disk cache; no cold-cache claim is made.
+
+**Warm inference estimate through a real product entry point.** One `embed` process
+loads the model once and embeds successive 16-text batches. Short synthetic payment
+policy records took 4.543 s wall / 5.463 s CPU for 16 texts and 6.683 s wall / 27.168 s
+CPU for 512 texts (one sample each, both including model load; about 1.46 GiB peak RSS).
+The incremental estimate `(6.683 - 4.543) / (512 - 16)` is **4.31 ms/text** after the
+shared startup cost. This is an approximate single-pair, short-text batch estimate,
+not measured warmed single-query latency or a universal throughput promise. Longer
+texts and hardware differ. Semantic MCP/HTTP remains out of scope.
+
+The approximately four-second cold-start cost is still present (4.49 s median here),
+as is roughly 1.5 GiB local inference memory. Neither has been optimized in this RC.
+Frozen lexical quality is unchanged: memory v2 MRR 0.891667 / recall@1 0.55 /
+recall@10 0.975, single-term MRR 0.896825, adversarial MRR 1.0. `bench-retrieval --size
+1000 --samples 5` and `bench-memory --sizes 1000 --namespace-count 4` passed as smoke
+checks, not new large-scale timing claims. The historical native macOS retrieval gate
+in `retrieval-v04.md` remains pending.

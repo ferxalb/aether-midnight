@@ -272,6 +272,10 @@ fn malformed_vectors_and_payloads_are_rejected() {
             "all zero",
             serde_json::json!({"data":[{"object":"embedding","index":0,"embedding":vec![0.0f32; DIMS]}]}),
         ),
+        (
+            "overflowing normalization",
+            serde_json::json!({"data":[{"index":0,"embedding":vec![3.0e38f32; DIMS]}]}),
+        ),
         ("too few results", serde_json::json!({"data":[]})),
         (
             "too many results",
@@ -417,4 +421,93 @@ fn config_debug_output_contains_no_secret() {
     let mock = Mock::start(|_, r| ok_response(r, DIMS));
     let e = embedder(Provider::OpenRouter, &mock);
     assert!(!format!("{:?}", e.config()).contains(KEY));
+}
+
+#[test]
+fn optional_metadata_and_indices_follow_wire_contract_without_weakening_ordering() {
+    for provider in [Provider::OpenRouter, Provider::Rainy] {
+        let mock = Mock::start(|_, r| {
+            let Reply::Json(status, body) = ok_response(r, DIMS) else {
+                unreachable!()
+            };
+            let mut value: Value = serde_json::from_str(&body).unwrap();
+            value.as_object_mut().unwrap().remove("usage");
+            value.as_object_mut().unwrap().remove("object");
+            value.as_object_mut().unwrap().remove("model");
+            for row in value["data"].as_array_mut().unwrap() {
+                row.as_object_mut().unwrap().remove("index");
+            }
+            Reply::Json(status, value.to_string())
+        });
+        let mut e = embedder(provider, &mock);
+        let got = e.embed(TextKind::Passage, &["alpha", "beta"]).unwrap();
+        assert_eq!(got.len(), 2);
+        for (text, actual) in ["alpha", "beta"].iter().zip(&got) {
+            let mut expected = fake_vector(text, DIMS);
+            l2_normalize(&mut expected);
+            assert_eq!(*actual, expected);
+        }
+        let mixed = Mock::start(|_, _| {
+            Reply::Json(
+                200,
+                serde_json::json!({"data":[
+                    {"index":0,"embedding":vec![1.0; DIMS]},
+                    {"embedding":vec![1.0; DIMS]}
+                ]})
+                .to_string(),
+            )
+        });
+        assert_eq!(
+            kind_of(
+                embedder(provider, &mixed)
+                    .embed(TextKind::Passage, &["a", "b"])
+                    .unwrap_err()
+            ),
+            CloudErrorKind::Malformed
+        );
+    }
+}
+
+#[test]
+fn payment_classification_uses_status_even_for_empty_or_misleading_bodies() {
+    for provider in [Provider::OpenRouter, Provider::Rainy] {
+        for (status, body, expected) in [
+            (402, "", CloudErrorKind::Payment),
+            (402, "unrelated", CloudErrorKind::Payment),
+            (
+                400,
+                "billing payment credit balance",
+                CloudErrorKind::Rejected,
+            ),
+        ] {
+            let mock = Mock::start(move |_, _| Reply::Json(status, body.into()));
+            assert_eq!(
+                kind_of(
+                    embedder(provider, &mock)
+                        .embed(TextKind::Passage, &["a"])
+                        .unwrap_err()
+                ),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn authenticated_redirects_are_rejected_without_forwarding_credentials() {
+    let destination = Mock::start(|_, r| ok_response(r, DIMS));
+    let location = format!("{}/embeddings", destination.url);
+    let redirect = Mock::start(move |_, _| Reply::Redirect(location.clone()));
+    for provider in [Provider::OpenRouter, Provider::Rainy] {
+        assert_eq!(
+            kind_of(
+                embedder(provider, &redirect)
+                    .embed(TextKind::Passage, &["private text"])
+                    .unwrap_err()
+            ),
+            CloudErrorKind::Rejected
+        );
+    }
+    assert_eq!(redirect.count(), 2);
+    assert_eq!(destination.count(), 0);
 }

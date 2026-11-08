@@ -3,6 +3,8 @@
 //! binary through a real entry point (`--db DB mcp` or a CLI subcommand) and
 //! reports wall time, CPU time (user+system) and peak RSS of Midnight itself
 //! from `wait4`. Fixture generation, builds and client work are not measured.
+#[path = "midnight-harness/release.rs"]
+mod release;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
@@ -705,6 +707,11 @@ fn main() -> Result<()> {
     let need = |n: &str| flag(n).with_context(|| format!("missing {n}"));
     let cmd = a.first().map(String::as_str).unwrap_or("");
     let out = match cmd {
+        "license-notices" => release::notices(Path::new(need("--output")?))?,
+        "release-measure" => release::measure(
+            &binary_path(flag("--binary"))?,
+            Path::new(need("--models")?),
+        )?,
         "generate-fixture" => generate_fixture(Path::new(need("--output")?))?,
         "license-inventory" => license_inventory(
             &flag("--output")
@@ -733,7 +740,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B]>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B]>"
         ),
     };
     if let Some(p) = flag("--json-output") {

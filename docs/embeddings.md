@@ -168,34 +168,41 @@ aether-midnight embed --namespace project:app \
 Credentials: `OPENROUTER_API_KEY` for `openrouter`, `RAINY_API_KEY` for `rainy`. `doctor` reports
 only whether each is set.
 
-**Transport.** One transport serves both providers: [`rainy-sdk`](https://crates.io/crates/rainy-sdk)
-0.6.51 (`RainyClient::create_embeddings`, `AuthConfig::with_api_base_url`). It speaks the
-OpenAI-compatible `POST {base}/embeddings` contract that OpenRouter documents, sends a Bearer token,
-disables redirects (a credential is never forwarded to another host), enforces the timeout, bounds
-response (8 MiB) and error bodies (64 KiB) and keeps the key in a `SecretString`. Midnight turns off
-the SDK's retry setting and sends exactly one request per batch of 16 texts. See
-[v0.1-status.md](v0.1-status.md) for the compatibility evaluation, its cost and the known limits.
+**Transport.** Both providers use `rainy-sdk` 0.6.51 request/configuration types and
+endpoint validation. A narrow compatibility adapter uses the existing `ureq` native-TLS
+transport to retain HTTP statuses and decode optional response fields that the SDK
+requires. It disables redirects, enforces a total timeout, caps successful responses at
+8 MiB, sends one request per batch of 16 texts and does not retry. Provider error bodies
+are discarded rather than logged. Keys remain in memory only, never in output.
+
+Contract references: [OpenRouter embeddings](https://openrouter.ai/docs/api/api-reference/embeddings/create-embeddings),
+[Rainy SDK protocol](https://github.com/enosislabs/rainy-sdk), and the pinned SDK source.
+Live compatibility remains unverified without credentials.
 
 **Request shape.** `{"model", "input": [texts…], "encoding_format": "float", "dimensions": n}` plus the
 allow-listed `--param` fields. Inputs are sent verbatim (no E5 `query:`/`passage:` prefixes — that is
 the local model's contract) and truncated to 8,000 characters. Responses are placed by their
-`index`, not arrival order; the batch must return exactly one vector per input.
+`index`, not arrival order, when every item has an index. If all indices are omitted,
+array order is used; mixed indexed/unindexed responses are rejected. Optional `usage`
+and metadata may be omitted. The batch must return exactly one vector per input.
 
 **Validation.** A batch is rejected whole (nothing stored) if the response has the wrong number of
 vectors, an out-of-range or duplicate `index`, base64 where floats were requested, a vector whose
 length differs from `--dimensions`, a non-finite value, or an all-zero vector. Valid vectors are
 L2-normalised so cosine similarity stays a dot product.
 
-**Errors** are bounded (≤ 240 characters), control characters are stripped, and the API key is
-redacted. They are classified as auth (401/403), payment (402), rate limit (429, with `retry-after`
-when present), server (5xx), timeout, network, rejected request, malformed response or dimension
-mismatch. There is no automatic retry: `embed` is incremental, so re-running it resumes after the
-vectors already committed.
+**Errors** are bounded and secret-free. HTTP status determines auth (401/403), payment
+(402), rate limit (429), server (5xx), or rejected request; payment is never inferred
+from message text. Timeout, network, malformed response and dimension mismatch remain
+separate categories. Error bodies and provider-supplied retry instructions are not echoed.
+There is no automatic retry: re-running `embed` resumes after committed vectors.
 
 **Degraded operation.** If a provider call fails during `--mode semantic|hybrid`, the command still
 exits 0 with lexical results, `degraded: true`, `mode_used: "lexical"`, a `notice` that names the
 failure category, and a `warning:` line on stderr. If `embed` fails part-way it exits non-zero, keeps
-the vectors committed before the failure, and says lexical search is unaffected.
+the vectors committed before the failure, and says lexical search is unaffected. After
+the provider recovers, searches over a partial index report `semantic_coverage` and a
+`partial semantic coverage` notice (verified with 16 of 20 memories).
 
 ### Embedding-space isolation
 

@@ -4,7 +4,7 @@
 
 AETHER Midnight indexes a code repository on your machine so you, or an AI agent, can find the right file, line range, or symbol and get results you can trace back to the source. It also stores memories that you save explicitly, separated by namespace, so an agent can recall them later.
 
-It needs no server, account, API key, model, or network connection.
+Default lexical search needs no server, account, API key, model, or network connection. Local hybrid search requires the explicit runtime and model setup below.
 
 > **Status:** early development. The package is version `0.1.0` and has not been released, so commands and output fields may still change. See [CHANGELOG.md](CHANGELOG.md) and [HISTORY-TRACKER.md](HISTORY-TRACKER.md).
 
@@ -39,6 +39,30 @@ $BIN index-status --repo /path/to/your/repository
 ```
 
 Data commands print JSON. Run `index` once to build the index and again after you change files. Without an index, `search` reads files directly and marks each result `fresh_unindexed`. Run `index` for repeatable, ranked results.
+
+### Local hybrid search
+
+For the macOS x86_64 binary candidate, extraction, checksums and installation are in
+[installation instructions](docs/installation.md). The current RC is unsigned and
+Gatekeeper rejects it; see the [signing gate](docs/release-signing.md).
+After the source build above, run:
+
+```sh
+$BIN runtime install
+$BIN models pull multilingual-e5-small
+$BIN models verify
+$BIN memory add --namespace project:demo 'La política de pagos permite tres reintentos.'
+$BIN embed --namespace project:demo
+$BIN memory search --namespace project:demo 'payment retry policy' --mode hybrid --json
+$BIN embed --repo /path/to/your/repository
+$BIN search --repo /path/to/your/repository --query 'retry policy' --mode hybrid
+```
+
+The two explicit downloads require Internet access and about 500 MB plus cache space.
+Subsequent local inference is offline. Allow about 2 GiB free RAM; a fresh semantic CLI
+query takes roughly four seconds. Check `degraded`, `notice` and `semantic_coverage` in
+JSON: fallback or a partial index is reported explicitly. Only macOS x86_64 is verified
+for this embedding release. Cloud credentials are unnecessary for this local workflow.
 
 ## Examples
 

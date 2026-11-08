@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-07 (4) — v0.1 release candidate verification
+
+- Corrected cloud response compatibility for omitted optional fields and classified HTTP 402 by status. Added ordering, redirect/privacy and recovered partial-index regression tests; local inference, retrieval, persistence and MCP/HTTP behavior are preserved.
+- Prepared a reproducible local macOS x86_64 archive with checksums, instructions, examples and dependency notices. Clean-directory installation and real offline hybrid search passed. Gatekeeper rejects the unsigned CLI; the upstream runtime signature verifies. Public binary distribution remains NO-GO pending signing/notarization and hardened dynamic loading checks.
+- Commands, sanitized measurements, limitations and release gates: `docs/v0.1-status.md`, `docs/release-checklist.md`, `docs/release-signing.md` and `docs/performance.md`. Raw evidence remains ignored and local; nothing is committed or published.
+
 ## 2026-11-07 (3) — v0.1 Phase 3 release hardening and cloud embeddings
 
 - ONNX Runtime: pinned official 1.23.2 for macOS x86_64 with `runtime install|status` (explicit download, size + SHA-256 verified before extraction, named members only). `doctor` now reports runtime, model and credentials with remedies (optional checks never fail it). Model pinned to Hugging Face commit `614241f6…` with per-file SHA-256, verified at pull, `models verify`, `doctor` and load. Licence inventory gains ONNX Runtime, model weights and remote services (375 crates).

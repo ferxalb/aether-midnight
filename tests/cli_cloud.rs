@@ -527,7 +527,7 @@ fn provider_failures_degrade_search_to_lexical_and_never_leak_the_key() {
 fn embed_failure_midway_keeps_committed_vectors_and_lexical_search() {
     // 20 memories = two batches; the second request is rate limited.
     let mock = Mock::start(|n, r| {
-        if n == 0 {
+        if n != 1 {
             ok_response(r, DIMS)
         } else {
             Reply::Json(429, r#"{"error":{"code":"RATE_LIMIT_EXCEEDED","message":"slow down","details":{"retry_after":3}}}"#.into())
@@ -590,9 +590,14 @@ fn embed_failure_midway_keeps_committed_vectors_and_lexical_search() {
             &remote(&mock.url, "vendor/m1", &[]),
         ),
     );
-    // The query request hits the (now failing) mock, so the result is degraded lexical; the
-    // partial-coverage state is visible after the provider recovers.
-    assert_eq!(partial["degraded"], true);
+    assert_eq!(partial["degraded"], false);
+    assert!(
+        partial["notice"]
+            .as_str()
+            .unwrap()
+            .contains("partial semantic coverage: 16 of 20")
+    );
+    assert_eq!(partial["semantic_coverage"]["embedded"], 16);
 }
 
 #[test]

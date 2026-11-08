@@ -19,6 +19,7 @@ pub struct Recorded {
 }
 
 pub enum Reply {
+    Redirect(String),
     Json(u16, String),
     /// Wait, then answer (used to trip client timeouts).
     Delayed(Duration, Box<Reply>),
@@ -129,6 +130,12 @@ fn serve(mut stream: TcpStream, handler: Arc<Handler>, reqs: Arc<Mutex<Vec<Recor
 
 fn write_reply(stream: &mut TcpStream, reply: Reply) {
     match reply {
+        Reply::Redirect(location) => {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
         Reply::Delayed(d, inner) => {
             std::thread::sleep(d);
             write_reply(stream, *inner);
