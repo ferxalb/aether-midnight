@@ -318,7 +318,7 @@ pub fn ensure_loadable(models: &Path) -> Result<PathBuf> {
 
 // ---------------------------------------------------------------- install
 
-fn tls_agent() -> Result<ureq::Agent> {
+pub(crate) fn tls_agent() -> Result<ureq::Agent> {
     let connector = native_tls::TlsConnector::new().context("initialize TLS")?;
     Ok(ureq::AgentBuilder::new()
         .tls_connector(std::sync::Arc::new(connector))
@@ -330,7 +330,7 @@ fn tls_agent() -> Result<ureq::Agent> {
 
 /// Extract the named regular-file members from an uncompressed ustar stream held in memory.
 /// Anything not named is skipped; names are matched exactly (no path traversal is possible).
-fn extract_members(tar: &[u8], wanted: &[&str]) -> Result<Vec<(String, Vec<u8>)>> {
+pub(crate) fn extract_members(tar: &[u8], wanted: &[&str]) -> Result<Vec<(String, Vec<u8>)>> {
     let mut found = Vec::new();
     let mut offset = 0usize;
     while offset + 512 <= tar.len() {

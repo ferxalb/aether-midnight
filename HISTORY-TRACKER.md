@@ -2,6 +2,13 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (2) — Version 0.1.0-rc.1, `update` and `uninstall`
+
+- Version is now `0.1.0-rc.1` (tag `v0.1.0-rc.1`, archive `aether-midnight-0.1.0-rc.1-macos-universal2.tar.gz`); `scripts/install.sh` is pinned to it. The workflow smoke test also checks the `midnight` link, `update --help`, `uninstall --dry-run` and installer idempotency.
+- `update` (aliases `upgrade`, `self-update`; `--check`, `--pre`, `--dry-run`, `--to VERSION`): one request for the release list at `api.github.com`, SemVer selection (prereleases only with `--pre` or while running one), https-only GitHub hosts with every redirect hop re-validated, archive SHA-256 against the release `.sha256`, binary against the archive's `SHA256SUMS`, staged binary must report the expected version, then an atomic rename; cargo build outputs are refused. No new dependency (own SemVer comparison, the existing tar reader and TLS agent). Network use is documented in `docs/privacy.md`.
+- `uninstall` removes the program and links resolving to it; `--purge-config` / `--purge-data` delete exact files (the config and data directories are the same folder on macOS), `--remove-client-entries` edits user-scope client configs, project `.midnight/` is never touched; `--dry-run`, `--yes`.
+- Evidence: unit tests in `src/update.rs`/`src/uninstall.rs` and `tests/cli_update.rs` (real processes against a loopback stand-in for the GitHub API, including tampered checksums, wrong reported version, foreign asset hosts). The real GitHub redirect flow is verified only after the release exists. No retrieval, schema or performance change.
+
 ## 2026-11-08 (1) — Installer creates the `midnight` alias
 
 - `scripts/install.sh` now creates `midnight`, a relative symlink to `aether-midnight` beside it (the program already derives its display name from `argv[0]`), so the archive and its checksums are unchanged. It is idempotent and never replaces an existing `midnight` that is not that link; in that case it warns and the final hint uses `aether-midnight`. `--dry-run` lists the alias.

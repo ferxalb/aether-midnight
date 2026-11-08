@@ -6,7 +6,7 @@
 #              [--prefix DIR] [--no-runtime] [--dry-run] [--help]
 #
 # With no source option it downloads the pinned Universal 2 archive and its .sha256 file
-# from the public GitHub Release v0.1.0. The archive SHA-256 is always checked before
+# from the public GitHub Release v$VERSION (see VERSION below). The archive SHA-256 is always checked before
 # anything is extracted or installed. --sha256 overrides the downloaded checksum.
 # This script is pinned to release VERSION below. It only accepts an archive named
 # aether-midnight-VERSION-macos-universal2.tar.gz whose top-level directory has the same
@@ -17,7 +17,7 @@
 set -eu
 umask 022
 
-VERSION=0.1.0
+VERSION=0.1.0-rc.1
 APP=aether-midnight
 ALIAS=midnight
 ARCHIVE_NAME="$APP-$VERSION-macos-universal2"

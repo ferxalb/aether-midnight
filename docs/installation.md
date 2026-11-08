@@ -8,8 +8,8 @@ unsupported, and the script refuses to run there.
 ## Script install (recommended)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0/install.sh | sh -s -- --no-runtime
-# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-macos-universal2.tar.gz --sha256 <hex>
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.1/install.sh | sh -s -- --no-runtime
+# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-rc.1-macos-universal2.tar.gz --sha256 <hex>
 ```
 
 `scripts/install.sh` (from the repository) runs as your user (it refuses root/sudo) and:
@@ -31,7 +31,29 @@ failed after a successful binary install, 10 unsupported platform, 11 root, 12 m
 tool). `--dry-run` prints the plan. Next to the binary it also creates `midnight`, a relative symlink
 to `aether-midnight` (the program takes its display name from how it is invoked); an existing
 `midnight` that is not that link is left untouched with a warning. With no source option the script downloads the
-v0.1.0 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
+v0.1.0-rc.1 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
+
+### Update and uninstall
+
+```sh
+midnight update --check     # is a newer release published? (one request to api.github.com)
+midnight update             # download, verify and install it (alias: upgrade, self-update)
+midnight update --pre       # also consider prereleases (automatic while you run one)
+midnight update --to 0.1.0-rc.1   # install an exact version, older ones included
+midnight uninstall --dry-run
+midnight uninstall          # removes the program and the `midnight` link only
+midnight uninstall --purge-config --purge-data --remove-client-entries
+```
+
+`update` talks to GitHub only when you run it, accepts only `https` GitHub hosts (each redirect
+hop is checked), requires the archive to match the release's `.sha256`, requires the binary
+inside to match the archive's own `SHA256SUMS`, runs the staged binary to confirm its version, and
+only then swaps it in with an atomic rename next to the old one. A development build under
+`target/` is never overwritten. `uninstall` never deletes configuration or data unless you pass
+`--purge-config` / `--purge-data`, never touches a project's `.midnight/`, and reports client
+entries instead of editing them unless you pass `--remove-client-entries`. The user-wide
+`config.json`, `credentials.json` and the project trust list are what `--purge-config` removes;
+the database, token registry, models and ONNX Runtime are what `--purge-data` removes.
 
 ### Gatekeeper
 
@@ -59,9 +81,9 @@ aether-midnight runtime install && aether-midnight doctor
 For a locally built or subsequently signed and approved archive:
 
 ```sh
-shasum -a 256 -c aether-midnight-0.1.0-macos-universal2.tar.gz.sha256
-tar -xzf aether-midnight-0.1.0-macos-universal2.tar.gz
-cd aether-midnight-0.1.0-macos-universal2
+shasum -a 256 -c aether-midnight-0.1.0-rc.1-macos-universal2.tar.gz.sha256
+tar -xzf aether-midnight-0.1.0-rc.1-macos-universal2.tar.gz
+cd aether-midnight-0.1.0-rc.1-macos-universal2
 shasum -a 256 -c SHA256SUMS
 mkdir -p "$HOME/.local/bin"
 install -m 755 bin/aether-midnight "$HOME/.local/bin/aether-midnight"

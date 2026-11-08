@@ -12,6 +12,14 @@ Memory FTS uses a contentless-delete index: it stores searchable terms and a nam
 
 With `--storage project` the database lives in `<repo>/.midnight/` (directory `0700`, database `0600`) and `.midnight/` is added to `.gitignore`. A `.midnight/` that arrives with a clone is not opened and its `midnight.json` is not read until you adopt that repository (`init --storage project`, `setup`, or `connect --storage project`), which records its path in `trusted_projects.json` in the Midnight config directory. `project untrust` removes the record and leaves the data in place. `midnight.json` cannot contain a provider, endpoint, credential or upload consent; those exist only in the user-wide `config.json` and `credentials.json`. `.midnight/` is never indexed.
 
+## Network use by `update`
+
+`midnight update` is the only command that contacts GitHub, and only when you run it: one request
+for the release list (`api.github.com`), then, unless `--check` or `--dry-run`, the release's archive
+and checksum. Requests carry a generic `aether-midnight/<version>` user agent and no identifier.
+Nothing is checked in the background. `AETHER_MIDNIGHT_UPDATE_API` can point `update` at a mirror
+(`https`, or `http` on loopback for tests).
+
 ## Repository discovery and exclusions
 
 Git ignore and exclude rules are respected, including for untracked files; `--require-git` is disabled so non-Git folders also work. A root `.aetherignore` adds ignore rules when it is a regular, non-symlink file no larger than 1 MiB; oversized ignore files are not parsed and are reported. The walker does not follow symlinks, and opens re-check root containment and use no-follow semantics where the OS supports them. Credentials and private keys remain excluded even when generated/vendor paths are explicitly included.

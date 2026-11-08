@@ -59,6 +59,13 @@ jobs:
           sh dist/install.sh --archive-file "dist/$NAME.tar.gz" --sha256 "$SUM" --no-runtime
           "$HOME/.local/bin/aether-midnight" --version
           "$HOME/.local/bin/aether-midnight" --help >/dev/null
+          test -L "$HOME/.local/bin/midnight"
+          test "$(readlink "$HOME/.local/bin/midnight")" = aether-midnight
+          "$HOME/.local/bin/midnight" --version | grep -F "$VERSION"
+          "$HOME/.local/bin/midnight" update --help >/dev/null
+          "$HOME/.local/bin/midnight" uninstall --dry-run
+          # Re-running is idempotent and keeps the link.
+          sh dist/install.sh --archive-file "dist/$NAME.tar.gz" --sha256 "$SUM" --no-runtime | grep -F "already"
 
       - uses: actions/upload-artifact@v4
         with:

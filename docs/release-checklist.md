@@ -30,22 +30,22 @@ maintainer steps below are done. The binary is unsigned and not notarized (docum
 Detailed commands, evidence and measurements: [v0.1-status.md](v0.1-status.md).
 Installation: [installation.md](installation.md). Signing: [release-signing.md](release-signing.md).
 
-## Publish the v0.1.0 prerelease (maintainer, manual)
+## Publish the v0.1.0-rc.1 prerelease (maintainer)
 
-The release name and archive name are derived from `Cargo.toml` (`0.1.0`):
-`aether-midnight-0.1.0-macos-x86_64.tar.gz`.
+Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.1`, tag `v0.1.0-rc.1`,
+`aether-midnight-0.1.0-rc.1-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
+both read the release by that tag, so they only work once it exists.
 
-1. On a native Intel Mac, from a clean checkout of the release commit:
-   `sh scripts/package-release.sh` twice; both `target/release-candidate/*.tar.gz.sha256`
-   files must be identical. Record the SHA-256 (`<SHA256>`).
-2. Create GitHub release tag `v0.1.0`, marked **pre-release**, with these assets:
-   the `.tar.gz`, its `.tar.gz.sha256`, and `scripts/install.sh`. Put `<SHA256>` in the notes.
-3. The asset URL is then
-   `https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0/aether-midnight-0.1.0-macos-x86_64.tar.gz`.
-   Confirm it with `curl -fsSIL <url>` before using it.
-4. Optionally set `PIN_URL` and `PIN_SHA256` in `scripts/install.sh` to that URL and
-   `<SHA256>`, then re-upload the edited `install.sh` (it is not inside the archive, so the
-   archive hash does not change). Record `shasum -a 256 install.sh` in the notes.
+1. Merge to `main`, tag the commit (`git tag v0.1.0-rc.1`) and push the tag.
+2. Run the "macOS release artifacts" workflow on `main` (manual). It builds the Universal 2
+   binary, packages it, runs the offline installer smoke test and uploads the artifact.
+3. `gh run download <run-id> -n aether-midnight-macos-universal2`; verify
+   `shasum -a 256 -c *.sha256` and run `sh install.sh --archive-file ... --sha256 ... --no-runtime`
+   against it in an isolated `--prefix`.
+4. `gh release create v0.1.0-rc.1 --prerelease --title "v0.1.0-rc.1" --notes-file NOTES.md
+   <archive> <archive>.sha256 install.sh` (the notes state: unsigned, not notarized, Gatekeeper
+   rejects it, live cloud providers verified or not).
+5. Confirm the public URLs with `curl -fsSIL`, then `midnight update --check` from the prior build.
 
 ## Test the published artifact on a clean Intel Mac
 

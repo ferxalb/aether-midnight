@@ -58,6 +58,15 @@ Database selection, highest precedence first: `--db`, the `.midnight/midnight.sq
 
 `.midnight/midnight.json` accepts `version`, `embeddings` (`false` = keyword search for this project) and `mcp.read_only` / `mcp.memory_scopes` (narrowing only). Unknown fields are errors. Memories live in whichever database is selected, so a project with its own database does not see memories stored in the global one; use `--storage global` when memories must be shared across repositories.
 
+### Update and uninstall
+
+```sh
+midnight update [--check] [--pre] [--dry-run] [--to VERSION]   # aliases: upgrade, self-update
+midnight uninstall [--dry-run] [--yes] [--purge-config] [--purge-data] [--remove-client-entries]
+```
+
+With `--json`, `update --check` prints `{current, latest, tag, prerelease, update_available}`; `uninstall --dry-run` prints the plan. See `docs/installation.md` for the safety rules.
+
 ## MCP
 
 Run `aether-midnight mcp` with JSON-RPC messages over stdio. The implementation pins [MCP protocol version 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25), advertises tools, and accepts `initialize`, `ping`, `tools/list`, and `tools/call`. It does not use a third-party MCP SDK. This is the 2025-11-25 handshake subset; the later stateless protocol revision and other transports are not implemented.

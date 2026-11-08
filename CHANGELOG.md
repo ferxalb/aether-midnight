@@ -1,6 +1,6 @@
 # CHANGELOG
 
-This file records released versions only. The package manifest currently reports version `0.1.0`, but that version has not been released.
+This file records released versions only. The package manifest reports version `0.1.0-rc.1`, the first prerelease.
 
 No versions have been released yet. Unreleased development changes are recorded in [HISTORY-TRACKER.md](HISTORY-TRACKER.md).
 

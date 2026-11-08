@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_midnight::{
     auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, project,
-    runtime, ux,
+    runtime, uninstall, update, ux,
 };
 
 #[derive(Parser)]
@@ -14,7 +14,7 @@ use aether_midnight::{
     name = "midnight",
     version,
     about = "Local-first code and explicit agent-memory retrieval",
-    after_help = "Get started:\n  midnight setup            choose cloud, local or keyword-only search\n  midnight index .          index (and embed) this repository\n  midnight search \"query\"   search it\n  midnight status           show configuration, database and index state\n\n`aether-midnight` is the same program under its original name."
+    after_help = "Get started:\n  midnight setup            choose cloud, local or keyword-only search\n  midnight index .          index (and embed) this repository\n  midnight search \"query\"   search it\n  midnight status           show configuration, database and index state\n  midnight update           install a newer release (--check to only look)\n\n`aether-midnight` is the same program under its original name."
 )]
 struct Cli {
     /// SQLite database. Defaults to the OS local application-data directory.
@@ -84,6 +84,40 @@ enum Commands {
         /// Any path inside the project (used only with `--storage project`).
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Check for a newer release and install it (verified download from GitHub Releases).
+    #[command(visible_aliases = ["upgrade", "self-update"])]
+    Update {
+        /// Only report whether a newer release exists; download and change nothing.
+        #[arg(long)]
+        check: bool,
+        /// Also consider prereleases (always on when you already run a prerelease).
+        #[arg(long)]
+        pre: bool,
+        /// Show what would be installed without downloading it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Install exactly this version (e.g. 0.1.0-rc.1), including an older one.
+        #[arg(long, value_name = "VERSION")]
+        to: Option<String>,
+    },
+    /// Remove the installed program (and, only if asked, its configuration and data).
+    Uninstall {
+        /// Show what would be removed without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Also delete config.json, credentials.json and the project trust list.
+        #[arg(long)]
+        purge_config: bool,
+        /// Also delete the global database, token registry, models and ONNX Runtime.
+        #[arg(long)]
+        purge_data: bool,
+        /// Also remove Midnight's entry from your Claude Code, Claude Desktop and Codex user configs.
+        #[arg(long)]
+        remove_client_entries: bool,
     },
     /// List or forget the projects whose `.midnight/` Midnight is allowed to use.
     Project {
@@ -707,6 +741,28 @@ pub fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Update {
+            check,
+            pre,
+            dry_run,
+            to,
+        } => update_command(check, pre, dry_run, to, cli.json)?,
+        Commands::Uninstall {
+            dry_run,
+            yes,
+            purge_config,
+            purge_data,
+            remove_client_entries,
+        } => uninstall_command(
+            uninstall::Options {
+                purge_config,
+                purge_data,
+                remove_client_entries,
+            },
+            dry_run,
+            yes,
+            cli.json,
+        )?,
         Commands::Project { action } => match action {
             ProjectAction::List => {
                 let projects = connect::list_trusted();
@@ -1987,6 +2043,186 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
     }
     if !req.remove && outcome.changed && !req.dry_run {
         eprintln!("restart the client to load the new server.");
+    }
+    Ok(())
+}
+
+fn update_command(
+    check: bool,
+    pre: bool,
+    dry_run: bool,
+    to: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let current = update::current_version();
+    let want = match &to {
+        Some(text) => update::Want::Exact(
+            update::Version::parse(text)
+                .context("--to needs a version such as 0.1.0 or 0.1.0-rc.2")?,
+        ),
+        None => update::Want::Latest {
+            include_prerelease: pre || current.is_prerelease(),
+        },
+    };
+    let releases = update::fetch_releases()?;
+    let chosen = update::select(&releases, &want);
+    let Some(release) = chosen else {
+        let what = match &want {
+            update::Want::Exact(v) => format!("version {v} is not published"),
+            update::Want::Latest {
+                include_prerelease: false,
+            } => "no stable release is published yet (use --pre for prereleases)".to_string(),
+            update::Want::Latest { .. } => "no release is published yet".to_string(),
+        };
+        if json {
+            print_json(
+                &serde_json::json!({"current": current.to_string(), "update_available": false, "note": what}),
+            )?;
+            return Ok(());
+        }
+        if to.is_some() {
+            anyhow::bail!("{what}");
+        }
+        println!("midnight {current}: {what}");
+        return Ok(());
+    };
+    let exact = matches!(want, update::Want::Exact(_));
+    let differs = if exact {
+        release.version != current
+    } else {
+        release.version > current
+    };
+    if !differs {
+        if json {
+            print_json(
+                &serde_json::json!({"current": current.to_string(), "latest": release.version.to_string(), "update_available": false}),
+            )?;
+        } else {
+            println!("midnight {current} is up to date.");
+        }
+        return Ok(());
+    }
+    if check || dry_run {
+        if json {
+            print_json(&serde_json::json!({
+                "current": current.to_string(),
+                "latest": release.version.to_string(),
+                "tag": release.tag,
+                "prerelease": release.prerelease,
+                "update_available": true,
+                "archive_url": release.archive_url,
+            }))?;
+        } else {
+            let kind = if release.prerelease {
+                " (prerelease)"
+            } else {
+                ""
+            };
+            println!(
+                "midnight {current} -> {}{kind} is available.",
+                release.version
+            );
+            println!(
+                "{}",
+                if check {
+                    "Run `midnight update` to install it."
+                } else {
+                    "Dry run: nothing was downloaded."
+                }
+            );
+        }
+        return Ok(());
+    }
+    let target = update::installed_binary()?;
+    if !json {
+        eprintln!("Downloading {} ...", release.tag);
+    }
+    let applied = update::apply(&release, &target)?;
+    if json {
+        print_json(
+            &serde_json::json!({"updated": true, "from": applied.from, "to": applied.to, "path": applied.path}),
+        )?;
+    } else {
+        println!(
+            "updated {} -> {} ({})",
+            applied.from,
+            applied.to,
+            applied.path.display()
+        );
+        println!(
+            "Run `midnight doctor` to confirm the install; `midnight runtime install` if it asks for a newer ONNX Runtime."
+        );
+    }
+    Ok(())
+}
+
+fn uninstall_command(
+    options: uninstall::Options,
+    dry_run: bool,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    let binary = update::installed_binary()?;
+    let plan = uninstall::plan(&binary, options)?;
+    if !json {
+        println!("Will remove:");
+        for path in &plan.program {
+            println!("  {}", path.display());
+        }
+        if !plan.purge.is_empty() {
+            println!("Will also delete (--purge-*):");
+            for path in &plan.purge {
+                println!("  {}", path.display());
+            }
+        }
+        for entry in &plan.client_entries {
+            println!(
+                "{} entry in {} ({})",
+                entry.client,
+                entry.path.display(),
+                if plan.remove_client_entries {
+                    "will be removed"
+                } else {
+                    "stays; add --remove-client-entries to remove it"
+                }
+            );
+        }
+        if !plan.remaining.is_empty() {
+            println!("Stays on disk:");
+            for (label, path) in &plan.remaining {
+                println!("  {} ({label})", path.display());
+            }
+            println!(
+                "  (add --purge-config / --purge-data to delete configuration or global data)"
+            );
+        }
+    }
+    if dry_run {
+        if json {
+            print_json(&serde_json::json!({"dry_run": true, "plan": plan}))?;
+        }
+        return Ok(());
+    }
+    if !yes {
+        if json || !ux::stdin_is_tty() {
+            anyhow::bail!("uninstall needs confirmation: pass --yes (or run it in a terminal)");
+        }
+        eprint!("Proceed? [y/N]: ");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("cancelled; nothing was removed.");
+            return Ok(());
+        }
+    }
+    let done = uninstall::execute(&plan)?;
+    if json {
+        print_json(&serde_json::json!({"dry_run": false, "plan": plan, "done": done}))?;
+    } else {
+        println!(
+            "removed {} item(s). Midnight is uninstalled.",
+            done.removed.len()
+        );
     }
     Ok(())
 }

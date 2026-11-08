@@ -14,6 +14,8 @@ pub mod memory;
 pub mod project;
 pub mod runtime;
 mod text_index;
+pub mod uninstall;
+pub mod update;
 pub mod ux;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
