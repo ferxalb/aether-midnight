@@ -135,3 +135,19 @@ fn connect_asks_for_the_scope_on_a_terminal() {
     let (ok, _) = run_pty(&repo, &home, &["connect", "claude-code"], "9\n");
     assert!(!ok, "an invalid choice must fail instead of guessing");
 }
+
+#[test]
+fn index_shows_live_progress_on_a_terminal_and_a_summary_line() {
+    let (_t, repo, home) = repo_and_home();
+    for i in 0..300 {
+        fs::write(
+            repo.join(format!("f{i}.rs")),
+            format!("pub fn item_{i}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    let (ok, out) = run_pty(&repo, &home, &["index", "."], "");
+    assert!(ok, "{out}");
+    assert!(out.contains("Indexed 301 files in"), "{out}");
+    assert!(out.contains("Next: midnight search"), "{out}");
+}

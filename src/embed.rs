@@ -532,11 +532,30 @@ fn code_scope_key(scope: &RepoScope) -> String {
 
 /// Incrementally embed the indexed files of one repository/worktree as line-window chunks. Files
 /// that changed on disk since indexing are skipped (their vectors are removed): embed after `index`.
+/// Progress of `embed_code`, reported before each file (and once more when finished).
+#[derive(Debug, Clone, Copy)]
+pub struct EmbedProgress {
+    pub done_files: u64,
+    pub total_files: u64,
+    pub embedded_chunks: u64,
+    pub unchanged_chunks: u64,
+}
+
 pub fn embed_code(
     db_path: &Path,
     root: &Path,
     embedder: &mut dyn TextEmbedder,
     cancel: &AtomicBool,
+) -> Result<EmbedReport> {
+    embed_code_with_progress(db_path, root, embedder, cancel, &mut |_| {})
+}
+
+pub fn embed_code_with_progress(
+    db_path: &Path,
+    root: &Path,
+    embedder: &mut dyn TextEmbedder,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&EmbedProgress),
 ) -> Result<EmbedReport> {
     let scope = repo_scope(root)?;
     let key = code_scope_key(&scope);
@@ -565,7 +584,17 @@ pub fn embed_code(
         })?
         .collect::<rusqlite::Result<_>>()?
     };
-    for (file_id, rel_path, file_hash) in files {
+    let total_files = files.len() as u64;
+    let mut notify = |done: u64, report: &EmbedReport| {
+        progress(&EmbedProgress {
+            done_files: done,
+            total_files,
+            embedded_chunks: report.embedded as u64,
+            unchanged_chunks: report.unchanged as u64,
+        })
+    };
+    for (position, (file_id, rel_path, file_hash)) in files.into_iter().enumerate() {
+        notify(position as u64, &report);
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             break;
@@ -643,6 +672,9 @@ pub fn embed_code(
         }
         tx.commit()?;
         report.embedded += chunks.len();
+    }
+    if !report.cancelled {
+        notify(total_files, &report);
     }
     Ok(report)
 }

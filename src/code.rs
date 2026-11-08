@@ -295,6 +295,14 @@ impl Default for WriterState {
     }
 }
 
+/// Files examined by the index run in progress (reset at the start of each run). Only for live
+/// progress display; the authoritative numbers are in `IndexReport`.
+static FILES_SCANNED: AtomicU64 = AtomicU64::new(0);
+
+pub fn files_scanned() -> u64 {
+    FILES_SCANNED.load(Ordering::Relaxed)
+}
+
 pub fn index_repository(
     db_path: &Path,
     root: &Path,
@@ -645,6 +653,7 @@ fn index_scoped(
         NEXT_SAMPLE.fetch_add(1, Ordering::Relaxed)
     );
     let _index_lock = acquire_index_lock(db_path, scope)?;
+    FILES_SCANNED.store(0, Ordering::Relaxed);
     let mut conn = open_db(db_path)?;
     let previous_generation: i64 = conn
         .query_row(
@@ -887,6 +896,7 @@ fn index_scoped(
                         )
                         .optional()?;
                     writer.files_discovered += 1;
+                    FILES_SCANNED.fetch_add(1, Ordering::Relaxed);
 
                     if !verify_hashes
                         && existing

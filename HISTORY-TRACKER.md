@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (5) — Live progress for `index`
+
+- `midnight index` was silent while indexing and while uploading embeddings. On a terminal it now shows a spinner with a live count of files scanned and elapsed time while indexing, then `Embedding with <provider> (<model>) · done/total files (n%) · new/unchanged chunks · elapsed` redrawn in place, then summary lines (`Indexed N files in Xs`, `Embedded N files in Xs`). Not a terminal (pipes, CI): plain start and finish lines. `--json`: nothing extra. All of it goes to stderr, so stdout stays the report.
+- Implementation: `src/progress.rs`; `embed::embed_code_with_progress` / `ux::embed_repository_with_progress` (the old functions delegate with a no-op); one relaxed atomic increment per scanned file in the indexer (`code::files_scanned`), used only for display. No change to indexing results, retrieval, schema or stored data; the performance numbers in `docs/performance.md` were not re-measured for the extra increment.
+- Evidence: `tests/cli_pty.rs` (terminal run), `tests/cli_journey.rs` (cloud mock: plain lines on stderr, none on stdout), manual capture of the raw terminal stream.
+
 ## 2026-11-08 (4) — Quiet installer
 
 - `scripts/install.sh` no longer prints the Gatekeeper assessment or runs `doctor`. It still verifies the archive, installs, confirms the binary runs and reports the pinned version, and only speaks about macOS when the program is actually blocked or the file carries a quarantine attribute. `doctor` is for explicit use only. Docs updated (`docs/installation.md`, `docs/release-checklist.md`); the unsigned/not-notarized status stays documented there and in the release notes. The `install.sh` asset already attached to `v0.1.0-rc.1` still has the old output until it is re-uploaded.

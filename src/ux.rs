@@ -477,6 +477,18 @@ pub fn embed_repository(
     assume_yes: bool,
     cancel: &AtomicBool,
 ) -> Result<Option<embed::EmbedReport>> {
+    embed_repository_with_progress(db_path, repo, settings, assume_yes, cancel, &mut |_| {})
+}
+
+/// `embed_repository`, reporting progress before each file (consent is asked first).
+pub fn embed_repository_with_progress(
+    db_path: &Path,
+    repo: &Path,
+    settings: &mut Settings,
+    assume_yes: bool,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&embed::EmbedProgress),
+) -> Result<Option<embed::EmbedReport>> {
     if settings.provider.is_remote() {
         // Validate configuration and credential before asking for consent.
         settings.cloud_config()?;
@@ -496,11 +508,12 @@ pub fn embed_repository(
     let Some(mut embedder) = embedder_for(settings)? else {
         return Ok(None);
     };
-    Ok(Some(embed::embed_code(
+    Ok(Some(embed::embed_code_with_progress(
         db_path,
         repo,
         embedder.as_mut(),
         cancel,
+        progress,
     )?))
 }
 

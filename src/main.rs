@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_midnight::{
-    auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, project,
-    runtime, uninstall, update, ux,
+    auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, progress,
+    project, runtime, uninstall, update, ux,
 };
 
 #[derive(Parser)]
@@ -902,13 +902,35 @@ pub fn main() -> Result<()> {
             verify_hashes,
         } => {
             let repo = path.or(repo).unwrap_or_else(|| PathBuf::from("."));
-            let result = code::index_repository(
-                &db_path,
-                &repo,
-                include_generated,
-                verify_hashes,
-                &cancellation,
-            )?;
+            // Live status goes to stderr, only for people (never with --json), so piped data stays clean.
+            let show_progress = human_output(cli.json, cli.human);
+            let started = std::time::Instant::now();
+            let result = {
+                if show_progress && !progress::stderr_is_tty() {
+                    eprintln!("Indexing {} ...", repo.display());
+                }
+                let _spinner = show_progress.then(|| {
+                    progress::Spinner::start(
+                        format!("Indexing {}", repo.display()),
+                        code::files_scanned,
+                        "files scanned",
+                    )
+                });
+                code::index_repository(
+                    &db_path,
+                    &repo,
+                    include_generated,
+                    verify_hashes,
+                    &cancellation,
+                )?
+            };
+            if show_progress {
+                eprintln!(
+                    "Indexed {} files in {:.1}s",
+                    progress::thousands(result.eligible_files),
+                    started.elapsed().as_secs_f64()
+                );
+            }
             // Embed with the provider chosen in `setup`; nothing happens without saved settings.
             let mut embedded: Option<Result<embed::EmbedReport, String>> = None;
             let mut failure: Option<anyhow::Error> = None;
@@ -920,7 +942,55 @@ pub fn main() -> Result<()> {
                 && let Some(mut settings) =
                     config::load()?.filter(|s| s.provider != config::Choice::Lexical)
             {
-                match ux::embed_repository(&db_path, &repo, &mut settings, yes, &cancellation) {
+                let label = format!(
+                    "Embedding with {}{}",
+                    settings.provider.as_str(),
+                    settings
+                        .model
+                        .as_deref()
+                        .map(|m| format!(" ({m})"))
+                        .unwrap_or_default()
+                );
+                let embed_started = std::time::Instant::now();
+                let mut counter = progress::Counter::new(label.clone());
+                let mut announced = false;
+                let mut last = None;
+                let outcome = ux::embed_repository_with_progress(
+                    &db_path,
+                    &repo,
+                    &mut settings,
+                    yes,
+                    &cancellation,
+                    &mut |p| {
+                        if show_progress && !announced {
+                            announced = true;
+                            if !progress::stderr_is_tty() {
+                                eprintln!(
+                                    "{label}: {} files ...",
+                                    progress::thousands(p.total_files)
+                                );
+                            }
+                        }
+                        if show_progress {
+                            let detail = format!(
+                                "{} new chunks, {} unchanged",
+                                progress::thousands(p.embedded_chunks),
+                                progress::thousands(p.unchanged_chunks)
+                            );
+                            counter.update(p.done_files, p.total_files, &detail);
+                        }
+                        last = Some(*p);
+                    },
+                );
+                drop(counter);
+                if show_progress && let Some(p) = last {
+                    eprintln!(
+                        "Embedded {} files in {:.1}s",
+                        progress::thousands(p.total_files),
+                        embed_started.elapsed().as_secs_f64()
+                    );
+                }
+                match outcome {
                     Ok(report) => embedded = report.map(Ok),
                     Err(e) => {
                         embedded = Some(Err(format!("{e:#}")));

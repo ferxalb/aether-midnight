@@ -247,6 +247,20 @@ fn interactive_cloud_wizard_then_index_search_status_end_to_end() {
     let (o, e) = assert_ok(&index, "index");
     assert_no_secret("index out", &o);
     assert_no_secret("index err", &e);
+    // Progress for people goes to stderr (stdout stays the report); not a terminal here, so plain lines.
+    assert!(
+        e.contains("Indexing ") && e.contains("Indexed 2 files in"),
+        "{e}"
+    );
+    assert!(
+        e.contains("Embedding with openrouter (test/embed-large): 2 files")
+            && e.contains("Embedded 2 files in"),
+        "{e}"
+    );
+    assert!(
+        !o.contains("Embedding with"),
+        "progress must not leak into stdout:\n{o}"
+    );
     assert!(
         o.contains("embeddings:") && o.contains("openrouter:test/embed-large"),
         "{o}"
