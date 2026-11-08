@@ -19,8 +19,10 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnigh
    absolute or `..` member paths, then verifies the bundled `SHA256SUMS`;
 3. installs `aether-midnight` atomically into `~/.local/bin` (`--prefix DIR` changes the
    root); re-running with the same archive leaves the file unchanged;
-4. runs `aether-midnight --version`, then `runtime install` (pinned ONNX Runtime 1.23.2,
-   size and SHA-256 verified; skip with `--no-runtime`) and `aether-midnight doctor`.
+4. runs `aether-midnight --version` to confirm the installed binary runs and is the pinned
+   version, then `runtime install` (pinned ONNX Runtime 1.23.2, size and SHA-256 verified;
+   skip with `--no-runtime`). It prints nothing else: run `midnight doctor` yourself whenever
+   you want a health report.
 
 The script never edits shell profiles, removes quarantine attributes, disables
 Gatekeeper or uses `sudo`; add `~/.local/bin` to `PATH` yourself when it tells you to.
@@ -59,8 +61,9 @@ the database, token registry, models and ONNX Runtime are what `--purge-data` re
 ### Gatekeeper
 
 The executable is **not Developer ID signed and not notarized**, and
-`spctl --assess` rejects it. The script reports that assessment and never works around
-it. A file copied or fetched by `curl` normally carries no quarantine attribute and runs
+`spctl --assess` rejects it. The installer stays quiet about this and never works around
+it; it only says something if macOS actually blocks the program (or if the file carries a
+quarantine attribute). A file copied or fetched by `curl` normally carries no quarantine attribute and runs
 from Terminal; a browser download does carry one and macOS may block it. If the program
 is blocked, either use Apple's documented per-app override for software you trust or
 use the source build below. See [release-signing.md](release-signing.md).

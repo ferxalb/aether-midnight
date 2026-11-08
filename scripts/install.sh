@@ -207,13 +207,8 @@ case "$(cat "$TMP/ver")" in
 *" $VERSION") ;;
 *) warn "installed binary does not report version $VERSION (see above); this is not the pinned release."; exit 8 ;;
 esac
-ASSESS=$(spctl --assess --type execute "$DEST" 2>&1 || true)
-if [ -n "$ASSESS" ]; then
-    say "Gatekeeper assessment (informational): $ASSESS"
-    say "This executable is not Developer ID signed or notarized."
-fi
 
-# ---- ONNX Runtime + doctor -----------------------------------------------------------
+# ---- ONNX Runtime (only when requested) ----------------------------------------------
 STATUS=0
 if [ "$WANT_RUNTIME" -eq 1 ]; then
     say "Installing the pinned ONNX Runtime (verified download)..."
@@ -222,8 +217,6 @@ if [ "$WANT_RUNTIME" -eq 1 ]; then
         STATUS=9
     fi
 fi
-say "Running doctor..."
-"$DEST" doctor || { warn "doctor reported failing required checks; see the output above."; [ "$STATUS" -ne 0 ] || STATUS=1; }
 
 case ":$PATH:" in
 *":$BIN_DIR:"*) ;;

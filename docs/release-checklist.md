@@ -64,7 +64,7 @@ developers), no Rust, and a fresh user account. Do not change any security setti
    gate FAIL.
 4. Direct HTTPS path (no browser): `curl -fsSLO <asset URL>` for `install.sh`, then
    `sh ./install.sh --archive-url <archive URL> --sha256 <SHA256>`. Confirm `Archive
-   SHA-256 verified.`, `doctor` passes required checks, and a second run prints
+   SHA-256 verified.`, `midnight doctor` (run by hand; the installer does not run it) passes required checks, and a second run prints
    `already up to date`.
 5. Negative checks: run with a wrong `--sha256` (expect exit 5, nothing installed) and an
    `http://` URL (expect exit 2).

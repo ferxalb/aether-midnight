@@ -2,6 +2,10 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (4) — Quiet installer
+
+- `scripts/install.sh` no longer prints the Gatekeeper assessment or runs `doctor`. It still verifies the archive, installs, confirms the binary runs and reports the pinned version, and only speaks about macOS when the program is actually blocked or the file carries a quarantine attribute. `doctor` is for explicit use only. Docs updated (`docs/installation.md`, `docs/release-checklist.md`); the unsigned/not-notarized status stays documented there and in the release notes. The `install.sh` asset already attached to `v0.1.0-rc.1` still has the old output until it is re-uploaded.
+
 ## 2026-11-08 (3) — v0.1.0-rc.1 published; `update --force`
 
 - Prerelease `v0.1.0-rc.1` published on GitHub Releases from the workflow run on the tag commit (`faf2afe`): archive, `.sha256` and `install.sh`. Verified against the public URL: `install.sh` via `curl`, checksum and internal `SHA256SUMS`, symlink, idempotent re-run, `update --check` and `--pre --dry-run` against the real GitHub API.
