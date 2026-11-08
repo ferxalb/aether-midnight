@@ -1,16 +1,19 @@
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aether_midnight::{auth, benchmark, cloud, code, db, embed, mcp, mcp_http, memory, runtime};
+use aether_midnight::{
+    auth, benchmark, cloud, code, config, db, embed, mcp, mcp_http, memory, runtime, ux,
+};
 
 #[derive(Parser)]
 #[command(
-    name = "aether-midnight",
+    name = "midnight",
     version,
-    about = "Local-first code and explicit agent-memory retrieval"
+    about = "Local-first code and explicit agent-memory retrieval",
+    after_help = "Get started:\n  midnight setup            choose cloud, local or keyword-only search\n  midnight index .          index (and embed) this repository\n  midnight search \"query\"   search it\n  midnight status           show configuration, database and index state\n\n`aether-midnight` is the same program under its original name."
 )]
 struct Cli {
     /// SQLite database. Defaults to the OS local application-data directory.
@@ -19,12 +22,48 @@ struct Cli {
     /// Machine-readable JSON output (all commands emit JSON; accepted everywhere for stability).
     #[arg(long, global = true)]
     json: bool,
+    /// Force human-readable output for `index` and `search` even when piped.
+    #[arg(long, global = true, conflicts_with = "json")]
+    human: bool,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// First-run wizard: pick Rainy, OpenRouter, local or keyword-only search; stores credentials safely.
+    Setup {
+        /// Skip the wizard and configure this provider directly (also disables prompts).
+        #[arg(long, value_enum)]
+        provider: Option<SetupProvider>,
+        /// Embedding model id (cloud providers).
+        #[arg(long)]
+        model: Option<String>,
+        /// Vector size of the model (cloud providers).
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// API base URL override (HTTPS; HTTP only on loopback).
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Read the API key from the first line of standard input (keys are never accepted as arguments).
+        #[arg(long)]
+        api_key_stdin: bool,
+        /// Record consent to send source chunks and queries to the chosen cloud provider.
+        #[arg(long)]
+        allow_remote_upload: bool,
+        /// Save without the live test request to the provider.
+        #[arg(long)]
+        no_validate: bool,
+        /// Never prompt; fail with the missing flag instead.
+        #[arg(long)]
+        no_input: bool,
+    },
+    /// Show provider, model, credentials, database, and index/embedding state with next steps.
+    Status {
+        /// Repository to report on.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Create the database and apply migrations (idempotent).
     Init,
     /// Explicit memories: add, get, list, delete, search (namespace-isolated).
@@ -58,8 +97,17 @@ enum Commands {
     Doctor,
     /// Incrementally index a local repository/worktree.
     Index {
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
+        /// Repository to index (default: current directory).
+        #[arg(conflicts_with = "repo")]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Skip embedding even when a provider is configured.
+        #[arg(long)]
+        no_embed: bool,
+        /// Authorise sending source chunks to the configured cloud provider for this run.
+        #[arg(long, short = 'y')]
+        yes: bool,
         /// Include otherwise excluded generated/vendor directories. Credential files remain excluded.
         #[arg(long)]
         include_generated: bool,
@@ -89,9 +137,9 @@ enum Commands {
         /// Approximate context-token budget (Midnight heuristic, not a model tokenizer).
         #[arg(long, default_value_t = 2048)]
         token_budget: usize,
-        /// lexical (default, unchanged output), semantic, or hybrid (RRF of lexical + semantic).
-        #[arg(long, value_enum, default_value_t = SearchModeArg::Lexical)]
-        mode: SearchModeArg,
+        /// lexical, semantic, or hybrid (RRF of lexical + semantic). Default: the mode implied by `midnight setup` (hybrid with a provider, else lexical).
+        #[arg(long, value_enum)]
+        mode: Option<SearchModeArg>,
         #[command(flatten)]
         embedding: EmbeddingArgs,
     },
@@ -323,8 +371,8 @@ enum RuntimeAction {
 struct EmbeddingArgs {
     /// Embedding provider: local (default), openrouter, or rainy. Remote providers send the text
     /// being embedded (memories, code chunks, queries) to that provider.
-    #[arg(long, value_enum, default_value_t = ProviderArg::Local)]
-    provider: ProviderArg,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderArg>,
     /// Remote model id, e.g. openai/text-embedding-3-small. Required for remote providers; never
     /// defaulted or substituted.
     #[arg(long)]
@@ -346,6 +394,14 @@ struct EmbeddingArgs {
     params: Vec<String>,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum SetupProvider {
+    Rainy,
+    Openrouter,
+    Local,
+    Lexical,
+}
+
 #[derive(Clone, Copy, Default, ValueEnum)]
 enum ProviderArg {
     #[default]
@@ -356,7 +412,7 @@ enum ProviderArg {
 
 impl EmbeddingArgs {
     fn provider(&self) -> cloud::Provider {
-        match self.provider {
+        match self.provider.unwrap_or_default() {
             ProviderArg::Local => cloud::Provider::Local,
             ProviderArg::Openrouter => cloud::Provider::OpenRouter,
             ProviderArg::Rainy => cloud::Provider::Rainy,
@@ -508,8 +564,18 @@ enum MemoryKind {
     Derived,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+pub fn main() -> Result<()> {
+    let invoked = match std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|a| std::path::Path::new(a).file_stem())
+        .and_then(|s| s.to_str())
+    {
+        Some("aether-midnight") => "aether-midnight",
+        _ => "midnight",
+    };
+    let matches = Cli::command().name(invoked).get_matches();
+    let cli = Cli::from_arg_matches(&matches).map_err(|e| e.exit())?;
     let db_path = cli.db.unwrap_or(db::default_db_path()?);
     let cancellation = Arc::new(AtomicBool::new(false));
     let cancellation_for_signal = Arc::clone(&cancellation);
@@ -534,11 +600,57 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Setup {
+            provider,
+            model,
+            dimensions,
+            endpoint,
+            api_key_stdin,
+            allow_remote_upload,
+            no_validate,
+            no_input,
+        } => {
+            let summary = ux::run_setup(ux::SetupArgs {
+                provider: provider.map(|p| match p {
+                    SetupProvider::Rainy => config::Choice::Rainy,
+                    SetupProvider::Openrouter => config::Choice::Openrouter,
+                    SetupProvider::Local => config::Choice::Local,
+                    SetupProvider::Lexical => config::Choice::Lexical,
+                }),
+                model,
+                dimensions,
+                endpoint,
+                api_key_stdin,
+                allow_upload: allow_remote_upload,
+                no_validate,
+                no_input,
+            })?;
+            if cli.json {
+                print_json(&summary)?;
+            } else {
+                ux::render_setup(&summary);
+            }
+        }
+        Commands::Status { path } => {
+            let report = ux::status_report(&db_path, &path)?;
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                ux::render_status(&report);
+            }
+            if report["ok"] != true {
+                std::process::exit(1);
+            }
+        }
         Commands::Index {
+            path,
             repo,
+            no_embed,
+            yes,
             include_generated,
             verify_hashes,
         } => {
+            let repo = path.or(repo).unwrap_or_else(|| PathBuf::from("."));
             let result = code::index_repository(
                 &db_path,
                 &repo,
@@ -546,8 +658,38 @@ fn main() -> Result<()> {
                 verify_hashes,
                 &cancellation,
             )?;
-            print_json(&result)?;
-            if result.cancelled {
+            // Embed with the provider chosen in `setup`; nothing happens without saved settings.
+            let mut embedded: Option<Result<embed::EmbedReport, String>> = None;
+            let mut failure: Option<anyhow::Error> = None;
+            if !result.cancelled
+                && !no_embed
+                && let Some(mut settings) =
+                    config::load()?.filter(|s| s.provider != config::Choice::Lexical)
+            {
+                match ux::embed_repository(&db_path, &repo, &mut settings, yes, &cancellation) {
+                    Ok(report) => embedded = report.map(Ok),
+                    Err(e) => {
+                        embedded = Some(Err(format!("{e:#}")));
+                        failure = Some(e);
+                    }
+                }
+            }
+            if human_output(cli.json, cli.human) {
+                ux::render_index(&result, embedded.as_ref());
+            } else {
+                let mut value = serde_json::to_value(&result)?;
+                if let Some(outcome) = &embedded {
+                    value["embedding"] = match outcome {
+                        Ok(r) => serde_json::to_value(r)?,
+                        Err(e) => serde_json::json!({"error": e}),
+                    };
+                }
+                print_json(&value)?;
+            }
+            if let Some(e) = failure {
+                return Err(e.context("embedding did not complete (the keyword index is complete and usable; re-run `midnight index` to resume)"));
+            }
+            if result.cancelled || matches!(&embedded, Some(Ok(r)) if r.cancelled) {
                 std::process::exit(130);
             }
         }
@@ -569,16 +711,38 @@ fn main() -> Result<()> {
             embedding,
         } => {
             let query = query_pos.or(query_flag).unwrap_or_default();
+            // Flags win; otherwise use what `midnight setup` saved; otherwise lexical.
+            let saved = if embedding.provider.is_none() {
+                config::load()?.filter(|s| s.provider != config::Choice::Lexical)
+            } else {
+                None
+            };
+            let mode = mode.unwrap_or(if saved.is_some() {
+                SearchModeArg::Hybrid
+            } else {
+                SearchModeArg::Lexical
+            });
+            let human = human_output(cli.json, cli.human);
             if matches!(mode, SearchModeArg::Lexical) {
                 // Unchanged legacy contract and code path.
-                print_json(&code::search_code_with_budget(
-                    &db_path,
-                    &repo,
-                    &query,
-                    limit,
-                    token_budget,
-                )?)?
+                let response =
+                    code::search_code_with_budget(&db_path, &repo, &query, limit, token_budget)?;
+                if human {
+                    ux::render_search(&query, None, &response);
+                    if config::load().ok().flatten().is_none() {
+                        eprintln!("tip: `midnight setup` enables semantic search");
+                    }
+                } else {
+                    print_json(&response)?
+                }
             } else {
+                let mut loader = || -> Result<Box<dyn embed::TextEmbedder>> {
+                    match &saved {
+                        Some(settings) => ux::embedder_for(settings)?
+                            .ok_or_else(|| anyhow::anyhow!("no embedding provider configured")),
+                        None => embedding.build(),
+                    }
+                };
                 let response = embed::search_code(
                     &db_path,
                     &repo,
@@ -586,14 +750,18 @@ fn main() -> Result<()> {
                     mode.into(),
                     limit,
                     token_budget,
-                    &mut model_loader(&embedding),
+                    &mut loader,
                 )?;
                 if response.info.degraded
                     && let Some(notice) = &response.info.notice
                 {
                     eprintln!("warning: {notice}");
                 }
-                print_json(&response)?
+                if human {
+                    ux::render_search(&query, Some(&response.info), &response.search);
+                } else {
+                    print_json(&response)?
+                }
             }
         }
         Commands::Models { action } => models_command(action, cli.json)?,
@@ -1182,6 +1350,12 @@ fn runtime_command(action: RuntimeAction, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Readable output for `index`/`search`: on a terminal (or with `--human`) unless `--json`; piped
+/// output stays JSON so existing automation keeps working.
+fn human_output(json: bool, human: bool) -> bool {
+    !json && (human || ux::stdout_is_tty())
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {

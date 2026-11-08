@@ -492,6 +492,66 @@ impl TextEmbedder for CloudEmbedder {
     }
 }
 
+/// List embedding model ids the provider advertises (OpenRouter `GET {base}/embeddings/models`).
+/// Rainy documents no model-listing endpoint, so it reports that instead of guessing. Bounded,
+/// no redirects, no credential in any error. Read-only: no user content is sent.
+pub fn discover_models(
+    provider: Provider,
+    endpoint: Option<&str>,
+    api_key: &str,
+    timeout_secs: u64,
+) -> Result<Vec<String>> {
+    if provider != Provider::OpenRouter {
+        bail!(
+            "{} does not advertise a model list; enter the model id manually",
+            provider.as_str()
+        );
+    }
+    let base = endpoint
+        .unwrap_or(OPENROUTER_ENDPOINT)
+        .trim_end_matches('/')
+        .to_string();
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .user_agent(concat!("aether-midnight/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()?))
+        .build();
+    let response = match agent
+        .get(&format!("{base}/embeddings/models"))
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .call()
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => {
+            bail!("model discovery failed (HTTP {code}); check the API key and endpoint")
+        }
+        Err(_) => bail!("model discovery failed; check connectivity"),
+    };
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(4 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("failed reading the model list"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("provider returned an unreadable model list"))?;
+    let mut ids: Vec<String> = value["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str())
+        .filter(|id| !id.is_empty() && id.len() <= 200 && !id.chars().any(char::is_whitespace))
+        .map(str::to_owned)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        bail!("provider returned no embedding models");
+    }
+    Ok(ids)
+}
+
 /// True when `error` (from an embedder) is a cloud failure, for callers that want to say so.
 pub fn as_cloud_error(error: &anyhow::Error) -> Option<&CloudError> {
     error.downcast_ref::<CloudError>()

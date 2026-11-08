@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-07 (7) — `midnight` command and guided first run
+
+- New `midnight` binary (same program as `aether-midnight`, `src/bin/midnight.rs` includes `src/main.rs`). New commands: `setup` (interactive wizard or scripted flags for Rainy, OpenRouter, local, lexical), `status`; `index [PATH]` embeds with the saved provider; `search` uses the saved mode (hybrid with a provider, else lexical). Preferences live in `config.json`; an API key typed into `setup` goes to `credentials.json` (0600, directory 0700), an environment variable always wins and is never copied. Remote uploads need consent recorded by `setup` (bound to provider, destination and model), `--yes` for one run, or a terminal prompt.
+- Output: `index`/`search` print readable text on a terminal or with `--human`; piped output and `--json` keep the previous JSON, so existing automation is unchanged. Cloud and lexical flows never load ONNX.
+- Evidence: `tests/cli_journey.rs` (8 real-process tests from a clean config directory against the loopback mock). Live Rainy/OpenRouter behavior, including OpenRouter model discovery (`GET {base}/embeddings/models`), is unverified: no credentials were available. No retrieval, ONNX or packaging change.
+
 ## 2026-11-07 (6) — v0.1.0 installer pin and release handoff
 
 - `scripts/install.sh` is now pinned to `VERSION=0.1.0`: it accepts only `aether-midnight-0.1.0-macos-x86_64` archives (URL name, single top-level directory, installed `--version`), rejects link members, and removes its staged file on interruption. `scripts/package-release.sh` derives the archive name from `Cargo.toml` (the `-rc1` suffix is gone). Release-pin values stay empty until a release is published.
