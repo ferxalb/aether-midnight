@@ -1923,8 +1923,12 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
         .context("locate the midnight executable")?;
     let command = match scope {
         connect::Scope::User => exe.to_string_lossy().into_owned(),
-        connect::Scope::Project => exe
-            .file_stem()
+        // Prefer the name the user typed (`midnight` may be a symlink to `aether-midnight`).
+        connect::Scope::Project => std::env::args_os()
+            .next()
+            .as_deref()
+            .and_then(|a| Path::new(a).file_stem())
+            .or_else(|| exe.file_stem())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "midnight".into()),
     };

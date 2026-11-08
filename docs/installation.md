@@ -28,7 +28,9 @@ Before anything is written, a bad checksum, unreadable archive, unsafe path or
 unwritable prefix aborts with a distinct exit code (2 usage, 3 file, 4 download,
 5 checksum, 6 archive, 7 install location, 8 binary did not run, 9 runtime install
 failed after a successful binary install, 10 unsupported platform, 11 root, 12 missing
-tool). `--dry-run` prints the plan. With no source option the script downloads the
+tool). `--dry-run` prints the plan. Next to the binary it also creates `midnight`, a relative symlink
+to `aether-midnight` (the program takes its display name from how it is invoked); an existing
+`midnight` that is not that link is left untouched with a warning. With no source option the script downloads the
 v0.1.0 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
 
 ### Gatekeeper

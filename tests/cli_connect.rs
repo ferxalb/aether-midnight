@@ -307,3 +307,26 @@ fn project_list_untrust_and_status_describe_the_project_state() {
         false
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn project_entries_use_the_name_the_user_invoked_even_through_a_symlink() {
+    let (t, repo, home) = setup();
+    let link = t.path().join("midnight");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_aether-midnight"), &link).unwrap();
+    let out = Command::new(&link)
+        .args(["connect", "claude-code", "--scope", "project"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", home.join("cfg"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cfg: Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(cfg["mcpServers"]["aether-midnight"]["command"], "midnight");
+}

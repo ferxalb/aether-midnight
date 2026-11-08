@@ -19,6 +19,7 @@ umask 022
 
 VERSION=0.1.0
 APP=aether-midnight
+ALIAS=midnight
 ARCHIVE_NAME="$APP-$VERSION-macos-universal2"
 RELEASE_BASE="https://github.com/ferxalbs/aether-midnight/releases/download/v$VERSION"
 PIN_URL="$RELEASE_BASE/$ARCHIVE_NAME.tar.gz"
@@ -110,6 +111,7 @@ DEST="$BIN_DIR/$APP"
 
 if [ "$DRY" -eq 1 ]; then
     say "dry run: would install $APP into $DEST"
+    say "  alias:   $BIN_DIR/$ALIAS -> $APP (relative symlink; skipped if $ALIAS already exists and is not that link)"
     say "  source:  ${FILE:-$URL}"
     say "  sha256:  ${SHA:-downloaded from $URL.sha256}"
     if [ "$WANT_RUNTIME" -eq 1 ]; then say "  runtime: pinned ONNX Runtime via runtime install"; else say "  runtime: skipped"; fi
@@ -174,6 +176,23 @@ else
     say "Installed $DEST"
 fi
 
+# ---- `midnight` alias: a relative symlink to the same binary ---------------------------
+# The program picks its display name from argv[0], so no second binary is needed. An existing
+# `midnight` that is not our link is never replaced.
+ALIAS_PATH="$BIN_DIR/$ALIAS"
+CMD=$APP
+if [ -L "$ALIAS_PATH" ] && [ "$(readlink "$ALIAS_PATH")" = "$APP" ]; then
+    say "$ALIAS_PATH already points to $APP."
+    CMD=$ALIAS
+elif [ -e "$ALIAS_PATH" ] || [ -L "$ALIAS_PATH" ]; then
+    warn "$ALIAS_PATH already exists and is not a link to $APP; leaving it alone. Use '$APP' instead of '$ALIAS'."
+elif ln -s "$APP" "$ALIAS_PATH"; then
+    say "Linked $ALIAS_PATH -> $APP"
+    CMD=$ALIAS
+else
+    warn "cannot create $ALIAS_PATH; use '$APP' instead of '$ALIAS'."
+fi
+
 # ---- Gatekeeper: report only, never bypass -------------------------------------------
 if xattr -p com.apple.quarantine "$DEST" >/dev/null 2>&1; then
     warn "$DEST carries a quarantine attribute. This script does not remove it. If macOS blocks the program, follow Apple's documented override for software you trust, or build from source."
@@ -210,6 +229,6 @@ case ":$PATH:" in
 *":$BIN_DIR:"*) ;;
 *) say "Add to your shell profile (not done automatically): export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
-say "Next: run '$APP setup' once to choose your search provider, then '$APP setup' again inside a repository to set up that project."
+say "Next: run '$CMD setup' once to choose your search provider, then '$CMD setup' again inside a repository to set up that project."
 if [ "$STATUS" -eq 0 ]; then say "Done."; else say "Finished with warnings (exit $STATUS)."; fi
 exit "$STATUS"

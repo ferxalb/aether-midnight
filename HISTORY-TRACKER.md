@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (1) — Installer creates the `midnight` alias
+
+- `scripts/install.sh` now creates `midnight`, a relative symlink to `aether-midnight` beside it (the program already derives its display name from `argv[0]`), so the archive and its checksums are unchanged. It is idempotent and never replaces an existing `midnight` that is not that link; in that case it warns and the final hint uses `aether-midnight`. `--dry-run` lists the alias.
+- `connect --scope project` writes the name the user invoked (`midnight` through the symlink) instead of the canonicalized binary name. Evidence: a real-process test through a symlink in `tests/cli_connect.rs`; the installer was exercised against a locally built stand-in archive (fresh install, re-run, foreign file, foreign link) and `sh -n`; ShellCheck is not installed here and remains pending. No Rust retrieval, schema or performance change.
+
 ## 2026-11-07 (10) — Consolidation: project trust commands, status, PTY tests, docs
 
 - `project list` / `project untrust [PATH]` manage the trust allow-list; `status` now reports project storage (global or project), trust, whether a leftover `.midnight/` is being ignored, and the effective `midnight.json` values, without creating anything.
