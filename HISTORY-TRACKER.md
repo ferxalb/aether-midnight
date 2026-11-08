@@ -2,6 +2,16 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-07 (6) — v0.1.0 installer pin and release handoff
+
+- `scripts/install.sh` is now pinned to `VERSION=0.1.0`: it accepts only `aether-midnight-0.1.0-macos-x86_64` archives (URL name, single top-level directory, installed `--version`), rejects link members, and removes its staged file on interruption. `scripts/package-release.sh` derives the archive name from `Cargo.toml` (the `-rc1` suffix is gone). Release-pin values stay empty until a release is published.
+- `docs/release-checklist.md` now holds the manual prerelease publication and clean-Intel-Mac test procedure; the public-download gate is PENDING. ShellCheck was not available on the host and is still to be run. No code, retrieval or performance change.
+
+## 2026-11-07 (5) — Script-first installation
+
+- v0.1 is now distributed as a Rust CLI via `scripts/install.sh` (macOS x86_64, user-local, no sudo) instead of a signed app/PKG. The script requires an explicit archive SHA-256, verifies the bundled `SHA256SUMS`, rejects unsafe archive paths, installs atomically and idempotently, runs the pinned ONNX Runtime install and `doctor`, and never bypasses Gatekeeper or touches quarantine. Developer ID signing work is dropped from the v0.1 plan.
+- Docs: `docs/installation.md` (script, Gatekeeper, source-build fallback), `docs/release-signing.md`, `docs/release-checklist.md`. The release pin in the script is empty until an archive is published. Clean-machine and quarantined-download behavior are not yet tested; no code, retrieval or performance change.
+
 ## 2026-11-07 (4) — v0.1 release candidate verification
 
 - Corrected cloud response compatibility for omitted optional fields and classified HTTP 402 by status. Added ordering, redirect/privacy and recovered partial-index regression tests; local inference, retrieval, persistence and MCP/HTTP behavior are preserved.

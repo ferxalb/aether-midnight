@@ -1,17 +1,67 @@
-# Install the v0.1 release candidate
+# Install AETHER Midnight v0.1
 
-Only **macOS x86_64** is verified. This candidate was tested on the current macOS host;
-older macOS versions, Apple silicon, Linux and Windows are not certified. The CLI is
-unsigned and unnotarized: Gatekeeper rejects it. This is a local review candidate,
-not an approved public download. See [release-signing.md](release-signing.md).
-Do not disable Gatekeeper or remove quarantine to install it.
+v0.1 is distributed as a Rust CLI installed by a shell script. There is no macOS app,
+PKG or Developer ID signing step. Only **macOS x86_64 (native Intel)** is supported.
+Apple silicon (including Rosetta shells), Linux, Windows and other architectures are
+unsupported, and the script refuses to run there.
+
+## Script install (recommended)
+
+```sh
+sh scripts/install.sh --archive-file aether-midnight-0.1.0-macos-x86_64.tar.gz \
+    --sha256 <64-hex SHA-256 published with the archive>
+# or: --archive-url https://... --sha256 <hex>
+```
+
+`scripts/install.sh` (from the repository) runs as your user (it refuses root/sudo) and:
+
+1. checks the platform, and requires `--sha256` (an unverified archive is never used);
+2. downloads (HTTPS only, TLS 1.2+) or copies the archive, verifies its SHA-256, rejects
+   absolute or `..` member paths, then verifies the bundled `SHA256SUMS`;
+3. installs `aether-midnight` atomically into `~/.local/bin` (`--prefix DIR` changes the
+   root); re-running with the same archive leaves the file unchanged;
+4. runs `aether-midnight --version`, then `runtime install` (pinned ONNX Runtime 1.23.2,
+   size and SHA-256 verified; skip with `--no-runtime`) and `aether-midnight doctor`.
+
+The script never edits shell profiles, removes quarantine attributes, disables
+Gatekeeper or uses `sudo`; add `~/.local/bin` to `PATH` yourself when it tells you to.
+Before anything is written, a bad checksum, unreadable archive, unsafe path or
+unwritable prefix aborts with a distinct exit code (2 usage, 3 file, 4 download,
+5 checksum, 6 archive, 7 install location, 8 binary did not run, 9 runtime install
+failed after a successful binary install, 10 unsupported platform, 11 root, 12 missing
+tool). `--dry-run` prints the plan. The release pin (`PIN_URL`/`PIN_SHA256` in the
+script) is empty until a release archive is published; until then pass the archive
+and checksum explicitly.
+
+### Gatekeeper
+
+The executable is **not Developer ID signed and not notarized**, and
+`spctl --assess` rejects it. The script reports that assessment and never works around
+it. A file copied or fetched by `curl` normally carries no quarantine attribute and runs
+from Terminal; a browser download does carry one and macOS may block it. If the program
+is blocked, either use Apple's documented per-app override for software you trust or
+use the source build below. See [release-signing.md](release-signing.md).
+
+### Source-build fallback
+
+Needs Rust 1.98+ and the Xcode Command Line Tools (a locally built binary is not
+quarantined):
+
+```sh
+cargo build --release --locked
+mkdir -p "$HOME/.local/bin"
+install -m 755 target/release/aether-midnight "$HOME/.local/bin/aether-midnight"
+aether-midnight runtime install && aether-midnight doctor
+```
+
+## Manual install of the same archive
 
 For a locally built or subsequently signed and approved archive:
 
 ```sh
-shasum -a 256 -c aether-midnight-0.1.0-rc1-macos-x86_64.tar.gz.sha256
-tar -xzf aether-midnight-0.1.0-rc1-macos-x86_64.tar.gz
-cd aether-midnight-0.1.0-rc1-macos-x86_64
+shasum -a 256 -c aether-midnight-0.1.0-macos-x86_64.tar.gz.sha256
+tar -xzf aether-midnight-0.1.0-macos-x86_64.tar.gz
+cd aether-midnight-0.1.0-macos-x86_64
 shasum -a 256 -c SHA256SUMS
 mkdir -p "$HOME/.local/bin"
 install -m 755 bin/aether-midnight "$HOME/.local/bin/aether-midnight"

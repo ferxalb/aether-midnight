@@ -14,7 +14,9 @@ mkdir -p "$OUT"
 STAGE=$(mktemp -d "$OUT/stage.XXXXXX")
 target/release/midnight-harness license-inventory --output "$STAGE/inventory.json" > "$OUT/inventory-package.log"
 cmp THIRD_PARTY_LICENSES.json "$STAGE/inventory.json"
-NAME=aether-midnight-0.1.0-rc1-macos-x86_64
+VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+[ -n "$VERSION" ] || { echo 'cannot read version from Cargo.toml' >&2; exit 1; }
+NAME=aether-midnight-$VERSION-macos-x86_64
 PKG="$STAGE/$NAME"
 mkdir -p "$PKG/bin" "$PKG/docs"
 cp target/release/aether-midnight "$PKG/bin/"

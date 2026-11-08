@@ -1,5 +1,12 @@
 # Signing and Gatekeeper release gate
 
+**Distribution decision (2026-11-07): v0.1 ships as a CLI installed by `scripts/install.sh`,
+not as a signed app or PKG.** Developer ID signing and notarization are no longer part of
+the v0.1 plan; the maintainer procedure below is retained only as reference for a possible
+future signed distribution. The unsigned executable remains unsigned and un-notarized and is
+never described otherwise; Gatekeeper behavior is documented in
+[installation.md](installation.md#gatekeeper).
+
 The RC executable has **no signature**. `codesign --verify --strict` fails and
 `spctl --assess --type execute` rejects it with `source=no usable signature`.
 No signing identity was available. No signing, submission, credential use or security

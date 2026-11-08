@@ -44,7 +44,8 @@ Data commands print JSON. Run `index` once to build the index and again after yo
 
 For the macOS x86_64 binary candidate, extraction, checksums and installation are in
 [installation instructions](docs/installation.md). The current RC is unsigned and
-Gatekeeper rejects it; see the [signing gate](docs/release-signing.md).
+Gatekeeper rejects it; install with `scripts/install.sh` or the documented source build
+(see [Gatekeeper](docs/installation.md#gatekeeper)).
 After the source build above, run:
 
 ```sh
