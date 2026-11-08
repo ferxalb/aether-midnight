@@ -35,7 +35,7 @@ pub fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -122,7 +122,7 @@ impl Counter {
             return;
         }
         self.last_draw = Some(Instant::now());
-        let percent = if total == 0 { 100 } else { done * 100 / total };
+        let percent = (done * 100).checked_div(total).unwrap_or(100);
         let mut err = std::io::stderr();
         let _ = write!(
             err,

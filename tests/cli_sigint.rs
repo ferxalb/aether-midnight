@@ -13,7 +13,11 @@ use tempfile::TempDir;
 
 fn cli(db: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_aether-midnight"));
-    command.arg("--db").arg(db);
+    command
+        .arg("--db")
+        .arg(db)
+        // Never read the developer's real configuration.
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db.with_file_name("no-config"));
     command
 }
 

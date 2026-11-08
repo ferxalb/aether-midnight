@@ -6,6 +6,7 @@ Development history of unreleased work, not a release record (releases go in `CH
 
 - `midnight index` was silent while indexing and while uploading embeddings. On a terminal it now shows a spinner with a live count of files scanned and elapsed time while indexing, then `Embedding with <provider> (<model>) · done/total files (n%) · new/unchanged chunks · elapsed` redrawn in place, then summary lines (`Indexed N files in Xs`, `Embedded N files in Xs`). Not a terminal (pipes, CI): plain start and finish lines. `--json`: nothing extra. All of it goes to stderr, so stdout stays the report.
 - Implementation: `src/progress.rs`; `embed::embed_code_with_progress` / `ux::embed_repository_with_progress` (the old functions delegate with a no-op); one relaxed atomic increment per scanned file in the indexer (`code::files_scanned`), used only for display. No change to indexing results, retrieval, schema or stored data; the performance numbers in `docs/performance.md` were not re-measured for the extra increment.
+- Test isolation fix: `cli_smoke`, `cli_sigint`, `cli_embeddings` and `cli_cloud` did not redirect `AETHER_MIDNIGHT_CONFIG_DIR`, so a developer who had run `midnight setup` on the same machine changed their results (a saved provider turned legacy `search` into hybrid). They now point at a non-existent config directory.
 - Evidence: `tests/cli_pty.rs` (terminal run), `tests/cli_journey.rs` (cloud mock: plain lines on stderr, none on stdout), manual capture of the raw terminal stream.
 
 ## 2026-11-08 (4) — Quiet installer

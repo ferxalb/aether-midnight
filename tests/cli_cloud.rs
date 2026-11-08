@@ -40,6 +40,11 @@ impl Env {
             .arg(&self.db)
             .args(args)
             .env("AETHER_MIDNIGHT_MODELS_DIR", &self.models)
+            // Never read the developer's real configuration.
+            .env(
+                "AETHER_MIDNIGHT_CONFIG_DIR",
+                self.db.with_file_name("no-config"),
+            )
             .env_remove("OPENROUTER_API_KEY")
             .env_remove("RAINY_API_KEY");
         if let Some((k, v)) = key_env {

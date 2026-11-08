@@ -19,6 +19,8 @@ fn midnight(db: &Path, models: &Path, args: &[&str]) -> Output {
         .arg(db)
         .args(args)
         .env("AETHER_MIDNIGHT_MODELS_DIR", models)
+        // Never read the developer's real configuration.
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db.with_file_name("no-config"))
         .output()
         .unwrap()
 }
@@ -201,6 +203,7 @@ fn offline(db: &Path, models: &Path, args: &[&str]) -> Output {
         .arg(db)
         .args(args)
         .env("AETHER_MIDNIGHT_MODELS_DIR", models)
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db.with_file_name("no-config"))
         .env("HF_HUB_OFFLINE", "1")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("HTTP_PROXY", "http://127.0.0.1:9")

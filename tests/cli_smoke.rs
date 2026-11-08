@@ -10,6 +10,8 @@ fn run(db: &Path, args: &[&str]) -> Output {
         .arg("--db")
         .arg(db)
         .args(args)
+        // Never read the developer's real configuration.
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db.with_file_name("no-config"))
         .output()
         .unwrap()
 }
