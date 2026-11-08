@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (10) — Concurrent remote code embedding
+
+- Repository embedding now gathers chunks across files and sends up to four remote requests in parallel by default. `MIDNIGHT_EMBED_CONCURRENCY` tunes the bounded concurrency from 1 to 8. Responses retain input order and each completed file is persisted in its own transaction, so later runs can resume from stored files.
+- The behavior and tuning are documented in `docs/embeddings.md`. `cargo check --locked --all-targets` passed; no live-provider latency claim was made because no real-provider measurement was run.
+
 ## 2026-11-08 (9) — v0.1.0-rc.2 published; first real `update`
 
 - Prerelease `v0.1.0-rc.2` published from the workflow run on the corrected tag (commit `4846dc9`): archive, `.sha256` and `install.sh`. Verified before publishing: checksum, installer against the artifact (quiet output, link created), reported version `0.1.0-rc.2`, `update --force` present, universal binary (`x86_64`, `arm64`).

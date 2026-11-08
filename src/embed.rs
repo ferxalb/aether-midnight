@@ -223,6 +223,11 @@ pub trait TextEmbedder {
     fn identity(&self) -> &ModelIdentity;
     /// Returns one L2-normalised vector per input, in order.
     fn embed(&mut self, kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    /// Preferred number of code chunks to gather before embedding. Remote embedders can use this
+    /// to fill several bounded requests at once; local embedders keep the established batch size.
+    fn preferred_batch_size(&self) -> usize {
+        BATCH
+    }
 }
 
 /// E5 models require `query: ` / `passage: ` prefixes.
@@ -471,6 +476,12 @@ struct Chunk {
     text: String,
 }
 
+struct PendingCodeFile {
+    file_id: i64,
+    chunks: Vec<Chunk>,
+    hashes: Vec<String>,
+}
+
 fn chunk_text(text: &str) -> (Vec<Chunk>, bool) {
     let mut chunks = Vec::new();
     let mut buffer = String::new();
@@ -530,9 +541,67 @@ fn code_scope_key(scope: &RepoScope) -> String {
     format!("{}:{}", scope.repo_id, scope.worktree_id)
 }
 
+fn embed_and_store_code_files(
+    conn: &Connection,
+    key: &str,
+    id: &ModelIdentity,
+    files: &[PendingCodeFile],
+    embedder: &mut dyn TextEmbedder,
+    report: &mut EmbedReport,
+) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let expected: usize = files.iter().map(|file| file.chunks.len()).sum();
+    let texts: Vec<&str> = files
+        .iter()
+        .flat_map(|file| file.chunks.iter().map(|chunk| chunk.text.as_str()))
+        .collect();
+    let vectors = embedder.embed(TextKind::Passage, &texts)?;
+    if vectors.len() != expected {
+        bail!(
+            "embedder returned {} vectors for {expected} chunks",
+            vectors.len()
+        );
+    }
+
+    let mut offset = 0;
+    for file in files {
+        let end = offset + file.chunks.len();
+        let file_vectors = &vectors[offset..end];
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM embeddings WHERE kind='code' AND owner_id=?1",
+            [file.file_id],
+        )?;
+        for ((chunk, hash), vector) in file.chunks.iter().zip(&file.hashes).zip(file_vectors) {
+            tx.execute(
+                "INSERT INTO embeddings(kind,scope,owner_id,chunk,line_start,line_end,model,revision,dims,source_hash,vector)
+                 VALUES('code',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    key,
+                    file.file_id,
+                    chunk.index as i64,
+                    chunk.line_start,
+                    chunk.line_end,
+                    id.name,
+                    id.revision,
+                    id.dimensions as i64,
+                    hash,
+                    encode_vector(vector)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        report.embedded += file.chunks.len();
+        offset = end;
+    }
+    Ok(())
+}
+
 /// Incrementally embed the indexed files of one repository/worktree as line-window chunks. Files
 /// that changed on disk since indexing are skipped (their vectors are removed): embed after `index`.
-/// Progress of `embed_code`, reported before each file (and once more when finished).
+/// Progress counts completed files as their vectors are committed, then reports once more at finish.
 #[derive(Debug, Clone, Copy)]
 pub struct EmbedProgress {
     pub done_files: u64,
@@ -593,9 +662,18 @@ pub fn embed_code_with_progress(
             unchanged_chunks: report.unchanged as u64,
         })
     };
-    for (position, (file_id, rel_path, file_hash)) in files.into_iter().enumerate() {
-        notify(position as u64, &report);
+    let preferred_batch_size = embedder.preferred_batch_size().max(1);
+    let mut pending_files = Vec::new();
+    let mut pending_chunks = 0usize;
+    let mut done_files = 0u64;
+    for (file_id, rel_path, file_hash) in files {
+        // Keep the old initial/periodic progress cadence while counting only fully handled files.
+        notify(done_files, &report);
         if cancel.load(Ordering::Relaxed) {
+            embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;
+            done_files += pending_files.len() as u64;
+            pending_files.clear();
+            notify(done_files, &report);
             report.cancelled = true;
             break;
         }
@@ -608,6 +686,8 @@ pub fn embed_code_with_progress(
                     "DELETE FROM embeddings WHERE kind='code' AND owner_id=?1",
                     [file_id],
                 )?;
+                done_files += 1;
+                notify(done_files, &report);
                 continue;
             }
         };
@@ -633,45 +713,44 @@ pub fn embed_code_with_progress(
                 .all(|(c, h)| existing.get(&(c.index as i64)) == Some(h));
         if current_match {
             report.unchanged += chunks.len();
+            done_files += 1;
+            notify(done_files, &report);
             continue;
         }
-        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let mut vectors = Vec::with_capacity(chunks.len());
-        for batch in texts.chunks(BATCH) {
-            vectors.extend(embedder.embed(TextKind::Passage, batch)?);
-        }
-        if vectors.len() != chunks.len() {
-            bail!(
-                "embedder returned {} vectors for {} chunks",
-                vectors.len(),
-                chunks.len()
-            );
-        }
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM embeddings WHERE kind='code' AND owner_id=?1",
-            [file_id],
-        )?;
-        for ((chunk, hash), vector) in chunks.iter().zip(&hashes).zip(&vectors) {
-            tx.execute(
-                "INSERT INTO embeddings(kind,scope,owner_id,chunk,line_start,line_end,model,revision,dims,source_hash,vector)
-                 VALUES('code',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    key,
-                    file_id,
-                    chunk.index as i64,
-                    chunk.line_start,
-                    chunk.line_end,
-                    id.name,
-                    id.revision,
-                    id.dimensions as i64,
-                    hash,
-                    encode_vector(vector)
-                ],
+        if chunks.is_empty() {
+            conn.execute(
+                "DELETE FROM embeddings WHERE kind='code' AND owner_id=?1",
+                [file_id],
             )?;
+            done_files += 1;
+            notify(done_files, &report);
+            continue;
         }
-        tx.commit()?;
-        report.embedded += chunks.len();
+
+        if pending_chunks > 0 && pending_chunks.saturating_add(chunks.len()) > preferred_batch_size
+        {
+            embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;
+            done_files += pending_files.len() as u64;
+            pending_files.clear();
+            pending_chunks = 0;
+            notify(done_files, &report);
+        }
+        pending_chunks += chunks.len();
+        pending_files.push(PendingCodeFile {
+            file_id,
+            chunks,
+            hashes,
+        });
+        if pending_chunks >= preferred_batch_size {
+            embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;
+            done_files += pending_files.len() as u64;
+            pending_files.clear();
+            pending_chunks = 0;
+            notify(done_files, &report);
+        }
+    }
+    if !pending_files.is_empty() {
+        embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;
     }
     if !report.cancelled {
         notify(total_files, &report);

@@ -9,8 +9,8 @@
 //!   leaves this module.
 //! * The vector space is identified by `provider:model`, the endpoint/parameter fingerprint and the
 //!   declared dimensions; a response whose shape does not match is rejected, never coerced.
-//! * One bounded request per batch, no automatic retry; failures surface as [`CloudError`] with a
-//!   stable category so callers can degrade to lexical search.
+//! * Bounded requests, four in flight by default, no automatic retry; failures surface as
+//!   [`CloudError`] with a stable category so callers can degrade to lexical search.
 
 use anyhow::{Result, bail};
 use rainy_sdk::{
@@ -31,6 +31,10 @@ pub const OPENROUTER_KEY_ENV: &str = "OPENROUTER_API_KEY";
 pub const RAINY_KEY_ENV: &str = "RAINY_API_KEY";
 /// Texts per request. Small enough for provider batch limits and request-size caps.
 pub const REMOTE_BATCH: usize = 16;
+/// Concurrent request ceiling for a remote embedding call.
+pub const DEFAULT_REMOTE_CONCURRENCY: usize = 4;
+pub const MAX_REMOTE_CONCURRENCY: usize = 8;
+pub const REMOTE_CONCURRENCY_ENV: &str = "MIDNIGHT_EMBED_CONCURRENCY";
 /// Characters per input after which text is truncated before sending (documented, deterministic).
 pub const MAX_INPUT_CHARS: usize = 8_000;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -249,10 +253,11 @@ struct WireEmbedding {
 
 pub struct CloudEmbedder {
     agent: ureq::Agent,
-    client: RainyClient,
+    api_base_url: String,
     config: CloudConfig,
     identity: ModelIdentity,
     secret: String,
+    concurrency: usize,
 }
 
 impl CloudEmbedder {
@@ -278,6 +283,26 @@ impl CloudEmbedder {
             }
             .into());
         }
+        let concurrency = match std::env::var(REMOTE_CONCURRENCY_ENV) {
+            Ok(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=MAX_REMOTE_CONCURRENCY).contains(n))
+                .ok_or_else(|| CloudError {
+                    kind: CloudErrorKind::Config,
+                    message: format!(
+                        "{REMOTE_CONCURRENCY_ENV} must be between 1 and {MAX_REMOTE_CONCURRENCY}"
+                    ),
+                })?,
+            Err(std::env::VarError::NotPresent) => DEFAULT_REMOTE_CONCURRENCY,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(CloudError {
+                    kind: CloudErrorKind::Config,
+                    message: format!("{REMOTE_CONCURRENCY_ENV} must be valid text"),
+                }
+                .into());
+            }
+        };
         let mut auth = AuthConfig::new(api_key.clone())
             .with_timeout(config.timeout_secs)
             .with_user_agent(concat!("aether-midnight/", env!("CARGO_PKG_VERSION")));
@@ -294,6 +319,7 @@ impl CloudEmbedder {
                 bounded(&e.to_string(), &api_key)
             ),
         })?;
+        let api_base_url = client.api_base_url();
         let agent = ureq::AgentBuilder::new()
             .redirects(0)
             .user_agent(concat!("aether-midnight/", env!("CARGO_PKG_VERSION")))
@@ -303,10 +329,11 @@ impl CloudEmbedder {
         let identity = config.identity();
         Ok(Self {
             agent,
-            client,
+            api_base_url,
             config,
             identity,
             secret: api_key,
+            concurrency,
         })
     }
 
@@ -344,7 +371,7 @@ impl CloudEmbedder {
         })?;
         let result = self
             .agent
-            .post(&format!("{}/embeddings", self.client.api_base_url()))
+            .post(&format!("{}/embeddings", self.api_base_url))
             .set("Authorization", &format!("Bearer {}", self.secret))
             .set("Content-Type", "application/json")
             .send_bytes(&body);
@@ -478,15 +505,43 @@ impl TextEmbedder for CloudEmbedder {
         &self.identity
     }
 
+    fn preferred_batch_size(&self) -> usize {
+        REMOTE_BATCH * self.concurrency
+    }
+
     fn embed(&mut self, _kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         // Query and passage are embedded identically: the remote API has no E5 prefix contract.
+        let inputs: Vec<String> = texts.iter().map(|t| truncate_input(t)).collect();
+        if inputs.iter().any(|t| t.trim().is_empty()) {
+            bail!("cannot embed empty text");
+        }
+        let batches: Vec<Vec<String>> = inputs
+            .chunks(REMOTE_BATCH)
+            .map(<[String]>::to_vec)
+            .collect();
+        let this: &CloudEmbedder = self;
         let mut out = Vec::with_capacity(texts.len());
-        for batch in texts.chunks(REMOTE_BATCH) {
-            let inputs: Vec<String> = batch.iter().map(|t| truncate_input(t)).collect();
-            if inputs.iter().any(|t| t.trim().is_empty()) {
-                bail!("cannot embed empty text");
+        for wave in batches.chunks(self.concurrency) {
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = wave
+                    .iter()
+                    .map(|batch| scope.spawn(move || this.embed_batch(batch)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().unwrap_or_else(|_| {
+                            Err(CloudError {
+                                kind: CloudErrorKind::Network,
+                                message: "provider request worker failed".into(),
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            for result in results {
+                out.extend(result?);
             }
-            out.extend(self.embed_batch(&inputs)?);
         }
         Ok(out)
     }

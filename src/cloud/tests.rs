@@ -200,12 +200,13 @@ fn batches_of_sixteen_preserve_order_across_requests() {
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let out = e.embed(TextKind::Passage, &refs).unwrap();
     assert_eq!(out.len(), 40);
-    let sizes: Vec<usize> = mock
+    let mut sizes: Vec<usize> = mock
         .recorded()
         .iter()
         .map(|r| r.body["input"].as_array().unwrap().len())
         .collect();
-    assert_eq!(sizes, vec![16, 16, 8]);
+    sizes.sort_unstable();
+    assert_eq!(sizes, vec![8, 16, 16]);
     for (text, vector) in texts.iter().zip(&out) {
         let mut expected = fake_vector(text, DIMS);
         l2_normalize(&mut expected);

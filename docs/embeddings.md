@@ -172,8 +172,12 @@ only whether each is set.
 endpoint validation. A narrow compatibility adapter uses the existing `ureq` native-TLS
 transport to retain HTTP statuses and decode optional response fields that the SDK
 requires. It disables redirects, enforces a total timeout, caps successful responses at
-8 MiB, sends one request per batch of 16 texts and does not retry. Provider error bodies
-are discarded rather than logged. Keys remain in memory only, never in output.
+8 MiB, and sends up to 16 texts per request. Four requests may run concurrently by default;
+`MIDNIGHT_EMBED_CONCURRENCY` can tune that to 1–8. The repository code indexer gathers chunks
+across files to fill those request slots while storing completed files in separate transactions.
+Responses are restored to input order. Requests do not retry automatically; a failed group is left
+uncommitted and a later run resumes from committed files. Provider error bodies are discarded
+rather than logged. Keys remain in memory only, never in output.
 
 Contract references: [OpenRouter embeddings](https://openrouter.ai/docs/api/api-reference/embeddings/create-embeddings),
 [Rainy SDK protocol](https://github.com/enosislabs/rainy-sdk), and the pinned SDK source.
