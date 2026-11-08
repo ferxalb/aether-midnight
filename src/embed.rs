@@ -670,10 +670,8 @@ pub fn embed_code_with_progress(
         // Keep the old initial/periodic progress cadence while counting only fully handled files.
         notify(done_files, &report);
         if cancel.load(Ordering::Relaxed) {
-            embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;
-            done_files += pending_files.len() as u64;
-            pending_files.clear();
-            notify(done_files, &report);
+            // Cancellation must be prompt: pending files are dropped, not sent to the provider.
+            // They stay without vectors and the next `embed` run picks them up.
             report.cancelled = true;
             break;
         }

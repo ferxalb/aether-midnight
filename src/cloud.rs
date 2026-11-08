@@ -9,7 +9,8 @@
 //!   leaves this module.
 //! * The vector space is identified by `provider:model`, the endpoint/parameter fingerprint and the
 //!   declared dimensions; a response whose shape does not match is rejected, never coerced.
-//! * Bounded requests, four in flight by default, no automatic retry; failures surface as
+//! * Bounded requests, four in flight by default; only rate-limit and 5xx answers are retried (twice);
+//!   failures surface as
 //!   [`CloudError`] with a stable category so callers can degrade to lexical search.
 
 use anyhow::{Result, bail};
@@ -23,6 +24,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::embed::{ModelIdentity, TextEmbedder, TextKind, l2_normalize};
 
@@ -34,6 +37,8 @@ pub const REMOTE_BATCH: usize = 16;
 /// Concurrent request ceiling for a remote embedding call.
 pub const DEFAULT_REMOTE_CONCURRENCY: usize = 4;
 pub const MAX_REMOTE_CONCURRENCY: usize = 8;
+/// Extra attempts for rate-limit and 5xx answers only.
+pub const REMOTE_RETRIES: usize = 2;
 pub const REMOTE_CONCURRENCY_ENV: &str = "MIDNIGHT_EMBED_CONCURRENCY";
 /// Characters per input after which text is truncated before sending (documented, deterministic).
 pub const MAX_INPUT_CHARS: usize = 8_000;
@@ -251,6 +256,8 @@ struct WireEmbedding {
     embedding: EmbeddingValue,
 }
 
+type BatchResult = std::result::Result<Vec<Vec<f32>>, CloudError>;
+
 pub struct CloudEmbedder {
     agent: ureq::Agent,
     api_base_url: String,
@@ -258,6 +265,7 @@ pub struct CloudEmbedder {
     identity: ModelIdentity,
     secret: String,
     concurrency: usize,
+    retry_backoff: std::time::Duration,
 }
 
 impl CloudEmbedder {
@@ -334,6 +342,7 @@ impl CloudEmbedder {
             identity,
             secret: api_key,
             concurrency,
+            retry_backoff: std::time::Duration::from_millis(1000),
         })
     }
 
@@ -359,6 +368,28 @@ impl CloudEmbedder {
             }
         }
         request
+    }
+
+    /// Retries only transient provider answers (rate limit, 5xx), at most [`REMOTE_RETRIES`] times
+    /// with a short fixed backoff. Auth, payment, malformed and dimension errors are never retried,
+    /// and a retry always goes to the same provider.
+    fn embed_batch_with_retry(
+        &self,
+        batch: &[String],
+    ) -> std::result::Result<Vec<Vec<f32>>, CloudError> {
+        let mut attempt = 0;
+        loop {
+            match self.embed_batch(batch) {
+                Err(e)
+                    if attempt < REMOTE_RETRIES
+                        && matches!(e.kind, CloudErrorKind::RateLimit | CloudErrorKind::Server) =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(self.retry_backoff * attempt as u32);
+                }
+                other => return other,
+            }
+        }
     }
 
     fn embed_batch(&self, batch: &[String]) -> std::result::Result<Vec<Vec<f32>>, CloudError> {
@@ -515,32 +546,42 @@ impl TextEmbedder for CloudEmbedder {
         if inputs.iter().any(|t| t.trim().is_empty()) {
             bail!("cannot embed empty text");
         }
-        let batches: Vec<Vec<String>> = inputs
-            .chunks(REMOTE_BATCH)
-            .map(<[String]>::to_vec)
-            .collect();
+        let batches: Vec<&[String]> = inputs.chunks(REMOTE_BATCH).collect();
+        let workers = self.concurrency.min(batches.len());
         let this: &CloudEmbedder = self;
+        // Work queue: each worker takes the next batch as soon as it is free, so one slow request
+        // does not hold back the others. Results are stored by batch index to keep input order.
+        let next = AtomicUsize::new(0);
+        let abort = AtomicBool::new(false);
+        let slots: Mutex<Vec<Option<BatchResult>>> =
+            Mutex::new((0..batches.len()).map(|_| None).collect());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    while !abort.load(Ordering::Relaxed) {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(batch) = batches.get(i) else { break };
+                        let result = this.embed_batch_with_retry(batch);
+                        if result.is_err() {
+                            abort.store(true, Ordering::Relaxed);
+                        }
+                        if let Ok(mut guard) = slots.lock() {
+                            guard[i] = Some(result);
+                        }
+                    }
+                });
+            }
+        });
+        let slots = slots.into_inner().map_err(|_| CloudError {
+            kind: CloudErrorKind::Network,
+            message: "provider request worker failed".into(),
+        })?;
         let mut out = Vec::with_capacity(texts.len());
-        for wave in batches.chunks(self.concurrency) {
-            let results = std::thread::scope(|scope| {
-                let handles: Vec<_> = wave
-                    .iter()
-                    .map(|batch| scope.spawn(move || this.embed_batch(batch)))
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().unwrap_or_else(|_| {
-                            Err(CloudError {
-                                kind: CloudErrorKind::Network,
-                                message: "provider request worker failed".into(),
-                            })
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            });
-            for result in results {
-                out.extend(result?);
+        for slot in slots {
+            match slot {
+                Some(result) => out.extend(result?),
+                // Only reachable after an abort; the earlier error was returned above.
+                None => bail!("embedding aborted after a provider failure"),
             }
         }
         Ok(out)

@@ -337,7 +337,7 @@ fn request_timeout_is_reported_and_bounded() {
 }
 
 #[test]
-fn http_errors_are_classified_without_retry_and_never_leak_the_key() {
+fn http_errors_are_classified_retry_only_transient_and_never_leak_the_key() {
     let cases: Vec<(u16, String, CloudErrorKind)> = vec![
         (401, format!(r#"{{"error":{{"code":"invalid_api_key","message":"bad key {KEY}"}}}}"#), CloudErrorKind::Auth),
         (402, r#"{"error":{"code":402,"message":"Insufficient credits. Add more at example."}}"#.into(), CloudErrorKind::Payment),
@@ -357,6 +357,7 @@ fn http_errors_are_classified_without_retry_and_never_leak_the_key() {
         for provider in [Provider::OpenRouter, Provider::Rainy] {
             let before = mock.count();
             let mut e = embedder(provider, &mock);
+            e.retry_backoff = std::time::Duration::ZERO;
             let err = e.embed(TextKind::Passage, &["x"]).unwrap_err();
             let rendered = format!("{err:#} / {err:?}");
             assert!(
@@ -364,7 +365,13 @@ fn http_errors_are_classified_without_retry_and_never_leak_the_key() {
                 "secret leaked for HTTP {status}: {rendered}"
             );
             assert_eq!(kind_of(err), expected, "HTTP {status} body {body}");
-            assert_eq!(mock.count() - before, 1, "HTTP {status} was retried");
+            let attempts = if matches!(expected, CloudErrorKind::RateLimit | CloudErrorKind::Server)
+            {
+                1 + REMOTE_RETRIES
+            } else {
+                1
+            };
+            assert_eq!(mock.count() - before, attempts, "HTTP {status} attempts");
         }
     }
 }
@@ -511,4 +518,47 @@ fn authenticated_redirects_are_rejected_without_forwarding_credentials() {
     }
     assert_eq!(redirect.count(), 2);
     assert_eq!(destination.count(), 0);
+}
+
+#[test]
+fn transient_failure_is_retried_and_order_is_kept() {
+    // The first request of every batch gets a 429; the retry succeeds.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mock = Mock::start(move |_, r| {
+        let key = r.body["input"].to_string();
+        if seen.lock().unwrap().insert(key) {
+            Reply::Json(429, "slow".into())
+        } else {
+            ok_response(r, DIMS)
+        }
+    });
+    let mut e = embedder(Provider::OpenRouter, &mock);
+    e.retry_backoff = std::time::Duration::ZERO;
+    let texts: Vec<String> = (0..70).map(|i| format!("doc{i} word{}", i * 3)).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let out = e.embed(TextKind::Passage, &refs).unwrap();
+    assert_eq!(out.len(), 70);
+    for (text, vector) in texts.iter().zip(&out) {
+        let mut expected = fake_vector(text, DIMS);
+        l2_normalize(&mut expected);
+        assert_eq!(vector, &expected, "vector for {text} out of order");
+    }
+    assert_eq!(mock.count(), 10, "5 batches, each tried twice");
+}
+
+#[test]
+fn one_failed_batch_aborts_the_call_and_stops_new_requests() {
+    // Auth failure is not retried; remaining queued batches must not all be sent.
+    let mock = Mock::start(|_, _| Reply::Json(401, "no".into()));
+    let mut e = embedder(Provider::OpenRouter, &mock);
+    e.concurrency = 2;
+    let texts: Vec<String> = (0..16 * 40).map(|i| format!("doc{i}")).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let err = e.embed(TextKind::Passage, &refs).unwrap_err();
+    assert_eq!(kind_of(err), CloudErrorKind::Auth);
+    assert!(
+        mock.count() < 40,
+        "sent {} of 40 batches after a failure",
+        mock.count()
+    );
 }

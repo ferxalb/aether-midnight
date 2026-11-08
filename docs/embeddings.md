@@ -175,7 +175,7 @@ requires. It disables redirects, enforces a total timeout, caps successful respo
 8 MiB, and sends up to 16 texts per request. Four requests may run concurrently by default;
 `MIDNIGHT_EMBED_CONCURRENCY` can tune that to 1–8. The repository code indexer gathers chunks
 across files to fill those request slots while storing completed files in separate transactions.
-Responses are restored to input order. Requests do not retry automatically; a failed group is left
+Responses are restored to input order. Workers pull batches from a shared queue, so one slow request does not stall the others. Only rate-limit (429) and 5xx answers are retried, twice, with a 1 s then 2 s pause and always against the same provider; the first non-retryable failure stops new requests and a failed group is left
 uncommitted and a later run resumes from committed files. Provider error bodies are discarded
 rather than logged. Keys remain in memory only, never in output.
 
@@ -205,7 +205,7 @@ L2-normalised so cosine similarity stays a dot product.
 (402), rate limit (429), server (5xx), or rejected request; payment is never inferred
 from message text. Timeout, network, malformed response and dimension mismatch remain
 separate categories. Error bodies and provider-supplied retry instructions are not echoed.
-There is no automatic retry: re-running `embed` resumes after committed vectors.
+Only 429/5xx answers are retried (twice); re-running `embed` resumes after committed vectors.
 
 **Degraded operation.** If a provider call fails during `--mode semantic|hybrid`, the command still
 exits 0 with lexical results, `degraded: true`, `mode_used: "lexical"`, a `notice` that names the
