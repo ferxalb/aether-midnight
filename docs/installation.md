@@ -1,16 +1,15 @@
 # Install AETHER Midnight v0.1
 
 v0.1 is distributed as a Rust CLI installed by a shell script. There is no macOS app,
-PKG or Developer ID signing step. Only **macOS x86_64 (native Intel)** is supported.
-Apple silicon (including Rosetta shells), Linux, Windows and other architectures are
+PKG or Developer ID signing step. The release is one macOS **Universal 2** binary
+(arm64 + x86_64, ad-hoc signed only). Linux, Windows and other architectures are
 unsupported, and the script refuses to run there.
 
 ## Script install (recommended)
 
 ```sh
-sh scripts/install.sh --archive-file aether-midnight-0.1.0-macos-x86_64.tar.gz \
-    --sha256 <64-hex SHA-256 published with the archive>
-# or: --archive-url https://... --sha256 <hex>
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0/install.sh | sh -s -- --no-runtime
+# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-macos-universal2.tar.gz --sha256 <hex>
 ```
 
 `scripts/install.sh` (from the repository) runs as your user (it refuses root/sudo) and:
@@ -29,9 +28,8 @@ Before anything is written, a bad checksum, unreadable archive, unsafe path or
 unwritable prefix aborts with a distinct exit code (2 usage, 3 file, 4 download,
 5 checksum, 6 archive, 7 install location, 8 binary did not run, 9 runtime install
 failed after a successful binary install, 10 unsupported platform, 11 root, 12 missing
-tool). `--dry-run` prints the plan. The release pin (`PIN_URL`/`PIN_SHA256` in the
-script) is empty until a release archive is published; until then pass the archive
-and checksum explicitly.
+tool). `--dry-run` prints the plan. With no source option the script downloads the
+v0.1.0 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
 
 ### Gatekeeper
 
@@ -59,9 +57,9 @@ aether-midnight runtime install && aether-midnight doctor
 For a locally built or subsequently signed and approved archive:
 
 ```sh
-shasum -a 256 -c aether-midnight-0.1.0-macos-x86_64.tar.gz.sha256
-tar -xzf aether-midnight-0.1.0-macos-x86_64.tar.gz
-cd aether-midnight-0.1.0-macos-x86_64
+shasum -a 256 -c aether-midnight-0.1.0-macos-universal2.tar.gz.sha256
+tar -xzf aether-midnight-0.1.0-macos-universal2.tar.gz
+cd aether-midnight-0.1.0-macos-universal2
 shasum -a 256 -c SHA256SUMS
 mkdir -p "$HOME/.local/bin"
 install -m 755 bin/aether-midnight "$HOME/.local/bin/aether-midnight"

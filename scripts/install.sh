@@ -1,16 +1,16 @@
 #!/bin/sh
-# AETHER Midnight v0.1 user-local installer. macOS x86_64 only. Never uses sudo.
+# AETHER Midnight v0.1 user-local installer. macOS (Apple silicon and Intel). Never uses sudo.
 #
 # Usage:
 #   install.sh [--archive-file FILE | --archive-url https://...] [--sha256 HEX]
 #              [--prefix DIR] [--no-runtime] [--dry-run] [--help]
 #
-# The archive SHA-256 is mandatory and is checked before anything is extracted.
+# With no source option it downloads the pinned Universal 2 archive and its .sha256 file
+# from the public GitHub Release v0.1.0. The archive SHA-256 is always checked before
+# anything is extracted or installed. --sha256 overrides the downloaded checksum.
 # This script is pinned to release VERSION below. It only accepts an archive named
-# aether-midnight-VERSION-macos-x86_64.tar.gz whose top-level directory has the same
+# aether-midnight-VERSION-macos-universal2.tar.gz whose top-level directory has the same
 # name, and the installed binary must report VERSION; any other release is refused.
-# With no source option it uses PIN_URL/PIN_SHA256 below, which the maintainer fills in
-# after publishing the release. Until then it refuses to guess and tells you what to pass.
 #
 # This script does NOT bypass Gatekeeper, does not touch quarantine attributes, does not
 # edit shell profiles, and never claims the executable is signed or notarized.
@@ -19,16 +19,14 @@ umask 022
 
 VERSION=0.1.0
 APP=aether-midnight
-ARCHIVE_NAME="$APP-$VERSION-macos-x86_64"
-# Release pin. Fill both after publishing (see docs/release-checklist.md); leave both empty
-# until then. PIN_URL must be an https:// URL ending in /$ARCHIVE_NAME.tar.gz.
-PIN_URL=""
-PIN_SHA256=""
+ARCHIVE_NAME="$APP-$VERSION-macos-universal2"
+RELEASE_BASE="https://github.com/ferxalbs/aether-midnight/releases/download/v$VERSION"
+PIN_URL="$RELEASE_BASE/$ARCHIVE_NAME.tar.gz"
 
 PREFIX="${AETHER_MIDNIGHT_PREFIX:-$HOME/.local}"
 URL="$PIN_URL"
 FILE=""
-SHA="$PIN_SHA256"
+SHA=""
 WANT_RUNTIME=1
 DRY=0
 TMP=""
@@ -48,7 +46,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -70,11 +68,11 @@ SOURCE_BUILD_HELP="Fallback: build from source (Rust 1.98+, Xcode Command Line T
   See docs/installation.md."
 
 # ---- platform gate -------------------------------------------------------------------
-[ "$(uname -s)" = Darwin ] || die 10 "unsupported OS $(uname -s). Only macOS x86_64 is supported. $SOURCE_BUILD_HELP"
-[ "$(uname -m)" = x86_64 ] || die 10 "unsupported architecture $(uname -m). Only macOS x86_64 is supported. $SOURCE_BUILD_HELP"
-if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
-    die 10 "this is an Apple silicon Mac (x86_64 shell via Rosetta). Only native Intel macOS x86_64 is supported."
-fi
+[ "$(uname -s)" = Darwin ] || die 10 "unsupported OS $(uname -s). Only macOS is supported. $SOURCE_BUILD_HELP"
+case "$(uname -m)" in
+x86_64 | arm64) ;;
+*) die 10 "unsupported architecture $(uname -m). Only macOS arm64 and x86_64 are supported. $SOURCE_BUILD_HELP" ;;
+esac
 [ "$(id -u)" -ne 0 ] || die 11 "do not run as root or with sudo; this installs into your home directory."
 case "$PREFIX" in /*) ;; *) die 2 "--prefix must be an absolute path" ;; esac
 for tool in shasum tar curl mktemp install; do
@@ -82,19 +80,14 @@ for tool in shasum tar curl mktemp install; do
 done
 
 # ---- inputs --------------------------------------------------------------------------
-if [ -n "$FILE" ] && [ -n "$URL" ] && [ "$URL" != "$PIN_URL" ]; then
+if [ -n "$FILE" ] && [ "$URL" != "$PIN_URL" ]; then
     die 2 "pass only one of --archive-file and --archive-url"
 fi
-if [ -z "$FILE" ] && [ -z "$URL" ]; then
-    die 2 "no release is pinned in this script. Pass --archive-file FILE (or --archive-url https://...) with --sha256 HEX. $SOURCE_BUILD_HELP"
-fi
-[ -n "$SHA" ] || die 2 "--sha256 is required: refusing to install an unverified archive"
-SHA=$(printf '%s' "$SHA" | tr 'A-F' 'a-f')
-case "$SHA" in
-*[!0-9a-f]* | "") die 2 "--sha256 must be 64 hex characters" ;;
-esac
-[ "${#SHA}" -eq 64 ] || die 2 "--sha256 must be 64 hex characters"
-if [ -z "$FILE" ]; then
+if [ -n "$FILE" ]; then
+    [ -f "$FILE" ] || die 3 "archive not found: $FILE"
+    URL=""
+    [ -n "$SHA" ] || die 2 "--sha256 is required with --archive-file: refusing to install an unverified archive"
+else
     case "$URL" in
     https://*) ;;
     *) die 2 "download URL must use https:// (use --archive-file for a local archive)" ;;
@@ -104,8 +97,12 @@ if [ -z "$FILE" ]; then
     *) die 2 "this installer is pinned to v$VERSION: the URL must end in /$ARCHIVE_NAME.tar.gz" ;;
     esac
 fi
-if [ -n "$FILE" ]; then
-    [ -f "$FILE" ] || die 3 "archive not found: $FILE"
+if [ -n "$SHA" ]; then
+    SHA=$(printf '%s' "$SHA" | tr 'A-F' 'a-f')
+    case "$SHA" in
+    *[!0-9a-f]*) die 2 "--sha256 must be 64 hex characters" ;;
+    esac
+    [ "${#SHA}" -eq 64 ] || die 2 "--sha256 must be 64 hex characters"
 fi
 
 BIN_DIR="$PREFIX/bin"
@@ -114,7 +111,7 @@ DEST="$BIN_DIR/$APP"
 if [ "$DRY" -eq 1 ]; then
     say "dry run: would install $APP into $DEST"
     say "  source:  ${FILE:-$URL}"
-    say "  sha256:  $SHA"
+    say "  sha256:  ${SHA:-downloaded from $URL.sha256}"
     if [ "$WANT_RUNTIME" -eq 1 ]; then say "  runtime: pinned ONNX Runtime via runtime install"; else say "  runtime: skipped"; fi
     exit 0
 fi
@@ -128,6 +125,15 @@ else
     say "Downloading $URL"
     curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 20 -o "$ARCHIVE" "$URL" ||
         die 4 "download failed (network, TLS or HTTP error). Nothing was installed. You can fetch the archive by other means and use --archive-file."
+    if [ -z "$SHA" ]; then
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 20 -o "$TMP/archive.sha256" "$URL.sha256" ||
+            die 4 "checksum download failed ($URL.sha256). Nothing was installed."
+        SHA=$(awk 'NR==1 {print tolower($1)}' "$TMP/archive.sha256")
+        case "$SHA" in
+        *[!0-9a-f]* | "") die 5 "downloaded checksum file is not a SHA-256. Nothing was installed." ;;
+        esac
+        [ "${#SHA}" -eq 64 ] || die 5 "downloaded checksum file is not a SHA-256. Nothing was installed."
+    fi
 fi
 ACTUAL=$(shasum -a 256 "$ARCHIVE" | cut -d' ' -f1)
 if [ "$ACTUAL" != "$SHA" ]; then

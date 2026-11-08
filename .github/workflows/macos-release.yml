@@ -1,0 +1,67 @@
+name: macOS release artifacts
+
+# Manual only. Builds, packages and uploads Universal 2 artifacts and checksums.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  universal2:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -V
+
+      - name: Build Universal 2 binary (arm64 then x86_64, -j 1)
+        run: sh scripts/build-universal.sh
+
+      - name: Package archive and checksum
+        run: sh scripts/package-release.sh
+
+      - name: Stage upload directory
+        id: stage
+        run: |
+          set -eu
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          NAME=aether-midnight-$VERSION-macos-universal2
+          mkdir -p dist
+          cp "target/release-candidate/$NAME.tar.gz" "target/release-candidate/$NAME.tar.gz.sha256" dist/
+          cp scripts/install.sh dist/install.sh
+          (cd dist && shasum -a 256 -c "$NAME.tar.gz.sha256")
+          lipo -archs target/universal/aether-midnight
+          BIN_BYTES=$(stat -f %z target/universal/aether-midnight)
+          ARC_BYTES=$(stat -f %z "dist/$NAME.tar.gz")
+          {
+            echo "### Universal 2 sizes"
+            echo "- binary: $BIN_BYTES bytes ($(( BIN_BYTES / 1048576 )) MiB), archs: $(lipo -archs target/universal/aether-midnight)"
+            echo "- archive: $ARC_BYTES bytes ($(( ARC_BYTES / 1048576 )) MiB)"
+            echo "- sha256: $(cut -d' ' -f1 "dist/$NAME.tar.gz.sha256")"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Offline installer smoke test (isolated HOME)
+        run: |
+          set -eu
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          NAME=aether-midnight-$VERSION-macos-universal2
+          SUM=$(cut -d' ' -f1 "dist/$NAME.tar.gz.sha256")
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
+          sh dist/install.sh --archive-file "dist/$NAME.tar.gz" --sha256 "$SUM" --no-runtime
+          "$HOME/.local/bin/aether-midnight" --version
+          "$HOME/.local/bin/aether-midnight" --help >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aether-midnight-macos-universal2
+          path: dist/*
+          if-no-files-found: error

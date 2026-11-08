@@ -23,7 +23,23 @@ Default lexical search needs no server, account, API key, model, or network conn
 - **No file watching.** After you change files, run `index` again (or `refresh-file` for one file).
 - **No UI, cloud sync, or LLM generation.** Cloud embeddings are the only optional network use besides the two explicit downloads (`runtime install`, `models pull`).
 
-## Quick start
+## Install (macOS, Apple silicon or Intel)
+
+No Rust, Cargo or sudo needed. This downloads the prebuilt Universal 2 binary from the
+public [v0.1.0 release](https://github.com/ferxalbs/aether-midnight/releases/tag/v0.1.0),
+verifies the archive's SHA-256 before anything is installed, and writes
+`~/.local/bin/aether-midnight`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0/install.sh | sh -s -- --no-runtime
+```
+
+The binary is not Developer ID signed or notarized (see [installation](docs/installation.md)).
+The checksum comes from the same release as the archive, so it detects corruption, not a
+compromised release. `--no-runtime` skips the optional ONNX Runtime download; add
+`~/.local/bin` to your `PATH` yourself.
+
+## Build from source
 
 You need a Rust toolchain with Cargo that supports edition 2024 (Rust 1.98 or later, the minimum of the `rainy-sdk` dependency) and a C compiler (for `aws-lc-sys`). SQLite is bundled, so you install nothing else.
 
@@ -42,10 +58,8 @@ Data commands print JSON. Run `index` once to build the index and again after yo
 
 ### Local hybrid search
 
-For the macOS x86_64 binary candidate, extraction, checksums and installation are in
-[installation instructions](docs/installation.md). The current RC is unsigned and
-Gatekeeper rejects it; install with `scripts/install.sh` or the documented source build
-(see [Gatekeeper](docs/installation.md#gatekeeper)).
+Installation details and Gatekeeper notes are in
+[installation instructions](docs/installation.md).
 After the source build above, run:
 
 ```sh
