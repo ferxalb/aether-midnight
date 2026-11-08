@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (9) — v0.1.0-rc.2 published; first real `update`
+
+- Prerelease `v0.1.0-rc.2` published from the workflow run on the corrected tag (commit `4846dc9`): archive, `.sha256` and `install.sh`. Verified before publishing: checksum, installer against the artifact (quiet output, link created), reported version `0.1.0-rc.2`, `update --force` present, universal binary (`x86_64`, `arm64`).
+- First real in-place upgrade: the maintainer's installed rc.1 ran `midnight update --check` and `midnight update` against the public release and became rc.2 (atomic swap, `midnight` link intact, no staging files left, saved provider settings untouched).
+- Still unverified: Rainy, the arm64 slice at run time, and the browser-quarantine download on a clean Mac.
+
 ## 2026-11-08 (8) — v0.1.0-rc.2 version bump
 
 - The first `v0.1.0-rc.2` tag pointed at a commit whose `Cargo.toml` still said `0.1.0-rc.1`; its workflow run produced `aether-midnight-0.1.0-rc.1-*` archives, which would have been indistinguishable from the published rc.1 for `update`. Nothing from that run was published. The version is now `0.1.0-rc.2` (`Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README and installation docs, release checklist) and the unpublished tag is moved to the commit that carries it.
