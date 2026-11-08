@@ -1,4 +1,4 @@
-![AETHER Midnight — Find code. Recall context.](assets/aether-midnight-readme.png)
+![AETHER Midnight — Find code. Recall context.](assets/aether-midnight-readme-bn.jpg)
 
 # AETHER Midnight
 
