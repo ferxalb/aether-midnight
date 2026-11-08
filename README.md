@@ -86,7 +86,24 @@ Details are in [docs/embeddings.md](docs/embeddings.md).
 
 ## Use with AI agents (MCP)
 
-Add Midnight to any MCP client:
+Register Midnight with a client in one command (it merges into the existing config, saves a
+`.midnight.bak` backup, and `--dry-run` previews the change):
+
+```sh
+midnight connect claude-code --scope project   # ./.mcp.json
+midnight connect claude-code --scope user      # ~/.claude.json
+midnight connect claude-desktop --scope user
+midnight connect codex --scope user            # ~/.codex/config.toml (or $CODEX_HOME)
+midnight connect codex --scope project --storage project --read-only
+midnight connect claude-code --scope user --remove
+```
+
+By default the database is global (OS data directory). `--storage project` (also on `init`) keeps
+it in `<repo>/.midnight/`, creates or extends `.gitignore` with `.midnight/`, and the CLI then
+finds it automatically from anywhere inside the repo. A project database not owned by you is
+ignored. `.midnight/` is never indexed.
+
+Or add Midnight to any MCP client by hand:
 
 ```json
 {

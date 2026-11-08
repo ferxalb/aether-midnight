@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_midnight::{
-    auth, benchmark, cloud, code, config, db, embed, mcp, mcp_http, memory, runtime, ux,
+    auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, runtime, ux,
 };
 
 #[derive(Parser)]
@@ -64,8 +64,42 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Create the database and apply migrations (idempotent).
-    Init,
+    /// Create the database and apply migrations (idempotent). `--storage project` keeps it in
+    /// `<repo>/.midnight/` and git-ignores that directory.
+    Init {
+        /// Where the database lives: the OS data directory, or inside this project.
+        #[arg(long, value_enum, default_value = "global")]
+        storage: StorageArg,
+        /// Any path inside the project (used only with `--storage project`).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Register Midnight as an MCP server in an AI client's configuration (or remove it).
+    Connect {
+        /// Client whose configuration to edit.
+        #[arg(value_enum)]
+        client: ClientArg,
+        /// `project` edits the project's own config; `user` edits the client's global config.
+        /// Asked interactively when omitted on a terminal.
+        #[arg(long, value_enum)]
+        scope: Option<ScopeArg>,
+        /// Database location the client should use. Default: the project database if one
+        /// exists, otherwise the OS data directory.
+        #[arg(long, value_enum)]
+        storage: Option<StorageArg>,
+        /// Expose only read/recall tools to the client.
+        #[arg(long)]
+        read_only: bool,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove the Midnight entry instead of adding it.
+        #[arg(long)]
+        remove: bool,
+        /// Any path inside the project (used for project scope and project storage).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Explicit memories: add, get, list, delete, search (namespace-isolated).
     Memory {
         #[command(subcommand)]
@@ -558,6 +592,25 @@ impl PolicyArgs {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StorageArg {
+    Global,
+    Project,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClientArg {
+    ClaudeCode,
+    ClaudeDesktop,
+    Codex,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ScopeArg {
+    Project,
+    User,
+}
+
 #[derive(Clone, ValueEnum)]
 enum MemoryKind {
     Source,
@@ -576,24 +629,77 @@ pub fn main() -> Result<()> {
     };
     let matches = Cli::command().name(invoked).get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(|e| e.exit())?;
-    let db_path = cli.db.unwrap_or(db::default_db_path()?);
+    let db_path = match cli.db.clone() {
+        Some(path) => path,
+        None => match std::env::current_dir()
+            .ok()
+            .and_then(|cwd| connect::discover_project_db(&cwd))
+        {
+            Some(project_db) => project_db,
+            None => db::default_db_path()?,
+        },
+    };
     let cancellation = Arc::new(AtomicBool::new(false));
     let cancellation_for_signal = Arc::clone(&cancellation);
     ctrlc::set_handler(move || cancellation_for_signal.store(true, Ordering::Relaxed))
         .context("install Ctrl-C cancellation handler")?;
     match cli.command {
-        Commands::Init => {
+        Commands::Init { storage, path } => {
+            let (db_path, project) = match storage {
+                StorageArg::Global => (cli.db.clone().unwrap_or(db::default_db_path()?), None),
+                StorageArg::Project => {
+                    if cli.db.is_some() {
+                        anyhow::bail!("--db and --storage project are mutually exclusive");
+                    }
+                    let prepared = connect::prepare_project_storage(&path)?;
+                    (prepared.db_path.clone(), Some(prepared))
+                }
+            };
             let conn = db::open_db(&db_path)?;
             let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             drop(conn);
             if cli.json {
-                print_json(
-                    &serde_json::json!({"initialized":true,"database_path":db_path,"schema_version":v}),
-                )?;
+                print_json(&serde_json::json!({
+                    "initialized":true,
+                    "database_path":db_path,
+                    "schema_version":v,
+                    "storage": if project.is_some() { "project" } else { "global" },
+                    "gitignore": project.as_ref().map(|p| &p.gitignore_path),
+                    "gitignore_changed": project.as_ref().map(|p| p.gitignore_changed),
+                }))?;
             } else {
                 println!("initialized {} (schema version {v})", db_path.display());
+                if let Some(p) = &project {
+                    let note = if p.gitignore_changed {
+                        "added `.midnight/` to"
+                    } else {
+                        "already ignored in"
+                    };
+                    println!("{note} {}", p.gitignore_path.display());
+                }
             }
         }
+        Commands::Connect {
+            client,
+            scope,
+            storage,
+            read_only,
+            dry_run,
+            remove,
+            path,
+        } => connect_command(
+            ConnectRequest {
+                client,
+                scope,
+                storage,
+                read_only,
+                dry_run,
+                remove,
+                path,
+            },
+            cli.db.clone(),
+            cli.json,
+        )?,
         Commands::Memory { action } => memory_command(&db_path, action, cli.json)?,
         Commands::Doctor => {
             if !doctor(&db_path, cli.json)? {
@@ -1496,6 +1602,133 @@ fn models_command(action: ModelsAction, json: bool) -> Result<()> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+struct ConnectRequest {
+    client: ClientArg,
+    scope: Option<ScopeArg>,
+    storage: Option<StorageArg>,
+    read_only: bool,
+    dry_run: bool,
+    remove: bool,
+    path: PathBuf,
+}
+
+fn choose_scope(requested: Option<ScopeArg>) -> Result<connect::Scope> {
+    match requested {
+        Some(ScopeArg::Project) => return Ok(connect::Scope::Project),
+        Some(ScopeArg::User) => return Ok(connect::Scope::User),
+        None => {}
+    }
+    if !ux::stdin_is_tty() {
+        anyhow::bail!("choose where to register the server: --scope project or --scope user");
+    }
+    eprintln!("Register Midnight for:");
+    eprintln!("  1) this project only");
+    eprintln!("  2) every project (your user configuration)");
+    eprint!("Choice [2]: ");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    match line.trim() {
+        "1" => Ok(connect::Scope::Project),
+        "" | "2" => Ok(connect::Scope::User),
+        other => anyhow::bail!("unrecognized choice `{other}`"),
+    }
+}
+
+fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) -> Result<()> {
+    let scope = choose_scope(req.scope)?;
+    let client = match req.client {
+        ClientArg::ClaudeCode => connect::Client::ClaudeCode,
+        ClientArg::ClaudeDesktop => connect::Client::ClaudeDesktop,
+        ClientArg::Codex => connect::Client::Codex,
+    };
+    let root = connect::project_root(&req.path)?;
+    let config_path = connect::config_path(client, scope, &root, &connect::Dirs::from_env()?)?;
+
+    // Which database should the client be pointed at? Removal never touches storage.
+    let mut storage_note = None;
+    let db_arg: Option<PathBuf> = if req.remove {
+        None
+    } else if let Some(explicit) = db_flag {
+        Some(std::path::absolute(explicit)?)
+    } else {
+        match req.storage {
+            Some(StorageArg::Project) => {
+                if !req.dry_run {
+                    let p = connect::prepare_project_storage(&root)?;
+                    drop(db::open_db(&p.db_path)?);
+                    storage_note = Some(format!(
+                        "project storage ready in {} ({} {})",
+                        p.db_path.display(),
+                        if p.gitignore_changed {
+                            "added to"
+                        } else {
+                            "already in"
+                        },
+                        p.gitignore_path.display()
+                    ));
+                }
+                Some(connect::project_db_path(&root))
+            }
+            Some(StorageArg::Global) => None,
+            None => connect::discover_project_db(&root),
+        }
+    };
+
+    let outcome = if req.remove {
+        connect::uninstall(&config_path, client, req.dry_run)?
+    } else {
+        let exe = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .context("locate the midnight executable")?;
+        let args = connect::server_args(db_arg.as_deref(), req.read_only);
+        connect::install(
+            &config_path,
+            client,
+            &exe.to_string_lossy(),
+            &args,
+            req.dry_run,
+        )?
+    };
+
+    if json {
+        print_json(&serde_json::json!({
+            "path": outcome.path,
+            "changed": outcome.changed,
+            "dry_run": req.dry_run,
+            "removed": req.remove,
+            "backup": outcome.backup,
+            "database_path": db_arg,
+        }))?;
+        return Ok(());
+    }
+    let verb = match (req.remove, outcome.changed, req.dry_run) {
+        (_, false, _) => "already up to date:",
+        (false, true, true) => "would register in",
+        (true, true, true) => "would remove from",
+        (false, true, false) => "registered in",
+        (true, true, false) => "removed from",
+    };
+    println!("{verb} {}", outcome.path.display());
+    if let Some(note) = storage_note {
+        println!("{note}");
+    }
+    if let Some(bak) = &outcome.backup {
+        println!("previous contents saved to {}", bak.display());
+    }
+    if req.dry_run && outcome.changed && !req.remove {
+        println!("\n{}", outcome.contents);
+    }
+    if !req.remove && matches!(scope, connect::Scope::Project) {
+        eprintln!(
+            "note: this file contains absolute paths for this machine; review before committing it."
+        );
+    }
+    if !req.remove && outcome.changed && !req.dry_run {
+        eprintln!("restart the client to load the new server.");
     }
     Ok(())
 }

@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-07 (8) — `connect` and project-local storage
+
+- New `connect <claude-code|claude-desktop|codex> --scope project|user [--storage global|project] [--read-only] [--dry-run] [--remove]` registers `aether-midnight` in the client's MCP config (JSON merge, or a line-wise edit of only our table in Codex TOML; invalid input is refused, previous contents are saved as `*.midnight.bak`, writes are atomic). Scope is asked on a terminal and required otherwise.
+- `init --storage project` creates `<repo>/.midnight/` (0700), creates or extends `.gitignore` with `.midnight/`, and puts the database there. Without `--db` the CLI now uses the nearest `.midnight/midnight.sqlite3` above the working directory (regular file owned by the current user, else ignored), otherwise the OS data directory as before. `.midnight` joins the always-excluded VCS paths in the walker. Global storage stays the default.
+- Evidence: `src/connect.rs` unit tests and `tests/cli_connect.rs` (real process, redirected HOME). Not verified against the real Claude Code, Claude Desktop or Codex apps. No retrieval, schema or performance change.
+
 ## 2026-11-07 (7) — `midnight` command and guided first run
 
 - New `midnight` binary (same program as `aether-midnight`, `src/bin/midnight.rs` includes `src/main.rs`). New commands: `setup` (interactive wizard or scripted flags for Rainy, OpenRouter, local, lexical), `status`; `index [PATH]` embeds with the saved provider; `search` uses the saved mode (hybrid with a provider, else lexical). Preferences live in `config.json`; an API key typed into `setup` goes to `credentials.json` (0600, directory 0700), an environment variable always wins and is never copied. Remote uploads need consent recorded by `setup` (bound to provider, destination and model), `--yes` for one run, or a terminal prompt.

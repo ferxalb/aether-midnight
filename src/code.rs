@@ -2937,7 +2937,8 @@ fn is_secret_path(path: &Path) -> bool {
 fn is_vcs_metadata_path(path: &Path) -> bool {
     path.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
-        [".git", ".hg", ".svn"]
+        // `.midnight` is Midnight's own project storage and must never be indexed.
+        [".git", ".hg", ".svn", ".midnight"]
             .iter()
             .any(|name| component.eq_ignore_ascii_case(name))
     })
