@@ -193,7 +193,7 @@ fn rainy_custom_endpoint_uses_same_transport_and_omits_unset_optionals() {
 }
 
 #[test]
-fn batches_of_sixteen_preserve_order_across_requests() {
+fn batches_respect_item_cap_and_preserve_order_across_requests() {
     let mock = Mock::start(|_, r| ok_response(r, DIMS));
     let mut e = embedder(Provider::OpenRouter, &mock);
     let texts: Vec<String> = (0..40).map(|i| format!("doc{i} word{}", i * 7)).collect();
@@ -206,7 +206,7 @@ fn batches_of_sixteen_preserve_order_across_requests() {
         .map(|r| r.body["input"].as_array().unwrap().len())
         .collect();
     sizes.sort_unstable();
-    assert_eq!(sizes, vec![8, 16, 16]);
+    assert_eq!(sizes, vec![8, 32]);
     for (text, vector) in texts.iter().zip(&out) {
         let mut expected = fake_vector(text, DIMS);
         l2_normalize(&mut expected);
@@ -543,7 +543,7 @@ fn transient_failure_is_retried_and_order_is_kept() {
         l2_normalize(&mut expected);
         assert_eq!(vector, &expected, "vector for {text} out of order");
     }
-    assert_eq!(mock.count(), 10, "5 batches, each tried twice");
+    assert_eq!(mock.count(), 6, "3 batches (32+32+6), each tried twice");
 }
 
 #[test]
@@ -552,7 +552,9 @@ fn one_failed_batch_aborts_the_call_and_stops_new_requests() {
     let mock = Mock::start(|_, _| Reply::Json(401, "no".into()));
     let mut e = embedder(Provider::OpenRouter, &mock);
     e.concurrency = 2;
-    let texts: Vec<String> = (0..16 * 40).map(|i| format!("doc{i}")).collect();
+    let texts: Vec<String> = (0..REMOTE_BATCH_MAX_ITEMS * 40)
+        .map(|i| format!("doc{i}"))
+        .collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let err = e.embed(TextKind::Passage, &refs).unwrap_err();
     assert_eq!(kind_of(err), CloudErrorKind::Auth);
@@ -560,5 +562,221 @@ fn one_failed_batch_aborts_the_call_and_stops_new_requests() {
         mock.count() < 40,
         "sent {} of 40 batches after a failure",
         mock.count()
+    );
+}
+
+fn strings(sizes: &[usize]) -> Vec<String> {
+    sizes.iter().map(|n| "x".repeat(*n)).collect()
+}
+
+#[test]
+fn plan_batches_caps_items_and_bytes_and_covers_every_input_in_order() {
+    let many = strings(&[10; 70]);
+    let sizes: Vec<usize> = plan_batches(&many).iter().map(|b| b.len()).collect();
+    assert_eq!(sizes, vec![32, 32, 6]);
+
+    // 8 KB each: 64_000 / 8_000 = 8 per request, never more bytes than the cap.
+    let big = strings(&[8_000; 20]);
+    let planned = plan_batches(&big);
+    assert_eq!(
+        planned.iter().map(|b| b.len()).collect::<Vec<_>>(),
+        vec![8, 8, 4]
+    );
+    for batch in &planned {
+        assert!(batch.iter().map(String::len).sum::<usize>() <= REMOTE_BATCH_MAX_BYTES);
+    }
+
+    // A text that alone reaches the cap still gets a request of its own, never an empty one.
+    let mixed = strings(&[60_000, 10_000, 1]);
+    let planned = plan_batches(&mixed);
+    assert_eq!(
+        planned.iter().map(|b| b.len()).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let rejoined: Vec<&String> = planned.iter().flat_map(|b| b.iter()).collect();
+    assert_eq!(rejoined, mixed.iter().collect::<Vec<_>>());
+    assert!(plan_batches(&[]).is_empty());
+}
+
+#[test]
+fn failure_classification_follows_the_openrouter_error_guide() {
+    let secs = Duration::from_secs;
+    let hint = |status, header, body| classify_failure(status, header, body);
+    for status in [408u16, 500, 502, 503, 529] {
+        let h = hint(status, None, "");
+        assert!(h.retryable && !h.rate_limited, "HTTP {status}");
+    }
+    let h = hint(
+        429,
+        None,
+        "You exceeded your tokens quota. Retry the request after 2 sec.",
+    );
+    assert!(h.retryable && h.rate_limited);
+    assert_eq!(h.delay, Some(secs(2)));
+    // The header wins over the message.
+    assert_eq!(
+        hint(429, Some(secs(7)), "retry after 2 sec").delay,
+        Some(secs(7))
+    );
+    // 402 is retried only for the in-flight budget and only when Retry-After is present.
+    let budget = r#"{"error":{"metadata":{"limit_source":"openrouter_in_flight_budget"}}}"#;
+    assert!(hint(402, Some(secs(3)), budget).retryable);
+    assert!(!hint(402, None, budget).retryable);
+    assert!(!hint(402, Some(secs(3)), "Insufficient credits").retryable);
+    for status in [400, 401, 403, 404, 413] {
+        assert_eq!(
+            hint(status, Some(secs(1)), "retry after 1 sec"),
+            RetryHint::default()
+        );
+    }
+}
+
+#[test]
+fn retry_hint_in_message_is_parsed_strictly() {
+    let secs = Duration::from_secs;
+    assert_eq!(
+        delay_from_message("Retry the request after 2 sec."),
+        Some(secs(2))
+    );
+    assert_eq!(delay_from_message("RETRY AFTER 15 seconds"), Some(secs(15)));
+    assert_eq!(delay_from_message("retry after 0 sec"), Some(secs(0)));
+    assert_eq!(delay_from_message("after a while"), None);
+    assert_eq!(delay_from_message("after 5 minutes"), None);
+    assert_eq!(delay_from_message("no hint here"), None);
+    assert_eq!(delay_from_message(""), None);
+}
+
+#[test]
+fn retry_delay_uses_hint_else_exponential_backoff_with_bounded_jitter() {
+    let base = Duration::from_secs(1);
+    let none = RetryHint {
+        retryable: true,
+        ..RetryHint::default()
+    };
+    for (attempt, floor) in [(1, 1), (2, 2), (3, 4)] {
+        let d = retry_delay(&none, base, attempt);
+        assert!(
+            d >= Duration::from_secs(floor)
+                && d < Duration::from_secs(floor) + Duration::from_millis(250)
+        );
+    }
+    let hinted = RetryHint {
+        delay: Some(Duration::from_secs(5)),
+        ..none.clone()
+    };
+    let d = retry_delay(&hinted, base, 1);
+    assert!(d >= Duration::from_secs(5) && d < Duration::from_millis(5250));
+    let huge = RetryHint {
+        delay: Some(Duration::from_secs(3600)),
+        ..none
+    };
+    assert_eq!(retry_delay(&huge, base, 1), MAX_RETRY_DELAY);
+}
+
+#[test]
+fn gate_halves_once_per_burst_and_regrows_one_slot_per_window_of_successes() {
+    let gate = Gate::new(8);
+    let abort = AtomicBool::new(false);
+    assert!(gate.acquire(&abort));
+    gate.release();
+    gate.on_rate_limit();
+    gate.on_rate_limit(); // same burst: counts once
+    assert_eq!(gate.state.lock().unwrap().allowed, 4);
+    for _ in 0..3 {
+        gate.on_success();
+    }
+    assert_eq!(gate.state.lock().unwrap().allowed, 4, "needs 4 successes");
+    gate.on_success();
+    assert_eq!(gate.state.lock().unwrap().allowed, 5);
+    for _ in 0..200 {
+        gate.on_success();
+    }
+    assert_eq!(
+        gate.state.lock().unwrap().allowed,
+        8,
+        "never above the ceiling"
+    );
+    let one = Gate::new(1);
+    one.on_rate_limit();
+    assert_eq!(one.state.lock().unwrap().allowed, 1, "never below one");
+}
+
+#[test]
+fn gate_blocks_at_the_limit_and_stops_waiters_on_abort() {
+    let gate = Gate::new(1);
+    let abort = AtomicBool::new(false);
+    assert!(gate.acquire(&abort));
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| gate.acquire(&abort));
+        std::thread::sleep(Duration::from_millis(100));
+        abort.store(true, Ordering::Relaxed);
+        assert!(!waiter.join().unwrap(), "waiter must give up after abort");
+    });
+}
+
+#[test]
+fn http_408_is_retried_and_reported_as_timeout_when_it_persists() {
+    let mock = Mock::start(|n, r| {
+        if n == 0 {
+            Reply::Json(408, "".into())
+        } else {
+            ok_response(r, DIMS)
+        }
+    });
+    let mut e = embedder(Provider::OpenRouter, &mock);
+    e.retry_backoff = Duration::ZERO;
+    assert_eq!(e.embed(TextKind::Passage, &["a b"]).unwrap().len(), 1);
+    assert_eq!(mock.count(), 2);
+
+    let always = Mock::start(|_, _| Reply::Json(408, "".into()));
+    let mut e = embedder(Provider::OpenRouter, &always);
+    e.retry_backoff = Duration::ZERO;
+    let err = e.embed(TextKind::Passage, &["a b"]).unwrap_err();
+    assert_eq!(kind_of(err), CloudErrorKind::Timeout);
+    assert_eq!(always.count(), 1 + REMOTE_RETRIES);
+}
+
+#[test]
+fn payment_required_is_not_retried_without_the_in_flight_budget_marker() {
+    let mock = Mock::start(|_, _| {
+        Reply::Json(
+            402,
+            r#"{"error":{"message":"Insufficient credits"}}"#.into(),
+        )
+    });
+    let mut e = embedder(Provider::OpenRouter, &mock);
+    e.retry_backoff = Duration::ZERO;
+    let err = e.embed(TextKind::Passage, &["a b"]).unwrap_err();
+    assert_eq!(kind_of(err), CloudErrorKind::Payment);
+    assert_eq!(mock.count(), 1);
+}
+
+#[test]
+fn sustained_rate_limiting_still_returns_every_vector_in_order() {
+    // Every first attempt per batch is rate limited with a provider hint; concurrency adapts.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mock = Mock::start(move |_, r| {
+        if seen.lock().unwrap().insert(r.body["input"].to_string()) {
+            Reply::Json(429, "Retry the request after 0 sec".into())
+        } else {
+            ok_response(r, DIMS)
+        }
+    });
+    let mut e = embedder(Provider::OpenRouter, &mock);
+    e.retry_backoff = Duration::ZERO;
+    e.concurrency = 8;
+    let texts: Vec<String> = (0..32 * 12).map(|i| format!("doc{i} w{}", i * 5)).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let out = e.embed(TextKind::Passage, &refs).unwrap();
+    assert_eq!(out.len(), texts.len());
+    for (text, vector) in texts.iter().zip(&out) {
+        let mut expected = fake_vector(text, DIMS);
+        l2_normalize(&mut expected);
+        assert_eq!(vector, &expected, "vector for {text} out of order");
+    }
+    assert_eq!(
+        mock.count(),
+        24,
+        "12 batches, each rate limited once then served"
     );
 }

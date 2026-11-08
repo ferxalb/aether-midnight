@@ -530,12 +530,14 @@ fn provider_failures_degrade_search_to_lexical_and_never_leak_the_key() {
 
 #[test]
 fn embed_failure_midway_keeps_committed_vectors_and_lexical_search() {
-    // 20 memories = two batches; the second request is rate limited.
-    let mock = Mock::start(|n, r| {
-        if n != 1 {
+    // 20 memories = two batches (16 + 4). The 4-text batch stays rate limited, so its retries
+    // (hinted at 0 s to keep the test fast) are exhausted and the call fails; single-text query
+    // embeddings are still served.
+    let mock = Mock::start(|_, r| {
+        if r.body["input"].as_array().map(Vec::len) != Some(4) {
             ok_response(r, DIMS)
         } else {
-            Reply::Json(429, r#"{"error":{"code":"RATE_LIMIT_EXCEEDED","message":"slow down","details":{"retry_after":3}}}"#.into())
+            Reply::Json(429, r#"{"error":{"code":"RATE_LIMIT_EXCEEDED","message":"slow down. Retry the request after 0 sec"}}"#.into())
         }
     });
     let env = Env::new();

@@ -9,7 +9,8 @@
 //!   leaves this module.
 //! * The vector space is identified by `provider:model`, the endpoint/parameter fingerprint and the
 //!   declared dimensions; a response whose shape does not match is rejected, never coerced.
-//! * Bounded requests, four in flight by default; only rate-limit and 5xx answers are retried (twice);
+//! * Bounded requests (<= 32 texts / 64 KB), eight in flight by default and adaptive on 429; only
+//!   transient answers (408, 429, 5xx, in-flight-budget 402) are retried, at most three times;
 //!   failures surface as
 //!   [`CloudError`] with a stable category so callers can degrade to lexical search.
 
@@ -32,13 +33,19 @@ use crate::embed::{ModelIdentity, TextEmbedder, TextKind, l2_normalize};
 pub const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 pub const OPENROUTER_KEY_ENV: &str = "OPENROUTER_API_KEY";
 pub const RAINY_KEY_ENV: &str = "RAINY_API_KEY";
-/// Texts per request. Small enough for provider batch limits and request-size caps.
-pub const REMOTE_BATCH: usize = 16;
-/// Concurrent request ceiling for a remote embedding call.
-pub const DEFAULT_REMOTE_CONCURRENCY: usize = 4;
-pub const MAX_REMOTE_CONCURRENCY: usize = 8;
-/// Extra attempts for rate-limit and 5xx answers only.
-pub const REMOTE_RETRIES: usize = 2;
+/// Texts per request. Measured: per-request latency is mostly fixed overhead, so larger batches
+/// raise throughput until the provider's per-request token quota (see `docs/embeddings.md`).
+pub const REMOTE_BATCH_MAX_ITEMS: usize = 32;
+/// Input bytes per request after truncation (~14-21k tokens for code). A request is closed early
+/// when the next text would exceed this, so one request stays far below the token quota.
+pub const REMOTE_BATCH_MAX_BYTES: usize = 64_000;
+/// Starting (and default ceiling) concurrency; it adapts downward on 429 and back up on success.
+pub const DEFAULT_REMOTE_CONCURRENCY: usize = 8;
+pub const MAX_REMOTE_CONCURRENCY: usize = 32;
+/// Extra attempts for transient answers only (408, 429, 5xx, in-flight-budget 402).
+pub const REMOTE_RETRIES: usize = 3;
+/// Upper bound for any provider-suggested or computed retry delay.
+const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 pub const REMOTE_CONCURRENCY_ENV: &str = "MIDNIGHT_EMBED_CONCURRENCY";
 /// Characters per input after which text is truncated before sending (documented, deterministic).
 pub const MAX_INPUT_CHARS: usize = 8_000;
@@ -370,29 +377,44 @@ impl CloudEmbedder {
         request
     }
 
-    /// Retries only transient provider answers (rate limit, 5xx), at most [`REMOTE_RETRIES`] times
-    /// with a short fixed backoff. Auth, payment, malformed and dimension errors are never retried,
-    /// and a retry always goes to the same provider.
+    /// Retries only transient provider answers, at most [`REMOTE_RETRIES`] times, waiting for the
+    /// provider's own hint (`Retry-After` or "retry after N sec") when it gave one and otherwise
+    /// 1 s, 2 s, 4 s plus jitter. Auth, payment, malformed and dimension errors are never retried,
+    /// and a retry always goes to the same provider. A 429 also lowers the shared concurrency.
     fn embed_batch_with_retry(
         &self,
         batch: &[String],
+        gate: &Gate,
     ) -> std::result::Result<Vec<Vec<f32>>, CloudError> {
         let mut attempt = 0;
         loop {
-            match self.embed_batch(batch) {
-                Err(e)
-                    if attempt < REMOTE_RETRIES
-                        && matches!(e.kind, CloudErrorKind::RateLimit | CloudErrorKind::Server) =>
-                {
-                    attempt += 1;
-                    std::thread::sleep(self.retry_backoff * attempt as u32);
+            let mut hint = RetryHint::default();
+            match self.embed_batch(batch, &mut hint) {
+                Ok(vectors) => {
+                    gate.on_success();
+                    return Ok(vectors);
                 }
-                other => return other,
+                Err(e) => {
+                    if hint.rate_limited {
+                        gate.on_rate_limit();
+                    }
+                    if !hint.retryable || attempt >= REMOTE_RETRIES {
+                        return Err(e);
+                    }
+                    attempt += 1;
+                    if !self.retry_backoff.is_zero() {
+                        std::thread::sleep(retry_delay(&hint, self.retry_backoff, attempt));
+                    }
+                }
             }
         }
     }
 
-    fn embed_batch(&self, batch: &[String]) -> std::result::Result<Vec<Vec<f32>>, CloudError> {
+    fn embed_batch(
+        &self,
+        batch: &[String],
+        hint: &mut RetryHint,
+    ) -> std::result::Result<Vec<Vec<f32>>, CloudError> {
         let request = self.request(batch);
         // The SDK's typed decoder requires optional OpenRouter fields and its error mapping
         // loses generic 402 statuses. Keep SDK request/config validation, but retain wire status.
@@ -420,20 +442,31 @@ impl CloudEmbedder {
         };
         let status = response.status();
         if !(200..300).contains(&status) {
+            let header_delay = response
+                .header("retry-after")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            // The body is read only to classify the answer and find a retry hint; it can contain
+            // submitted text or credentials, so it is never echoed.
+            let mut body = Vec::new();
+            let _ = response.into_reader().take(8 * 1024).read_to_end(&mut body);
+            let body = String::from_utf8_lossy(&body);
+            *hint = classify_failure(status, header_delay, &body);
             return Err(CloudError {
                 kind: match status {
                     401 | 403 => CloudErrorKind::Auth,
                     402 => CloudErrorKind::Payment,
+                    408 => CloudErrorKind::Timeout,
                     429 => CloudErrorKind::RateLimit,
                     500..=599 => CloudErrorKind::Server,
                     _ => CloudErrorKind::Rejected,
                 },
-                // Provider bodies can contain submitted text or credentials; do not echo them.
                 message: format!(
                     "{} (HTTP {status}); check credentials, quota and provider configuration",
                     match status {
                         401 | 403 => "authentication failed",
                         402 => "payment required",
+                        408 => "provider request timed out",
                         429 => "rate limited",
                         500..=599 => "provider server error",
                         _ => "provider rejected embedding request",
@@ -537,7 +570,7 @@ impl TextEmbedder for CloudEmbedder {
     }
 
     fn preferred_batch_size(&self) -> usize {
-        REMOTE_BATCH * self.concurrency
+        REMOTE_BATCH_MAX_ITEMS * self.concurrency
     }
 
     fn embed(&mut self, _kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -546,11 +579,13 @@ impl TextEmbedder for CloudEmbedder {
         if inputs.iter().any(|t| t.trim().is_empty()) {
             bail!("cannot embed empty text");
         }
-        let batches: Vec<&[String]> = inputs.chunks(REMOTE_BATCH).collect();
+        let batches: Vec<&[String]> = plan_batches(&inputs);
         let workers = self.concurrency.min(batches.len());
         let this: &CloudEmbedder = self;
-        // Work queue: each worker takes the next batch as soon as it is free, so one slow request
-        // does not hold back the others. Results are stored by batch index to keep input order.
+        // Work queue: a worker first obtains a concurrency permit, then takes the next batch, so a
+        // taken batch is always sent and a slow request does not hold back the others. Results are
+        // stored by batch index to keep input order.
+        let gate = Gate::new(self.concurrency);
         let next = AtomicUsize::new(0);
         let abort = AtomicBool::new(false);
         let slots: Mutex<Vec<Option<BatchResult>>> =
@@ -558,16 +593,20 @@ impl TextEmbedder for CloudEmbedder {
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| {
-                    while !abort.load(Ordering::Relaxed) {
+                    while gate.acquire(&abort) {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(batch) = batches.get(i) else { break };
-                        let result = this.embed_batch_with_retry(batch);
+                        let Some(batch) = batches.get(i) else {
+                            gate.release();
+                            break;
+                        };
+                        let result = this.embed_batch_with_retry(batch, &gate);
                         if result.is_err() {
                             abort.store(true, Ordering::Relaxed);
                         }
                         if let Ok(mut guard) = slots.lock() {
                             guard[i] = Some(result);
                         }
+                        gate.release();
                     }
                 });
             }
@@ -576,15 +615,191 @@ impl TextEmbedder for CloudEmbedder {
             kind: CloudErrorKind::Network,
             message: "provider request worker failed".into(),
         })?;
+        // The first error in input order wins; a missing slot is only possible after an abort.
         let mut out = Vec::with_capacity(texts.len());
+        let mut incomplete = false;
         for slot in slots {
             match slot {
                 Some(result) => out.extend(result?),
-                // Only reachable after an abort; the earlier error was returned above.
-                None => bail!("embedding aborted after a provider failure"),
+                None => incomplete = true,
             }
         }
+        if incomplete {
+            bail!("embedding aborted after a provider failure");
+        }
         Ok(out)
+    }
+}
+
+/// Splits inputs into consecutive requests of at most [`REMOTE_BATCH_MAX_ITEMS`] texts and
+/// [`REMOTE_BATCH_MAX_BYTES`] bytes. Every text is already truncated, so each fits alone.
+fn plan_batches(inputs: &[String]) -> Vec<&[String]> {
+    let mut batches = Vec::new();
+    let (mut start, mut bytes) = (0usize, 0usize);
+    for (i, text) in inputs.iter().enumerate() {
+        let full = i - start >= REMOTE_BATCH_MAX_ITEMS
+            || (i > start && bytes + text.len() > REMOTE_BATCH_MAX_BYTES);
+        if full {
+            batches.push(&inputs[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += text.len();
+    }
+    if start < inputs.len() {
+        batches.push(&inputs[start..]);
+    }
+    batches
+}
+
+/// What the last failed attempt tells the retry loop.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RetryHint {
+    retryable: bool,
+    rate_limited: bool,
+    delay: Option<std::time::Duration>,
+}
+
+/// Retry policy from the OpenRouter error guide: 408/502/5xx back off, 429 and 503 honor the
+/// provider's delay, 402 is retried only for the in-flight budget and only with `Retry-After`.
+fn classify_failure(
+    status: u16,
+    header_delay: Option<std::time::Duration>,
+    body: &str,
+) -> RetryHint {
+    let delay = header_delay.or_else(|| delay_from_message(body));
+    match status {
+        408 | 500..=599 => RetryHint {
+            retryable: true,
+            rate_limited: false,
+            delay,
+        },
+        429 => RetryHint {
+            retryable: true,
+            rate_limited: true,
+            delay,
+        },
+        402 if header_delay.is_some() && body.contains("openrouter_in_flight_budget") => {
+            RetryHint {
+                retryable: true,
+                rate_limited: false,
+                delay,
+            }
+        }
+        _ => RetryHint::default(),
+    }
+}
+
+/// Upstream providers put the hint in the message ("Retry the request after 2 sec").
+fn delay_from_message(body: &str) -> Option<std::time::Duration> {
+    let lower = body.to_ascii_lowercase();
+    let rest = &lower[lower.find("after ")? + "after ".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let tail = rest[digits.len()..].trim_start();
+    if digits.is_empty() || !tail.starts_with("sec") {
+        return None;
+    }
+    digits
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
+}
+
+/// Provider hint if present, else `base * 2^(attempt-1)`, plus up to 250 ms of jitter, capped.
+fn retry_delay(hint: &RetryHint, base: std::time::Duration, attempt: usize) -> std::time::Duration {
+    let backoff = base * 2u32.saturating_pow(attempt.saturating_sub(1) as u32);
+    let jitter = std::time::Duration::from_millis(u64::from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+            % 250,
+    ));
+    (hint.delay.unwrap_or(backoff) + jitter).min(MAX_RETRY_DELAY)
+}
+
+/// Adaptive concurrency permit counter (additive increase, multiplicative decrease). It starts at
+/// the configured ceiling, halves on a 429 (at most once per second, so a burst of simultaneous
+/// 429s counts once) and regains one slot after as many consecutive successes as slots.
+struct Gate {
+    state: Mutex<GateState>,
+    changed: std::sync::Condvar,
+    max: usize,
+}
+
+struct GateState {
+    allowed: usize,
+    active: usize,
+    successes: usize,
+    last_cut: Option<std::time::Instant>,
+}
+
+impl Gate {
+    fn new(max: usize) -> Self {
+        Self {
+            state: Mutex::new(GateState {
+                allowed: max,
+                active: 0,
+                successes: 0,
+                last_cut: None,
+            }),
+            changed: std::sync::Condvar::new(),
+            max,
+        }
+    }
+
+    /// Blocks until a slot is free. Returns `false` once the call was aborted.
+    fn acquire(&self, abort: &AtomicBool) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        loop {
+            if abort.load(Ordering::Relaxed) {
+                return false;
+            }
+            if state.active < state.allowed {
+                state.active += 1;
+                return true;
+            }
+            state = match self
+                .changed
+                .wait_timeout(state, std::time::Duration::from_millis(200))
+            {
+                Ok((guard, _)) => guard,
+                Err(_) => return false,
+            };
+        }
+    }
+
+    fn release(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.active = state.active.saturating_sub(1);
+        }
+        self.changed.notify_all();
+    }
+
+    fn on_success(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.successes += 1;
+            if state.successes >= state.allowed && state.allowed < self.max {
+                state.allowed += 1;
+                state.successes = 0;
+                self.changed.notify_all();
+            }
+        }
+    }
+
+    fn on_rate_limit(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            let now = std::time::Instant::now();
+            let fresh = state
+                .last_cut
+                .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(1));
+            if fresh {
+                state.allowed = (state.allowed / 2).max(1);
+                state.successes = 0;
+                state.last_cut = Some(now);
+            }
+        }
     }
 }
 
