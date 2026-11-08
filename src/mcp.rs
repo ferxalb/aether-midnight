@@ -8,7 +8,21 @@ use std::sync::atomic::AtomicBool;
 
 use crate::{VERSION, code, memory};
 
+/// Newest protocol revision this server implements; offered when the client asks for an unknown one.
 const PROTOCOL_VERSION: &str = "2025-11-25";
+/// Revisions whose `tools` surface this server speaks. The reply echoes the client's request when
+/// it is listed here, so clients pinned to an older revision do not drop the connection.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
+    ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+fn negotiated_version(params: &Value) -> &'static str {
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .and_then(|asked| SUPPORTED_PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
+        .copied()
+        .unwrap_or(PROTOCOL_VERSION)
+}
 const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// Least-privilege limits applied to every tool call on any transport.
@@ -24,6 +38,15 @@ pub struct Policy {
     pub repo_roots: Option<Vec<PathBuf>>,
 }
 
+const CODE_TOOLS: [&str; 7] = [
+    "index_repository",
+    "refresh_indexed_file",
+    "search_code",
+    "open_range",
+    "list_symbols",
+    "repo_map",
+    "index_status",
+];
 const MEMORY_TOOLS: [&str; 5] = [
     "remember",
     "remember_batch",
@@ -47,6 +70,19 @@ impl Policy {
             .filter(|n| !WRITE_TOOLS.contains(n))
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Repository used when a code tool omits `repo_path`: the single policy root, else the
+    /// server's working directory, and only when that is itself a Git repository root. Never the
+    /// bare home directory or `/`, which GUI clients often use as the working directory.
+    fn default_repo(&self) -> Option<PathBuf> {
+        let is_repo = |dir: &Path| dir.join(".git").exists();
+        if let Some([only]) = self.repo_roots.as_deref()
+            && is_repo(only)
+        {
+            return Some(only.clone());
+        }
+        std::env::current_dir().ok().filter(|dir| is_repo(dir))
     }
 
     fn tool_allowed(&self, name: &str) -> bool {
@@ -111,6 +147,18 @@ impl Policy {
                         "permission denied: memory scope {scope:?} is not enabled for this server"
                     );
                 }
+            }
+        }
+        if CODE_TOOLS.contains(&name)
+            && args
+                .get("repo_path")
+                .is_none_or(|v| v.is_null() || v.as_str().is_some_and(|p| p.trim().is_empty()))
+        {
+            let Some(repo) = self.default_repo() else {
+                bail!("repo_path is required: this server was not started inside a Git repository");
+            };
+            if let Some(map) = args.as_object_mut() {
+                map.insert("repo_path".into(), json!(repo.to_string_lossy()));
             }
         }
         if let Some(roots) = &self.repo_roots
@@ -289,14 +337,14 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
-fn initialize(id: Value, _params: &Value) -> Value {
+fn initialize(id: Value, params: &Value) -> Value {
     ok_response(
         id,
         json!({
-            "protocolVersion":PROTOCOL_VERSION,
+            "protocolVersion":negotiated_version(params),
             "capabilities":{"tools":{"listChanged":false}},
             "serverInfo":{"name":"aether-midnight","version":VERSION},
-            "instructions":"Local-only repository retrieval and explicitly scoped agent memory. Repository paths and memory scopes are required for each operation."
+            "instructions":"Local-only repository retrieval and explicitly scoped agent memory. repo_path is optional when the server was started inside a Git repository (or its policy names one root); otherwise pass it. Memory scopes are required unless the policy pins one."
         }),
     )
 }
@@ -306,37 +354,37 @@ pub fn tools() -> Vec<Value> {
         tool(
             "index_repository",
             "Incrementally index eligible local files in one repository. Returns partial/complete status and skip counts.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"include_generated":{"type":"boolean"},"verify_hashes":{"type":"boolean"}},"required":["repo_path"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"include_generated":{"type":"boolean"},"verify_hashes":{"type":"boolean"}}}),
         ),
         tool(
             "refresh_indexed_file",
             "Refresh one explicit repository-relative file without walking the repository. Current ignore/security rules are applied; the catalog remains partial until index_repository reconciles all changes.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"}},"required":["repo_path","path"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"}},"required":["path"]}),
         ),
         tool(
             "search_code",
             "Search exact paths, extracted symbols, whole lexical tokens, and identifier-boundary fragments. Arbitrary substrings inside a token are unsupported. Returns current-source evidence and packs snippets within a deterministic estimated-token budget.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192}},"required":["repo_path","query"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192}},"required":["query"]}),
         ),
         tool(
             "open_range",
             "Read a bounded line range from the current repository file and report whether it matches the indexed hash.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"},"line_start":{"type":"integer","minimum":1},"line_end":{"type":"integer","minimum":1}},"required":["repo_path","path","line_start","line_end"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"},"line_start":{"type":"integer","minimum":1},"line_end":{"type":"integer","minimum":1}},"required":["path","line_start","line_end"]}),
         ),
         tool(
             "list_symbols",
             "List extracted Tree-sitter symbols in one repository/worktree.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"name":{"type":"string"},"limit":{"type":"integer"}},"required":["repo_path"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"name":{"type":"string"},"limit":{"type":"integer"}}}),
         ),
         tool(
             "repo_map",
             "Return deterministic file/language/symbol counts for one worktree.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"}},"required":["repo_path"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"}}}),
         ),
         tool(
             "index_status",
             "Report whether this repository/worktree index is complete and its generation, counts, and exclusions.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"}},"required":["repo_path"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"}}}),
         ),
         tool(
             "remember",
@@ -367,7 +415,17 @@ pub fn tools() -> Vec<Value> {
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({"name":name,"description":description,"inputSchema":input_schema})
+    // Hints let clients skip confirmation for read-only tools. Everything here is local, so the
+    // tools never reach an open world; only `forget` removes data a user stored.
+    let read_only = !WRITE_TOOLS.contains(&name);
+    let mut annotations = json!({"readOnlyHint":read_only,"openWorldHint":false});
+    if !read_only {
+        annotations["destructiveHint"] = json!(name == "forget");
+        if matches!(name, "index_repository" | "refresh_indexed_file" | "forget") {
+            annotations["idempotentHint"] = json!(true);
+        }
+    }
+    json!({"name":name,"description":description,"inputSchema":input_schema,"annotations":annotations})
 }
 
 fn call_tool(
@@ -560,15 +618,72 @@ fn write_json(output: &mut impl Write, value: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PROTOCOL_VERSION, initialize, read_bounded_line};
+    use super::{PROTOCOL_VERSION, Policy, initialize, read_bounded_line};
     use serde_json::json;
     use std::io::Cursor;
 
     #[test]
-    fn initialize_responds_with_the_only_supported_protocol_version() {
+    fn initialize_offers_the_newest_version_for_an_unknown_request() {
         let response = initialize(json!(1), &json!({"protocolVersion":"2099-01-01"}));
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert!(response.get("error").is_none());
+    }
+
+    #[test]
+    fn initialize_echoes_a_supported_older_version() {
+        for version in ["2025-06-18", "2025-03-26", "2024-11-05"] {
+            let response = initialize(json!(1), &json!({"protocolVersion":version}));
+            assert_eq!(response["result"]["protocolVersion"], version);
+        }
+    }
+
+    #[test]
+    fn tools_carry_accurate_annotations() {
+        for tool in super::tools() {
+            let name = tool["name"].as_str().unwrap();
+            let hints = &tool["annotations"];
+            assert_eq!(hints["openWorldHint"], false, "{name}");
+            let writes = super::WRITE_TOOLS.contains(&name);
+            assert_eq!(hints["readOnlyHint"], !writes, "{name}");
+            assert_eq!(hints["destructiveHint"] == true, name == "forget", "{name}");
+        }
+    }
+
+    #[test]
+    fn code_tools_default_to_the_policy_root_and_never_to_a_non_repository() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let pinned = Policy {
+            repo_roots: Some(vec![repo.clone()]),
+            ..Policy::default()
+        };
+        let args = pinned.authorize("repo_map", &json!({})).unwrap();
+        assert_eq!(args["repo_path"], json!(repo.to_string_lossy()));
+        // An explicit path is never replaced.
+        let args = pinned
+            .authorize("repo_map", &json!({"repo_path": repo.to_string_lossy()}))
+            .unwrap();
+        assert_eq!(args["repo_path"], json!(repo.to_string_lossy()));
+
+        // A single root that is not a repository gives no default (and the cwd of the test
+        // process is only used when it is a repository root, which is not asserted here).
+        let loose = Policy {
+            repo_roots: Some(vec![plain]),
+            ..Policy::default()
+        };
+        if loose.default_repo().is_none() {
+            assert!(loose.authorize("repo_map", &json!({})).is_err());
+        }
+        // Memory tools are unaffected.
+        assert!(
+            Policy::default()
+                .authorize("list_memories", &json!({"scope":"project:x"}))
+                .is_ok()
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@
 set -eu
 umask 022
 
-VERSION=0.1.0-rc.2
+VERSION=0.1.0-rc.3
 APP=aether-midnight
 ALIAS=midnight
 ARCHIVE_NAME="$APP-$VERSION-macos-universal2"

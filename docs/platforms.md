@@ -11,9 +11,20 @@
 | ONNX Runtime 1.23.2 (local embeddings) | Pinned official Microsoft archive, installed by `runtime install` with SHA-256 verification; dynamic loading | **macOS x86_64: installed, loaded and used for real inference from a clean environment.** No pin exists for other platforms; none is claimed. |
 | Local model `multilingual-e5-small` @ `614241f6…` | Pinned revision, SHA-256 verified by `models pull`/`verify` and at load | macOS x86_64: pulled, verified, tamper-tested, used for hybrid search. |
 | Cloud embeddings (`rainy-sdk` 0.6.51; OpenRouter, Rainy) | Rust ≥ 1.98, C compiler for `aws-lc-sys`; HTTPS | Built and tested on macOS x86_64 against a loopback mock only. No live provider call was made in the release run unless a credential was configured (see `v0.1-status.md`). |
-| MCP wire protocol | stdio JSON-RPC subset pinned to 2025-11-25 | Linux historical round trips plus native macOS process-start and persistent-session measurements in `benchmark/runs/`. |
+| MCP wire protocol | stdio JSON-RPC `tools` subset; negotiates 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 | Linux historical round trips plus native macOS process-start and persistent-session measurements in `benchmark/runs/`. |
 
 Published measurements are limited to their recorded test environments and do not establish behavior on every platform. Host and hardware identifiers are intentionally omitted. No sanitizers or allocator profiler were run.
+
+## Support tiers
+
+| Platform | Tier | Meaning |
+| --- | --- | --- |
+| macOS (Intel and Apple Silicon, universal2 binary) | Supported | Release target; installer, `update` and the documented verification apply. |
+| Linux | **Experimental** | Builds from source and has historical benchmark runs, but no release archive, installer or `update` path. Not stable: expect gaps and report them. |
+| Windows | **Experimental** | Not run by the maintainers yet. Unix-specific containment (`openat`/`O_NOFOLLOW`), file modes and the PTY tests do not apply as documented. Not stable. |
+
+Experimental means behavior, storage format guarantees and security properties documented for
+macOS are not promised there. Do not rely on it for important data.
 
 ## Pending verification
 

@@ -476,10 +476,15 @@ struct Chunk {
     text: String,
 }
 
+/// One stored chunk row: index, line range, source hash, vector bytes.
+type StoredChunk = (i64, Option<u32>, Option<u32>, String, Vec<u8>);
+
 struct PendingCodeFile {
     file_id: i64,
     chunks: Vec<Chunk>,
     hashes: Vec<String>,
+    /// Stored vector for a chunk whose text did not change; `None` means it must be embedded.
+    reused: Vec<Option<Vec<u8>>>,
 }
 
 fn chunk_text(text: &str) -> (Vec<Chunk>, bool) {
@@ -552,12 +557,23 @@ fn embed_and_store_code_files(
     if files.is_empty() {
         return Ok(());
     }
-    let expected: usize = files.iter().map(|file| file.chunks.len()).sum();
+    // Only chunks without a reusable vector go to the embedder (and, for cloud, over the network).
     let texts: Vec<&str> = files
         .iter()
-        .flat_map(|file| file.chunks.iter().map(|chunk| chunk.text.as_str()))
+        .flat_map(|file| {
+            file.chunks
+                .iter()
+                .zip(&file.reused)
+                .filter(|(_, reused)| reused.is_none())
+                .map(|(chunk, _)| chunk.text.as_str())
+        })
         .collect();
-    let vectors = embedder.embed(TextKind::Passage, &texts)?;
+    let expected = texts.len();
+    let vectors = if texts.is_empty() {
+        Vec::new()
+    } else {
+        embedder.embed(TextKind::Passage, &texts)?
+    };
     if vectors.len() != expected {
         bail!(
             "embedder returned {} vectors for {expected} chunks",
@@ -565,36 +581,44 @@ fn embed_and_store_code_files(
         );
     }
 
-    let mut offset = 0;
+    let mut fresh = vectors.iter();
     for file in files {
-        let end = offset + file.chunks.len();
-        let file_vectors = &vectors[offset..end];
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM embeddings WHERE kind='code' AND owner_id=?1",
             [file.file_id],
         )?;
-        for ((chunk, hash), vector) in file.chunks.iter().zip(&file.hashes).zip(file_vectors) {
-            tx.execute(
-                "INSERT INTO embeddings(kind,scope,owner_id,chunk,line_start,line_end,model,revision,dims,source_hash,vector)
-                 VALUES('code',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    key,
-                    file.file_id,
-                    chunk.index as i64,
-                    chunk.line_start,
-                    chunk.line_end,
-                    id.name,
-                    id.revision,
-                    id.dimensions as i64,
-                    hash,
+        let mut insert = tx.prepare_cached(
+            "INSERT INTO embeddings(kind,scope,owner_id,chunk,line_start,line_end,model,revision,dims,source_hash,vector)
+             VALUES('code',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        )?;
+        for ((chunk, hash), reused) in file.chunks.iter().zip(&file.hashes).zip(&file.reused) {
+            let blob = match reused {
+                Some(blob) => {
+                    report.unchanged += 1;
+                    blob.clone()
+                }
+                None => {
+                    let vector = fresh.next().expect("vector count was checked above");
+                    report.embedded += 1;
                     encode_vector(vector)
-                ],
-            )?;
+                }
+            };
+            insert.execute(params![
+                key,
+                file.file_id,
+                chunk.index as i64,
+                chunk.line_start,
+                chunk.line_end,
+                id.name,
+                id.revision,
+                id.dimensions as i64,
+                hash,
+                blob
+            ])?;
         }
+        drop(insert);
         tx.commit()?;
-        report.embedded += file.chunks.len();
-        offset = end;
     }
     Ok(())
 }
@@ -695,22 +719,60 @@ pub fn embed_code_with_progress(
         }
         let hashes: Vec<String> = chunks
             .iter()
-            .map(|c| hash_bytes(format!("{file_hash}\n{}", c.text).as_bytes()))
+            .map(|c| hash_bytes(c.text.as_bytes()))
             .collect();
-        let existing: HashMap<i64, String> = {
-            let mut stmt = conn.prepare(
-                "SELECT chunk,source_hash FROM embeddings WHERE kind='code' AND owner_id=?1",
+        // Stored rows of this file, by chunk index, with their vectors for content-based reuse.
+        let existing: Vec<StoredChunk> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT chunk,line_start,line_end,source_hash,vector FROM embeddings
+                 WHERE kind='code' AND owner_id=?1 ORDER BY chunk",
             )?;
-            stmt.query_map([file_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?
+            stmt.query_map([file_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
         };
         let current_match = existing.len() == chunks.len()
             && chunks
                 .iter()
                 .zip(&hashes)
-                .all(|(c, h)| existing.get(&(c.index as i64)) == Some(h));
+                .zip(&existing)
+                .all(|((c, h), e)| {
+                    e.0 == c.index as i64
+                        && e.3 == *h
+                        && e.1 == Some(c.line_start)
+                        && e.2 == Some(c.line_end)
+                });
         if current_match {
             report.unchanged += chunks.len();
+            done_files += 1;
+            notify(done_files, &report);
+            continue;
+        }
+        // Reuse any stored vector whose chunk text is identical, wherever it moved in the file.
+        let mut by_hash: HashMap<&str, &Vec<u8>> = HashMap::new();
+        for e in &existing {
+            by_hash.entry(e.3.as_str()).or_insert(&e.4);
+        }
+        let reused: Vec<Option<Vec<u8>>> = hashes
+            .iter()
+            .map(|h| {
+                by_hash
+                    .get(h.as_str())
+                    .filter(|blob| blob.len() == id.dimensions * 4)
+                    .map(|blob| (*blob).clone())
+            })
+            .collect();
+        let needed = reused.iter().filter(|r| r.is_none()).count();
+        if needed == 0 {
+            // Nothing to embed (lines moved or a chunk was removed): rewrite rows now, no provider call.
+            let file = PendingCodeFile {
+                file_id,
+                chunks,
+                hashes,
+                reused,
+            };
+            embed_and_store_code_files(&conn, &key, &id, &[file], embedder, &mut report)?;
             done_files += 1;
             notify(done_files, &report);
             continue;
@@ -725,19 +787,19 @@ pub fn embed_code_with_progress(
             continue;
         }
 
-        if pending_chunks > 0 && pending_chunks.saturating_add(chunks.len()) > preferred_batch_size
-        {
+        if pending_chunks > 0 && pending_chunks.saturating_add(needed) > preferred_batch_size {
             embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;
             done_files += pending_files.len() as u64;
             pending_files.clear();
             pending_chunks = 0;
             notify(done_files, &report);
         }
-        pending_chunks += chunks.len();
+        pending_chunks += needed;
         pending_files.push(PendingCodeFile {
             file_id,
             chunks,
             hashes,
+            reused,
         });
         if pending_chunks >= preferred_batch_size {
             embed_and_store_code_files(&conn, &key, &id, &pending_files, embedder, &mut report)?;

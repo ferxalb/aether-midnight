@@ -2,6 +2,27 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (13) — Version points to 0.1.0-rc.3
+
+- `Cargo.toml`, `Cargo.lock`, `scripts/install.sh` (pinned `VERSION`), the README, `docs/installation.md`, `docs/release-checklist.md` and `CHANGELOG.md` now name `0.1.0-rc.3` (tag `v0.1.0-rc.3`, archive `aether-midnight-0.1.0-rc.3-macos-universal2.tar.gz`). The install URLs in the README and installation guide point at a release that does not exist until the maintainer tags and publishes it. Left as is on purpose: `docs/installation.md` `update --to 0.1.0-rc.1` example and the version strings in `src/update.rs` and `tests/cli_update.rs`, which are SemVer fixtures, and the earlier entries of this file.
+- Contents of rc.3 relative to rc.2: embed re-sends only changed chunks (11), MCP version negotiation, tool annotations and optional `repo_path` (12), Linux and Windows documented as experimental. No build or test was run for this change.
+
+## 2026-11-08 (12) — MCP: version negotiation, tool annotations, default repository
+
+- `initialize` used to answer 2025-11-25 whatever the client asked, which can make a client pinned to an older revision drop the connection. It now echoes the requested version when it is one of 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 and otherwise offers 2025-11-25. Only the `tools` surface exists, which these revisions share. The later stateless revision is still not implemented.
+- Every tool now has `annotations` (`readOnlyHint`, `openWorldHint: false`, `destructiveHint` only for `forget`, `idempotentHint` for `index_repository`, `refresh_indexed_file`, `forget`) so clients can skip confirmation for read-only tools. This is a hint to the client, not an enforcement; the `Policy` is unchanged.
+- `repo_path` is optional on code tools: default is the policy's single root, else the working directory only if it is a Git repository root. A non-repository directory (a GUI client's `/` or home) is never used; the call fails asking for `repo_path`. Explicit paths are never replaced and policy roots are still checked after defaulting. Tool schemas no longer list `repo_path` as required and the server `instructions` say so once.
+- Evidence: `cargo clippy --locked --all-targets -- -D warnings` clean; new unit tests in `src/mcp.rs` (older-version echo, annotations, default repo) were NOT run. No real MCP client (Claude Code, Claude Desktop, Codex) has been tried; that is for rc.3. No retrieval, schema or performance change.
+
+## 2026-11-08 (11) — Re-embed only the chunks that changed
+
+- Found: the stored hash of each code chunk was salted with the whole-file hash, so editing one line changed every chunk hash and `embed` re-embedded (and, for cloud providers, re-uploaded) the entire file. The chunk hash is now computed from the chunk text only, and a changed file reuses the stored vector of every chunk whose text is identical, wherever it sits in the file; only new or edited chunks go to the embedder. A file whose chunks all match is rewritten without any provider call (line ranges are refreshed). Reused vectors are checked against the model's dimension count.
+- Known limit: chunks are fixed 40-line/2000-byte windows, so inserting or deleting lines shifts every later chunk and those still re-embed; edits that keep line counts re-embed only the touched chunks. Content-defined chunking would fix this and is not done.
+- One-time cost: stored hashes from earlier versions no longer match, so the first `embed` after upgrading re-embeds each repository once.
+- Indexer: the per-file lookup of the stored size/mtime row now uses a cached prepared statement (same query, same results). Indexing already skipped unchanged files by size and mtime without reading them, and wrote only changed files in their own transactions; that is unchanged.
+- Docs: `docs/v0.1-status.md` marked superseded; `docs/platforms.md` and the README now state Linux and Windows are experimental and not stable.
+- Evidence: `cargo check --locked` for the library and the new `tests/embed_incremental.rs` only. The test and the existing suites were NOT run (deliberately, to be exercised with the rc.3 build); no performance or cost figure is claimed.
+
 ## 2026-11-08 (10) — Concurrent remote code embedding
 
 - Repository embedding now gathers chunks across files and sends up to four remote requests in parallel by default. `MIDNIGHT_EMBED_CONCURRENCY` tunes the bounded concurrency from 1 to 8. Responses retain input order and each completed file is persisted in its own transaction, so later runs can resume from stored files.

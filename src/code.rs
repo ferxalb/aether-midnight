@@ -888,12 +888,13 @@ fn index_scoped(
                     let relative = relative_path.to_string_lossy().replace('\\', "/");
                     let modified_ns = modified_ns(&metadata);
                     let existing: Option<(String, i64, i64, bool)> = conn
-                        .query_row(
+                        .prepare_cached(
                             "SELECT content_hash,size_bytes,modified_ns,parse_error FROM code_files
                              WHERE repo_id=?1 AND worktree_id=?2 AND rel_path=?3",
-                            params![scope.repo_id, scope.worktree_id, relative],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                        )
+                        )?
+                        .query_row(params![scope.repo_id, scope.worktree_id, relative], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
                         .optional()?;
                     writer.files_discovered += 1;
                     FILES_SCANNED.fetch_add(1, Ordering::Relaxed);
