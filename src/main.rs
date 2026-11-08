@@ -16,12 +16,24 @@ struct Cli {
     /// SQLite database. Defaults to the OS local application-data directory.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+    /// Machine-readable JSON output (all commands emit JSON; accepted everywhere for stability).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Create the database and apply migrations (idempotent).
+    Init,
+    /// Explicit memories: add, get, list, delete, search (namespace-isolated).
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+    /// Check database, FTS5, integrity and writability; exits non-zero on failure.
+    Doctor,
     /// Incrementally index a local repository/worktree.
     Index {
         #[arg(long, default_value = ".")]
@@ -45,8 +57,11 @@ enum Commands {
     Search {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        #[arg(long)]
-        query: String,
+        /// Query text (positional or via --query).
+        #[arg(value_name = "QUERY", required_unless_present = "query_flag")]
+        query_pos: Option<String>,
+        #[arg(long = "query", conflicts_with = "query_pos")]
+        query_flag: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
         /// Approximate context-token budget (Midnight heuristic, not a model tokenizer).
@@ -222,6 +237,47 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum MemoryAction {
+    /// Store a memory in a namespace.
+    Add {
+        #[arg(long, alias = "scope")]
+        namespace: String,
+        content: String,
+        #[arg(long, value_enum, default_value_t = MemoryKind::Source)]
+        kind: MemoryKind,
+        #[arg(long)]
+        source_uri: Option<String>,
+    },
+    /// Fetch one active memory by id within its namespace.
+    Get {
+        #[arg(long, alias = "scope")]
+        namespace: String,
+        id: i64,
+    },
+    /// List active memories in a namespace (newest first).
+    List {
+        #[arg(long, alias = "scope")]
+        namespace: String,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Delete (suppress) a memory in its exact namespace.
+    Delete {
+        #[arg(long, alias = "scope")]
+        namespace: String,
+        id: i64,
+    },
+    /// BM25 search within one namespace.
+    Search {
+        #[arg(long, alias = "scope")]
+        namespace: String,
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum TokenAction {
     /// Mint a token; the plaintext is printed once on stdout.
     Create {
@@ -300,6 +356,24 @@ fn main() -> Result<()> {
     ctrlc::set_handler(move || cancellation_for_signal.store(true, Ordering::Relaxed))
         .context("install Ctrl-C cancellation handler")?;
     match cli.command {
+        Commands::Init => {
+            let conn = db::open_db(&db_path)?;
+            let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            drop(conn);
+            if cli.json {
+                print_json(
+                    &serde_json::json!({"initialized":true,"database_path":db_path,"schema_version":v}),
+                )?;
+            } else {
+                println!("initialized {} (schema version {v})", db_path.display());
+            }
+        }
+        Commands::Memory { action } => memory_command(&db_path, action, cli.json)?,
+        Commands::Doctor => {
+            if !doctor(&db_path, cli.json)? {
+                std::process::exit(1);
+            }
+        }
         Commands::Index {
             repo,
             include_generated,
@@ -327,13 +401,14 @@ fn main() -> Result<()> {
         }
         Commands::Search {
             repo,
-            query,
+            query_pos,
+            query_flag,
             limit,
             token_budget,
         } => print_json(&code::search_code_with_budget(
             &db_path,
             &repo,
-            &query,
+            &query_pos.or(query_flag).unwrap_or_default(),
             limit,
             token_budget,
         )?)?,
@@ -530,6 +605,142 @@ fn main() -> Result<()> {
         Commands::ServeHttp { bind } => mcp_http::serve(&db_path, bind, cancellation)?,
     }
     Ok(())
+}
+
+fn memory_command(db_path: &std::path::Path, action: MemoryAction, json: bool) -> Result<()> {
+    let line = |m: &memory::MemoryRecord| {
+        format!(
+            "{}\t{}\t{}\t{}",
+            m.id,
+            m.scope,
+            m.kind,
+            m.content.replace('\n', " ")
+        )
+    };
+    match action {
+        MemoryAction::Add {
+            namespace,
+            content,
+            kind,
+            source_uri,
+        } => {
+            let kind = match kind {
+                MemoryKind::Source => "source",
+                MemoryKind::Derived => "derived",
+            };
+            let m = memory::remember(
+                db_path,
+                &namespace,
+                kind,
+                &content,
+                source_uri.as_deref(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            if json {
+                print_json(&m)?
+            } else {
+                println!("added {}", line(&m))
+            }
+        }
+        MemoryAction::Get { namespace, id } => match memory::get_memory(db_path, &namespace, id)? {
+            Some(m) => {
+                if json {
+                    print_json(&m)?
+                } else {
+                    println!("{}", line(&m))
+                }
+            }
+            None => anyhow::bail!("memory {id} not found in namespace {namespace:?}"),
+        },
+        MemoryAction::List { namespace, limit } => {
+            let ms = memory::list_memories(db_path, &namespace, limit)?;
+            if json {
+                print_json(&ms)?
+            } else {
+                ms.iter().for_each(|m| println!("{}", line(m)))
+            }
+        }
+        MemoryAction::Delete { namespace, id } => {
+            let deleted = memory::forget(db_path, &namespace, id)?;
+            if json {
+                print_json(&serde_json::json!({"deleted": deleted}))?
+            } else {
+                println!("deleted: {deleted}")
+            }
+            if !deleted {
+                std::process::exit(1);
+            }
+        }
+        MemoryAction::Search {
+            namespace,
+            query,
+            limit,
+        } => {
+            let rs = memory::recall(db_path, &namespace, &query, None, limit)?;
+            if json {
+                print_json(&rs)?
+            } else {
+                for r in &rs {
+                    println!("{:.4}\t{}", r.score, line(&r.memory));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn doctor(db_path: &std::path::Path, json: bool) -> Result<bool> {
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+    let mut check = |name: &str, r: Result<String>| {
+        let (ok, detail) = match r {
+            Ok(d) => (true, d),
+            Err(e) => (false, format!("{e:#}")),
+        };
+        checks.push(serde_json::json!({"check": name, "ok": ok, "detail": detail}));
+    };
+    check(
+        "database_open",
+        db::open_db(db_path).map(|_| db_path.display().to_string()),
+    );
+    check(
+        "sqlite_version",
+        db::open_db(db_path).and_then(|c| {
+            Ok(c.query_row("SELECT sqlite_version()", [], |r| r.get::<_, String>(0))?)
+        }),
+    );
+    check(
+        "fts5",
+        db::open_db(db_path).and_then(|c| {
+            c.execute_batch(
+                "CREATE VIRTUAL TABLE temp.doctor_fts USING fts5(x); DROP TABLE temp.doctor_fts;",
+            )?;
+            Ok("available".to_owned())
+        }),
+    );
+    check(
+        "integrity",
+        memory::verify_integrity(db_path).map(|_| "ok".to_owned()),
+    );
+    let ok = checks.iter().all(|c| c["ok"] == true);
+    if json {
+        print_json(
+            &serde_json::json!({"ok": ok, "version": aether_midnight::VERSION, "checks": checks}),
+        )?;
+    } else {
+        for c in &checks {
+            println!(
+                "{} {}: {}",
+                if c["ok"] == true { "ok  " } else { "FAIL" },
+                c["check"].as_str().unwrap_or(""),
+                c["detail"].as_str().unwrap_or("")
+            );
+        }
+    }
+    Ok(ok)
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {

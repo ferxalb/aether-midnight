@@ -2139,6 +2139,32 @@ fn list_memories_on(conn: &Connection, scope: &str, limit: usize) -> Result<Vec<
         .context("list memories")
 }
 
+/// Fetch one active memory by id, only within its exact namespace.
+pub fn get_memory(db_path: &Path, scope: &str, id: i64) -> Result<Option<MemoryRecord>> {
+    let conn = open_db(db_path)?;
+    validate_scope(scope)?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
+         FROM memories WHERE id=?1 AND scope=?2 AND deleted_at IS NULL",
+    )?;
+    let mut rows = stmt.query_map(params![id, scope], |row| {
+        Ok(MemoryRecord {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            kind: row.get(2)?,
+            content: row.get(3)?,
+            source_uri: row.get(4)?,
+            source_id: row.get(5)?,
+            supersedes_id: row.get(6)?,
+            created_at: row.get(7)?,
+            observed_at: row.get(8)?,
+            valid_from: row.get(9)?,
+            valid_to: row.get(10)?,
+        })
+    })?;
+    rows.next().transpose().context("get memory")
+}
+
 pub fn forget(db_path: &Path, scope: &str, id: i64) -> Result<bool> {
     let conn = open_db(db_path)?;
     forget_on(&conn, scope, id)

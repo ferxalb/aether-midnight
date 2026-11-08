@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-07 (1) — v0.1 Phase 1 CLI
+
+- Added `init`, `memory add|get|list|delete|search`, `doctor`, a global `--json` flag, a positional `search` query and `memory::get_memory`. Existing commands, MCP and retrieval code are untouched.
+- Tests: `tests/cli_smoke.rs`; status in `docs/v0.1-status.md`.
+
 ## 2026-11-06 (4) — Final stabilization validation (no code change)
 
 - Re-validated against Dots at the final integration state: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (48 unit + 7 HTTP + 4 stdio, retrieval oracle/fixtures included) and the real-binary offline Dots E2E all pass. Retrieval code is untouched since v0.4.
