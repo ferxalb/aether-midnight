@@ -4,50 +4,84 @@
 
 **Local code search and explicit memory for AI agents, in a single binary.**
 
-AETHER Midnight indexes a repository on your machine so you, or an AI agent, can find the right file, line range, or symbol, with every result traceable to the source. It also stores memories you save on purpose, kept apart by namespace, so an agent can recall them later.
+Midnight indexes your repositories on your machine so you, or an AI agent like Claude Code or Codex, can find the right file, line range, or symbol, with every result traced back to the source. It also keeps memories you save on purpose, so an agent can recall them later.
 
-Keyword search works fully offline: no server, account, API key, or model needed.
+- **Private by default.** Keyword search runs fully offline: no server, account, API key, or model.
+- **Built for agents.** One command registers it as an MCP server in Claude Code, Claude Desktop, or Codex.
+- **Optional semantic search.** Use a local model, or a cloud provider you choose (OpenRouter or Rainy).
 
 > **Status:** prerelease (`v0.1.0-rc.2`). Commands and output fields may still change.
 
 ## Install
 
-**macOS (Apple silicon or Intel).** No Rust or sudo needed. The script downloads the prebuilt binary, checks its SHA-256, and installs it to `~/.local/bin/aether-midnight`:
+**macOS (Apple silicon or Intel).** No Rust or sudo needed:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.2/install.sh | sh -s -- --no-runtime
 ```
 
-Add `~/.local/bin` to your `PATH`. The binary is not signed or notarized, so macOS Gatekeeper may block it the first time; see [docs/installation.md](docs/installation.md).
+This verifies the download's SHA-256 and installs `aether-midnight` to `~/.local/bin`, plus a shorter `midnight` alias. Add `~/.local/bin` to your `PATH` if it is not there yet. The binary is not signed or notarized; if macOS blocks it, see [docs/installation.md](docs/installation.md).
 
 **From source (any platform).** Needs Rust 1.98+ and a C compiler. SQLite is bundled.
 
 ```sh
 git clone https://github.com/ferxalbs/aether-midnight.git
 cd aether-midnight
-cargo build --release --locked   # binary: target/release/aether-midnight
+cargo build --release --locked   # binaries: target/release/midnight, target/release/aether-midnight
 ```
 
 ## Quick start
 
 ```sh
-aether-midnight setup                     # choose keyword-only, local, or cloud search
-aether-midnight index .                   # index this repository
-aether-midnight search "retry budget"     # search it
-aether-midnight status                    # show configuration and index state
+midnight setup              # choose keyword-only, local, or cloud search
+cd ~/src/my-app
+midnight index              # index this repository (and embed it, if you chose a model)
+midnight search "retry budget"
+midnight status             # configuration, storage, and index state
 ```
 
-Run `index` again after you change files; there is no file watcher.
+`index` shows live progress on a terminal. Run it again after you change files; there is no file watcher.
+
+Output is readable text on a terminal and JSON when piped or with `--json`.
+
+## Connect an AI client
+
+```sh
+midnight connect claude-code --scope project   # writes ./.mcp.json
+midnight connect claude-code --scope user      # writes ~/.claude.json
+midnight connect claude-desktop --scope user
+midnight connect codex --scope user            # writes ~/.codex/config.toml
+```
+
+- `connect` merges into your existing config and keeps a `.midnight.bak` backup.
+- `--dry-run` previews the change, `--read-only` exposes only search and recall tools, and `--remove` takes Midnight out again.
+- Project config files call `midnight` from your `PATH`, so you can commit them.
+
+The agent gets these MCP tools:
+
+| Area | Tools |
+| --- | --- |
+| Code | `index_repository`, `refresh_indexed_file`, `search_code`, `open_range`, `list_symbols`, `repo_map`, `index_status` |
+| Memory | `remember`, `remember_batch`, `recall`, `list_memories`, `forget` |
+
+For any other MCP client, run `midnight mcp` over stdio:
+
+```json
+{ "mcpServers": { "aether-midnight": { "command": "/absolute/path/to/midnight", "args": ["mcp"] } } }
+```
+
+HTTP clients can use `midnight serve-http` (localhost only, bearer token from `midnight token create`). See [docs/dots-integration.md](docs/dots-integration.md).
 
 ## Search code
 
 ```sh
-aether-midnight search --repo ~/src/payments "payment timeout" --limit 5
-aether-midnight open-range --repo ~/src/payments --path src/payments.rs --start 20 --end 45
-aether-midnight list-symbols --repo ~/src/payments --name charge
-aether-midnight repo-map --repo ~/src/payments
+midnight search "payment timeout" --limit 5
+midnight open-range --path src/payments.rs --start 20 --end 45
+midnight list-symbols --name charge
+midnight repo-map
 ```
 
+- Commands work on the current directory; use `--repo PATH` for another one.
 - Each result includes its path, line range, why it matched, and whether the index is fresh.
 - Search matches whole words, paths, and symbol names, not arbitrary substrings.
 - Symbols are extracted for Rust, Python, TypeScript, TSX, and JavaScript. Other files are searchable as text.
@@ -56,115 +90,69 @@ aether-midnight repo-map --repo ~/src/payments
 ## Remember and recall
 
 ```sh
-# Save a source (gets id 1), then a fact that cites it
-aether-midnight remember --scope project:payments --kind source \
+# Save a source (id 1), then a fact that cites it (id 2)
+midnight remember --scope project:payments --kind source \
   --content 'Payment policy: the retry budget is capped at 3 attempts.'
-aether-midnight remember --scope project:payments --kind derived \
+midnight remember --scope project:payments --kind derived \
   --content 'Retry cap is 3 attempts' --source-id 1
 
-aether-midnight recall --scope project:payments --query retry
-aether-midnight forget --scope project:payments --id 2
+midnight recall --scope project:payments --query retry
+midnight forget --scope project:payments --id 2
 ```
 
 - Scopes need a prefix, such as `user:alice` or `project:my-app`. Recall never crosses scopes.
-- Midnight never captures conversations on its own. It stores only what you tell it to.
+- Midnight never captures conversations on its own. It stores only what you or your agent save.
 - `forget` hides a memory immediately. Run `compact` to remove its text from the database file.
 
 ## Semantic search (optional)
 
-Keyword search is the default. For meaning-based search, run `aether-midnight setup` and pick one:
+Pick a provider in `midnight setup`. After that, `index` embeds your code and `search` uses hybrid (keyword + semantic) ranking automatically.
 
-- **Local:** downloads a pinned ONNX Runtime and the `multilingual-e5-small` model (about 500 MB), then runs offline. Allow about 2 GiB of free RAM.
-- **Cloud (OpenRouter or Rainy):** sends the text being embedded (code chunks, memories, queries) to that provider. Nothing is sent unless you choose it.
+| Provider | What happens |
+| --- | --- |
+| **Keyword only** (default) | Nothing leaves your machine. No model needed. |
+| **Local** | Downloads a pinned ONNX Runtime and the `multilingual-e5-small` model (about 500 MB) once, then runs offline. Allow about 2 GiB of free RAM. |
+| **OpenRouter / Rainy** | Sends the text being embedded (code chunks, memories, queries) to that provider, only after you consent in `setup`. The API key is stored with `0600` permissions, or read from `OPENROUTER_API_KEY` / `RAINY_API_KEY`. |
 
-```sh
-aether-midnight embed --repo .
-aether-midnight search "retry policy" --mode hybrid
-```
+If embedding fails or is incomplete, results say so (`semantic_coverage`); Midnight never silently switches provider. Details are in [docs/embeddings.md](docs/embeddings.md).
 
-Details are in [docs/embeddings.md](docs/embeddings.md).
+## Per-project storage
 
-## Use with AI agents (MCP)
+By default all data lives in one database in your OS data directory. Run `midnight setup` inside a Git repository (after the first setup) to keep that project's data in `<repo>/.midnight/` instead. Midnight adds `.midnight/` to `.gitignore` and never indexes it.
 
-Register Midnight with a client in one command (it merges into the existing config, saves a
-`.midnight.bak` backup, and `--dry-run` previews the change):
-
-```sh
-midnight connect claude-code --scope project   # ./.mcp.json
-midnight connect claude-code --scope user      # ~/.claude.json
-midnight connect claude-desktop --scope user
-midnight connect codex --scope user            # ~/.codex/config.toml (or $CODEX_HOME)
-midnight connect codex --scope project --storage project --read-only
-midnight connect claude-code --scope user --remove
-```
-
-Project config files stay portable: they run `midnight` from `PATH` and never pin a database path
-(user-scope files name the exact binary).
-
-### Global setup vs. per-project setup
-
-- `midnight setup` (or `--global`) is the user-wide step: search provider, API key, upload consent.
-  It lives in your OS config directory and applies to every repository.
-- `midnight setup` inside a Git repository, once the user-wide step exists, sets up only that
-  repository: where its data lives (**this project** is preselected, or the global data directory),
-  an optional client registration, and `.midnight/midnight.json`. `--project` forces it,
-  `--storage global|project` skips the question, `--no-input` accepts the defaults.
-- Project storage is `<repo>/.midnight/` (private, git-ignored: `.gitignore` is created or
-  extended). Inside the repo the CLI and the MCP server find it by themselves. It is never indexed.
-  Without it, the global database is used.
-
-`.midnight/midnight.json` holds per-project, non-secret overrides:
+Optional per-project settings go in `.midnight/midnight.json`:
 
 ```json
 { "version": 1, "embeddings": true, "mcp": { "read_only": false, "memory_scopes": ["project:my-app"] } }
 ```
 
-`embeddings: false` keeps the repository on keyword search; `mcp` narrows what the MCP server
-exposes (flags still apply). There is deliberately no field for provider, endpoint, key or upload
-consent: those come only from the user-wide setup, so a project file can switch features off but
-never send code anywhere. Unknown fields are errors.
+- `embeddings: false` keeps the repository on keyword search.
+- `mcp` limits what the MCP server exposes for this project.
+- The file cannot set a provider, key, or upload consent, so a project can turn features off but never send your code anywhere.
+- A `.midnight/` that arrives with a clone is ignored until you run `setup` in that repository. `midnight project list` and `midnight project untrust` manage which projects are trusted.
 
-A `.midnight/` that arrives with a clone is ignored (database and `midnight.json` alike) until you
-run `init --storage project`, `setup` or `connect --storage project` in that repository.
-
-Or add Midnight to any MCP client by hand:
-
-```json
-{
-  "mcpServers": {
-    "aether-midnight": {
-      "command": "/absolute/path/to/aether-midnight",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-| Area | Tools |
-| --- | --- |
-| Code | `index_repository`, `refresh_indexed_file`, `search_code`, `open_range`, `list_symbols`, `repo_map`, `index_status` |
-| Memory | `remember`, `remember_batch`, `recall`, `list_memories`, `forget` |
-
-For HTTP clients, `serve-http` serves the same tools on localhost only and requires a bearer token:
+## Update and uninstall
 
 ```sh
-aether-midnight token create --name my-agent --memory-scope 'project:my-app'
-aether-midnight serve-http
+midnight update --check    # see whether a newer release exists
+midnight update            # download, verify, and replace the binary in place
+midnight uninstall         # remove the program; your config and data stay
 ```
 
-See [docs/dots-integration.md](docs/dots-integration.md).
+`update --to VERSION` installs a specific release. `uninstall --purge-config --purge-data` also deletes settings, keys, databases, and models; `--remove-client-entries` removes Midnight from your Claude Code, Claude Desktop, and Codex configs. Both commands accept `--dry-run`.
 
 ## Privacy
 
-- No telemetry. Network use happens only for the optional model download and a cloud provider you selected.
-- Data lives in one SQLite file (macOS: `~/Library/Application Support/aether-midnight/`, Linux: `~/.local/share/aether-midnight/`). Use `--db PATH` to change it. The file is private (`0600`) but **not encrypted**.
+- No telemetry. Midnight goes online only when you install, update, download the local model, or use a cloud provider you selected.
+- Data is stored in SQLite (macOS: `~/Library/Application Support/aether-midnight/`, Linux: `~/.local/share/aether-midnight/`, or `<repo>/.midnight/`). Files are private (`0600`) but **not encrypted**.
 - Indexing respects `.gitignore` and `.aetherignore`, and skips dependencies, build output, secret-looking files (`.env*`, `*.pem`, `*.key`), binaries, and files over 1 MiB.
 
 More in [docs/privacy.md](docs/privacy.md).
 
 ## Known limitations
 
-- Give each server process its own database; two writers on the same file can fail with `database is locked`.
+- Two processes writing to the same database at once can fail with `database is locked`. Give each server process its own database.
+- A project database does not see memories stored in the global database. Use global storage to share memories across projects.
 - Token budgets are an estimate, not any specific model's token count.
 
 ## Documentation
