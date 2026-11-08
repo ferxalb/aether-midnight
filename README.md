@@ -8,14 +8,14 @@ AETHER Midnight indexes a repository on your machine so you, or an AI agent, can
 
 Keyword search works fully offline: no server, account, API key, or model needed.
 
-> **Status:** prerelease (`v0.1.0-rc.1`). Commands and output fields may still change.
+> **Status:** prerelease (`v0.1.0-rc.2`). Commands and output fields may still change.
 
 ## Install
 
 **macOS (Apple silicon or Intel).** No Rust or sudo needed. The script downloads the prebuilt binary, checks its SHA-256, and installs it to `~/.local/bin/aether-midnight`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.1/install.sh | sh -s -- --no-runtime
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.2/install.sh | sh -s -- --no-runtime
 ```
 
 Add `~/.local/bin` to your `PATH`. The binary is not signed or notarized, so macOS Gatekeeper may block it the first time; see [docs/installation.md](docs/installation.md).

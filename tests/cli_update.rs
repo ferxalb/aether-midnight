@@ -107,7 +107,7 @@ fn serve(
 fn release(origin: &str, version: &str, pre: bool) -> Value {
     let name = format!("aether-midnight-{version}-macos-universal2.tar.gz");
     json!({
-        "tag_name": format!("v{version}"), "prerelease": pre, "draft": false,
+        "tag_name": format!("v{version}"), "prerelease": pre && version.contains('-'), "draft": false,
         "assets": [
             {"name": name, "browser_download_url": format!("{origin}/dl/{name}")},
             {"name": format!("{name}.sha256"), "browser_download_url": format!("{origin}/dl/{name}.sha256")},
@@ -180,12 +180,9 @@ fn files_for(archive: &[u8], version: &str) -> HashMap<String, Vec<u8>> {
 fn check_reports_a_newer_prerelease_without_downloading_or_changing_anything() {
     let install = Install::new();
     let work = TempDir::new().unwrap();
-    let archive = make_archive(work.path(), "0.1.0-rc.2", "0.1.0-rc.2", false);
-    let server = serve(files_for(&archive, "0.1.0-rc.2"), |o| {
-        json!([
-            release(o, "0.1.0-rc.2", true),
-            release(o, "0.1.0-rc.1", true)
-        ])
+    let archive = make_archive(work.path(), "99.0.0", "99.0.0", false);
+    let server = serve(files_for(&archive, "99.0.0"), |o| {
+        json!([release(o, "99.0.0", true), release(o, "0.1.0-rc.1", true)])
     });
     let before = fs::read(&install.bin).unwrap();
 
@@ -197,7 +194,7 @@ fn check_reports_a_newer_prerelease_without_downloading_or_changing_anything() {
     assert!(out.status.success(), "{}", text(&out));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["update_available"], true);
-    assert_eq!(report["latest"], "0.1.0-rc.2");
+    assert_eq!(report["latest"], "99.0.0");
     assert_eq!(report["current"], CURRENT);
     assert_eq!(fs::read(&install.bin).unwrap(), before);
     assert!(
@@ -216,14 +213,14 @@ fn check_reports_a_newer_prerelease_without_downloading_or_changing_anything() {
 fn update_installs_the_verified_release_and_keeps_the_alias() {
     let install = Install::new();
     let work = TempDir::new().unwrap();
-    let archive = make_archive(work.path(), "0.1.0-rc.2", "0.1.0-rc.2", false);
-    let server = serve(files_for(&archive, "0.1.0-rc.2"), |o| {
-        json!([release(o, "0.1.0-rc.2", true)])
+    let archive = make_archive(work.path(), "99.0.0", "99.0.0", false);
+    let server = serve(files_for(&archive, "99.0.0"), |o| {
+        json!([release(o, "99.0.0", true)])
     });
 
     let out = install.run(&install.link, Some(&server.base), &["upgrade"]);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("0.1.0-rc.2"), "{}", text(&out));
+    assert!(text(&out).contains("99.0.0"), "{}", text(&out));
 
     // The installed file is now the new program; the alias still resolves to it.
     let version = Command::new(&install.link)
@@ -232,7 +229,7 @@ fn update_installs_the_verified_release_and_keeps_the_alias() {
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
-        "aether-midnight 0.1.0-rc.2"
+        "aether-midnight 99.0.0"
     );
     assert_eq!(
         fs::read_link(&install.link).unwrap(),
@@ -254,22 +251,22 @@ fn update_installs_the_verified_release_and_keeps_the_alias() {
 fn a_bad_download_never_replaces_the_installed_program() {
     let cases: [(&str, bool, &str, bool); 3] = [
         // (label, sums lie, reported version, corrupt the .sha256)
-        ("internal SHA256SUMS mismatch", true, "0.1.0-rc.2", false),
+        ("internal SHA256SUMS mismatch", true, "99.0.0", false),
         ("wrong reported version", false, "9.9.9", false),
-        ("archive checksum mismatch", false, "0.1.0-rc.2", true),
+        ("archive checksum mismatch", false, "99.0.0", true),
     ];
     for (label, sums_lie, reported, corrupt) in cases {
         let install = Install::new();
         let work = TempDir::new().unwrap();
-        let archive = make_archive(work.path(), "0.1.0-rc.2", reported, sums_lie);
-        let mut files = files_for(&archive, "0.1.0-rc.2");
+        let archive = make_archive(work.path(), "99.0.0", reported, sums_lie);
+        let mut files = files_for(&archive, "99.0.0");
         if corrupt {
             files.insert(
-                "/dl/aether-midnight-0.1.0-rc.2-macos-universal2.tar.gz.sha256".into(),
+                "/dl/aether-midnight-99.0.0-macos-universal2.tar.gz.sha256".into(),
                 format!("{}\n", "b".repeat(64)).into_bytes(),
             );
         }
-        let server = serve(files, |o| json!([release(o, "0.1.0-rc.2", true)]));
+        let server = serve(files, |o| json!([release(o, "99.0.0", true)]));
         let before = fs::read(&install.bin).unwrap();
         let out = install.run(&install.link, Some(&server.base), &["update"]);
         assert!(!out.status.success(), "{label}: {}", text(&out));
@@ -295,8 +292,8 @@ fn a_bad_download_never_replaces_the_installed_program() {
 fn asset_urls_pointing_at_other_hosts_are_refused() {
     let install = Install::new();
     let server = serve(HashMap::new(), |_| {
-        let name = "aether-midnight-0.1.0-rc.2-macos-universal2.tar.gz";
-        json!([{"tag_name": "v0.1.0-rc.2", "prerelease": true, "draft": false, "assets": [
+        let name = "aether-midnight-99.0.0-macos-universal2.tar.gz";
+        json!([{"tag_name": "v99.0.0", "prerelease": true, "draft": false, "assets": [
             {"name": name, "browser_download_url": format!("https://evil.example/{name}")},
             {"name": format!("{name}.sha256"), "browser_download_url": format!("https://evil.example/{name}.sha256")},
         ]}])
@@ -314,9 +311,9 @@ fn asset_urls_pointing_at_other_hosts_are_refused() {
 fn update_refuses_a_development_build_and_non_loopback_http_overrides() {
     let install = Install::new();
     let work = TempDir::new().unwrap();
-    let archive = make_archive(work.path(), "0.1.0-rc.2", "0.1.0-rc.2", false);
-    let server = serve(files_for(&archive, "0.1.0-rc.2"), |o| {
-        json!([release(o, "0.1.0-rc.2", true)])
+    let archive = make_archive(work.path(), "99.0.0", "99.0.0", false);
+    let server = serve(files_for(&archive, "99.0.0"), |o| {
+        json!([release(o, "99.0.0", true)])
     });
     // The cargo-built binary lives in target/debug: --check works, a real update is refused.
     let dev = Path::new(env!("CARGO_BIN_EXE_midnight"));

@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (8) — v0.1.0-rc.2 version bump
+
+- The first `v0.1.0-rc.2` tag pointed at a commit whose `Cargo.toml` still said `0.1.0-rc.1`; its workflow run produced `aether-midnight-0.1.0-rc.1-*` archives, which would have been indistinguishable from the published rc.1 for `update`. Nothing from that run was published. The version is now `0.1.0-rc.2` (`Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README and installation docs, release checklist) and the unpublished tag is moved to the commit that carries it.
+- Contents of rc.2 relative to rc.1: live progress for `index`, the five-at-a-time text-model picker, `update --force`, a quiet installer (no Gatekeeper assessment, no `doctor`), isolated test configuration, and the recorded live OpenRouter verification.
+
 ## 2026-11-08 (7) — Live OpenRouter verified (manual)
 
 - First live cloud run, on the published `v0.1.0-rc.1` binary: `setup` with OpenRouter and `qwen/qwen3-embedding-8b` (4096 dimensions, validation accepted, consented upload), `index` on a real 186-file project embedded 607 chunks, and `search` returned hybrid-fused results with `semantic coverage: 186/186 files embedded`, including Spanish text. The same run showed that `index` printed nothing while working (fixed in (5)) and that the model list offered an image-only model first (fixed in (6)).
