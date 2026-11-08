@@ -492,3 +492,49 @@ fn legacy_flags_and_json_contract_are_preserved() {
     let out = s.mn("", &["search", "archive_old_records", "--json"]);
     assert!(serde_json::from_slice::<Value>(&out.stdout).is_ok());
 }
+
+#[test]
+fn wizard_offers_five_text_models_at_a_time_hides_image_models_and_accepts_typed_ids() {
+    let s = Sandbox::new();
+    let m = Mock::start(|_, r| {
+        if r.path.ends_with("/embeddings/models") {
+            Reply::Json(
+                200,
+                r#"{"data":[{"id":"x/embed-image-1"},{"id":"b/m7"},{"id":"b/m1"},{"id":"b/m2"},{"id":"b/m3"},{"id":"b/m4"},{"id":"b/m5"},{"id":"b/m6"}]}"#.into(),
+            )
+        } else {
+            ok_response(r, DIMS)
+        }
+    });
+    // 2=OpenRouter, key, `m` for more, pick #7, 16 dims, allow uploads.
+    let input = format!("2\n{KEY}\nm\n7\n{DIMS}\ny\n");
+    let setup = s.mn(&input, &["setup", "--endpoint", &m.url]);
+    let (_, e) = assert_ok(&setup, "paged model selection");
+    assert!(
+        e.contains("7 text embedding models available from openrouter (image-only models hidden)"),
+        "{e}"
+    );
+    assert!(!e.contains("embed-image"), "image models are hidden:\n{e}");
+    let more = e
+        .find("Model number, id, or m for 2 more")
+        .expect("offers more");
+    let sixth = e.find("6) b/m6").expect("second page shown after m");
+    assert!(
+        e.find("5) b/m5").unwrap() < more,
+        "first page has five entries:\n{e}"
+    );
+    assert!(
+        more < sixth,
+        "entry 6 appears only after asking for more:\n{e}"
+    );
+    let cfg = fs::read_to_string(s.config_dir().join("config.json")).unwrap();
+    assert!(cfg.contains("\"model\": \"b/m7\""), "{cfg}");
+
+    // A typed id that is not in the list is accepted as is.
+    let s2 = Sandbox::new();
+    let input = format!("2\n{KEY}\nvendor/typed-model\n{DIMS}\ny\n");
+    let setup = s2.mn(&input, &["setup", "--endpoint", &m.url]);
+    assert_ok(&setup, "typed model id");
+    let cfg = fs::read_to_string(s2.config_dir().join("config.json")).unwrap();
+    assert!(cfg.contains("vendor/typed-model"), "{cfg}");
+}

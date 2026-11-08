@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (6) — Model picker: five at a time, text models only
+
+- The OpenRouter model step of `setup` listed the first 15 models alphabetically, with image-only models such as `amazon/titan-embed-image-v1` first (and as the Enter default). It now hides image-only models (`image`, `clip`, `vision` in the id), puts the suggested text models first (`openai/text-embedding-3-small|large`, `qwen/qwen3-embedding-8b|4b`, `google/gemini-embedding-001`, `baai/bge-m3`, only when the provider really lists them), then the rest alphabetically, and shows five at a time: `m` reveals the next five, a number picks one, and any id can be typed. The first entry is the Enter default. The vector-size prompt pre-fills the documented size for the suggested models (e.g. 4096 for `qwen/qwen3-embedding-8b`).
+- Evidence: `config::model_options` unit test and a wizard test with a mock listing seven text models plus an image model (`tests/cli_journey.rs`). The suggested sizes come from the models' public documentation and were not checked against the live provider in this change.
+
 ## 2026-11-08 (5) — Live progress for `index`
 
 - `midnight index` was silent while indexing and while uploading embeddings. On a terminal it now shows a spinner with a live count of files scanned and elapsed time while indexing, then `Embedding with <provider> (<model>) · done/total files (n%) · new/unchanged chunks · elapsed` redrawn in place, then summary lines (`Indexed N files in Xs`, `Embedded N files in Xs`). Not a terminal (pipes, CI): plain start and finish lines. `--json`: nothing extra. All of it goes to stderr, so stdout stays the report.

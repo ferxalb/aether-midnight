@@ -245,31 +245,55 @@ pub fn run_setup(args: SetupArgs) -> Result<Value> {
                 &key,
                 cloud::DEFAULT_TIMEOUT_SECS,
             ) {
-                Ok(ids) => {
-                    eprintln!("Embedding models available from {}:", choice.as_str());
-                    Some(ids)
-                }
+                Ok(ids) => Some(ids),
                 Err(e) => {
                     eprintln!("Model discovery: {e:#}");
                     None
                 }
             };
             let options: Vec<String> = match &listed {
-                Some(ids) => ids.iter().take(15).cloned().collect(),
+                Some(ids) => config::model_options(choice, ids),
                 None => suggested.iter().map(|(m, _)| (*m).to_owned()).collect(),
             };
-            if listed.is_none() && !options.is_empty() {
-                eprintln!("Common choices (suggestions only):");
+            match &listed {
+                Some(_) => eprintln!(
+                    "{} text embedding models available from {} (image-only models hidden):",
+                    options.len(),
+                    choice.as_str()
+                ),
+                None if !options.is_empty() => eprintln!("Common choices (suggestions only):"),
+                None => {}
             }
-            for (i, id) in options.iter().enumerate() {
-                eprintln!("  {}) {id}", i + 1);
-            }
+            // Show a few at a time; `m` reveals the next few, and any id can be typed directly.
+            const PAGE: usize = 5;
+            let mut shown = 0usize;
+            let reveal = |shown: &mut usize| {
+                let next = (*shown + PAGE).min(options.len());
+                for (i, id) in options.iter().enumerate().take(next).skip(*shown) {
+                    eprintln!("  {}) {id}", i + 1);
+                }
+                *shown = next;
+            };
+            reveal(&mut shown);
             let default = options.first().map(String::as_str);
-            let answer = prompt.ask("Model number or id", default)?;
-            model = Some(match answer.parse::<usize>() {
-                Ok(n) if n >= 1 && n <= options.len() => options[n - 1].clone(),
-                _ => answer,
-            });
+            loop {
+                let more = options.len() - shown;
+                let question = if more > 0 {
+                    format!("Model number, id, or m for {more} more")
+                } else {
+                    "Model number or id".to_string()
+                };
+                let answer = prompt.ask(&question, default)?;
+                if more > 0 && matches!(answer.to_ascii_lowercase().as_str(), "m" | "more") {
+                    reveal(&mut shown);
+                    continue;
+                }
+                model = Some(match answer.parse::<usize>() {
+                    Ok(n) if n >= 1 && n <= options.len() => options[n - 1].clone(),
+                    _ => answer,
+                });
+                break;
+            }
         }
         let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
             bail!("--model is required with --provider {}", choice.as_str());

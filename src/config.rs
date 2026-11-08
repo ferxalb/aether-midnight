@@ -287,17 +287,86 @@ pub fn cloud_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
 /// model is always the one the user confirmed, and dimensions are verified by the setup probe.
 pub fn suggested_models(choice: Choice) -> &'static [(&'static str, usize)] {
     match choice {
+        // Text embedding models with their documented native vector size. Order is the order
+        // offered first in the wizard.
         Choice::Openrouter => &[
             ("openai/text-embedding-3-small", 1536),
             ("openai/text-embedding-3-large", 3072),
+            ("qwen/qwen3-embedding-8b", 4096),
+            ("qwen/qwen3-embedding-4b", 2560),
+            ("google/gemini-embedding-001", 3072),
+            ("baai/bge-m3", 1024),
         ],
         _ => &[],
     }
 }
 
+/// True for models that embed images (they cannot index source code): `titan-embed-image`,
+/// CLIP and similar.
+pub fn is_image_embedding_model(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    ["image", "clip", "vision"]
+        .iter()
+        .any(|word| id.contains(word))
+}
+
+/// The models to offer in the wizard, best first: image-only models removed, the ones in
+/// `suggested_models` (that the provider really lists) first in that order, then the rest
+/// alphabetically. Duplicates are dropped.
+pub fn model_options(choice: Choice, listed: &[String]) -> Vec<String> {
+    let mut text: Vec<String> = listed
+        .iter()
+        .filter(|id| !is_image_embedding_model(id))
+        .cloned()
+        .collect();
+    text.sort();
+    text.dedup();
+    let mut out: Vec<String> = suggested_models(choice)
+        .iter()
+        .filter(|(id, _)| text.iter().any(|t| t == id))
+        .map(|(id, _)| (*id).to_owned())
+        .collect();
+    let first = out.clone();
+    out.extend(text.into_iter().filter(|id| !first.contains(id)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wizard_models_drop_image_models_and_lead_with_the_suggested_ones() {
+        let listed: Vec<String> = [
+            "amazon/titan-embed-image-v1",
+            "amazon/titan-embed-text-v2",
+            "baai/bge-m3",
+            "openai/clip-vit",
+            "qwen/qwen3-embedding-8b",
+            "zeta/other-embed",
+            "openai/text-embedding-3-small",
+            "qwen/qwen3-embedding-8b",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            model_options(Choice::Openrouter, &listed),
+            [
+                "openai/text-embedding-3-small",
+                "qwen/qwen3-embedding-8b",
+                "baai/bge-m3",
+                "amazon/titan-embed-text-v2",
+                "zeta/other-embed"
+            ]
+        );
+        // A suggested model the provider does not list is never invented.
+        assert_eq!(
+            model_options(Choice::Openrouter, &["a/b".to_string()]),
+            ["a/b"]
+        );
+        assert!(is_image_embedding_model("Amazon/Titan-Embed-Image-v1"));
+        assert!(!is_image_embedding_model("google/gemini-embedding-001"));
+    }
 
     #[test]
     fn choice_parses_numbers_and_names() {
