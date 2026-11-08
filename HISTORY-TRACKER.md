@@ -2,6 +2,19 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-07 (10) — Consolidation: project trust commands, status, PTY tests, docs
+
+- `project list` / `project untrust [PATH]` manage the trust allow-list; `status` now reports project storage (global or project), trust, whether a leftover `.midnight/` is being ignored, and the effective `midnight.json` values, without creating anything.
+- `tests/cli_pty.rs` drives the interactive `setup` and `connect` menus through a real pseudo-terminal (Unix); `tests/cli_connect.rs` covers list/untrust/status. `scripts/install.sh` prints the next step (`setup`) and stays non-interactive. Docs: `docs/api.md`, `docs/privacy.md`, `docs/architecture.md`.
+- Decisions: a project database does not see global-database memories (documented; use global storage to share), Claude Desktop entries always use the absolute binary path, project-scope entries rely on `PATH`. `doctor` is unchanged. The installer change was only syntax-checked (`sh -n`); ShellCheck is still pending. No retrieval, schema or performance change.
+
+## 2026-11-07 (9) — Layered project configuration and per-repository setup
+
+- Correction to (8): `.mcp.json`/`.codex/config.toml` written with `--scope project` now use the bare command name and no `--db`, so they are portable; user-scope files keep the absolute binary path. `connect` pins a database only when `--db` is given (a server started inside a project finds `.midnight/` itself). Project-scope backups go to `.midnight/backups/`.
+- Correction to (8): the "owned by the current user" check does not stop a database that arrives with a clone (clones are owned by the user). Project storage and `midnight.json` are now honored only for projects registered in `trusted_projects.json` in the config directory, written by `init --storage project`, `setup` and `connect --storage project`.
+- New `.midnight/midnight.json` (`src/project.rs`): `embeddings` (false keeps the repo on keyword search for `index`/`search`) and `mcp.read_only` / `mcp.memory_scopes` (narrow the MCP policy; flags still apply). It has no provider, endpoint, key or consent field and rejects unknown fields, so it cannot redirect uploads.
+- `setup` is split: user-wide (provider, key, consent) vs. per repository (storage with the project preselected, optional client registration, `midnight.json`), chosen automatically inside a Git repository once user-wide setup exists; `--global`, `--project`, `--storage`. Evidence: `tests/cli_connect.rs`, `src/project.rs`/`src/connect.rs` unit tests. The interactive menus and real client apps are not covered by automated tests. No retrieval, schema or performance change.
+
 ## 2026-11-07 (8) — `connect` and project-local storage
 
 - New `connect <claude-code|claude-desktop|codex> --scope project|user [--storage global|project] [--read-only] [--dry-run] [--remove]` registers `aether-midnight` in the client's MCP config (JSON merge, or a line-wise edit of only our table in Codex TOML; invalid input is refused, previous contents are saved as `*.midnight.bak`, writes are atomic). Scope is asked on a terminal and required otherwise.

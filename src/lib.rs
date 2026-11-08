@@ -11,6 +11,7 @@ pub mod embed;
 pub mod mcp;
 pub mod mcp_http;
 pub mod memory;
+pub mod project;
 pub mod runtime;
 mod text_index;
 pub mod ux;

@@ -98,10 +98,34 @@ midnight connect codex --scope project --storage project --read-only
 midnight connect claude-code --scope user --remove
 ```
 
-By default the database is global (OS data directory). `--storage project` (also on `init`) keeps
-it in `<repo>/.midnight/`, creates or extends `.gitignore` with `.midnight/`, and the CLI then
-finds it automatically from anywhere inside the repo. A project database not owned by you is
-ignored. `.midnight/` is never indexed.
+Project config files stay portable: they run `midnight` from `PATH` and never pin a database path
+(user-scope files name the exact binary).
+
+### Global setup vs. per-project setup
+
+- `midnight setup` (or `--global`) is the user-wide step: search provider, API key, upload consent.
+  It lives in your OS config directory and applies to every repository.
+- `midnight setup` inside a Git repository, once the user-wide step exists, sets up only that
+  repository: where its data lives (**this project** is preselected, or the global data directory),
+  an optional client registration, and `.midnight/midnight.json`. `--project` forces it,
+  `--storage global|project` skips the question, `--no-input` accepts the defaults.
+- Project storage is `<repo>/.midnight/` (private, git-ignored: `.gitignore` is created or
+  extended). Inside the repo the CLI and the MCP server find it by themselves. It is never indexed.
+  Without it, the global database is used.
+
+`.midnight/midnight.json` holds per-project, non-secret overrides:
+
+```json
+{ "version": 1, "embeddings": true, "mcp": { "read_only": false, "memory_scopes": ["project:my-app"] } }
+```
+
+`embeddings: false` keeps the repository on keyword search; `mcp` narrows what the MCP server
+exposes (flags still apply). There is deliberately no field for provider, endpoint, key or upload
+consent: those come only from the user-wide setup, so a project file can switch features off but
+never send code anywhere. Unknown fields are errors.
+
+A `.midnight/` that arrives with a clone is ignored (database and `midnight.json` alike) until you
+run `init --storage project`, `setup` or `connect --storage project` in that repository.
 
 Or add Midnight to any MCP client by hand:
 

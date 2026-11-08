@@ -752,11 +752,44 @@ pub fn status_report(db_path: &Path, repo: &Path) -> Result<Value> {
         ));
     }
 
+    // Project storage and per-project settings (read-only; nothing is created).
+    let project = match crate::connect::project_state(repo) {
+        None => Value::Null,
+        Some(state) => {
+            let uses_project_db = db_path.starts_with(state.root.join(crate::connect::PROJECT_DIR));
+            let mut p = json!({
+                "root": state.root,
+                "storage": if uses_project_db { "project" } else { "global" },
+                "midnight_dir": state.has_dir,
+                "trusted": state.trusted,
+            });
+            if state.has_dir && !state.trusted {
+                next.push(
+                    "this repository has a `.midnight/` you did not set up, so it is ignored: run `midnight init --storage project` to adopt it"
+                        .into(),
+                );
+            }
+            if state.trusted {
+                match crate::project::load_for(repo) {
+                    Ok(Some(cfg)) => {
+                        p["config"] = json!(crate::project::path_for(&state.root));
+                        p["embeddings"] = json!(!cfg.embeddings_disabled());
+                        p["mcp_read_only"] = json!(cfg.mcp.read_only == Some(true));
+                    }
+                    Ok(None) => {}
+                    Err(e) => problems.push(format!("{e:#}")),
+                }
+            }
+            p
+        }
+    };
+
     Ok(json!({
         "ok": problems.is_empty(),
         "version": crate::VERSION,
         "config_path": config_path,
         "provider": provider,
+        "project": project,
         "database": database,
         "repository": repository,
         "problems": problems,
@@ -787,6 +820,24 @@ pub fn render_status(s: &Value) {
         }
     } else {
         println!("Provider    not configured (keyword search only)");
+    }
+    let pr = &s["project"];
+    if pr.is_object() {
+        let mut line = format!(
+            "Project     {} · data in {}",
+            pr["root"].as_str().unwrap_or(""),
+            pr["storage"].as_str().unwrap_or("")
+        );
+        if pr["midnight_dir"] == true && pr["trusted"] != true {
+            line.push_str(" · .midnight/ not adopted (ignored)");
+        }
+        if pr["embeddings"] == false {
+            line.push_str(" · keyword search only (midnight.json)");
+        }
+        if pr["mcp_read_only"] == true {
+            line.push_str(" · MCP read-only");
+        }
+        println!("{line}");
     }
     let d = &s["database"];
     if d["exists"] == true && d["ok"] == true {

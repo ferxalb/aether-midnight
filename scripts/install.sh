@@ -210,5 +210,6 @@ case ":$PATH:" in
 *":$BIN_DIR:"*) ;;
 *) say "Add to your shell profile (not done automatically): export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
+say "Next: run '$APP setup' once to choose your search provider, then '$APP setup' again inside a repository to set up that project."
 if [ "$STATUS" -eq 0 ]; then say "Done."; else say "Finished with warnings (exit $STATUS)."; fi
 exit "$STATUS"

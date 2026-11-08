@@ -8,6 +8,10 @@ The default database is `midnight.sqlite3` below the OS local application-data d
 
 Memory FTS uses a contentless-delete index: it stores searchable terms and a namespace token rather than a second full-text copy. Searchable postings and the primary memory row are still local data. `diagnose` prints the selected path as `database_path`. For a portable export, stop Midnight and use SQLite's backup command, for example `sqlite3 /path/to/midnight.sqlite3 ".backup 'midnight-export.sqlite3'"`. To delete all local data, stop Midnight and remove the database plus any `midnight.sqlite3-wal` and `midnight.sqlite3-shm` sidecars.
 
+## Project storage and trust
+
+With `--storage project` the database lives in `<repo>/.midnight/` (directory `0700`, database `0600`) and `.midnight/` is added to `.gitignore`. A `.midnight/` that arrives with a clone is not opened and its `midnight.json` is not read until you adopt that repository (`init --storage project`, `setup`, or `connect --storage project`), which records its path in `trusted_projects.json` in the Midnight config directory. `project untrust` removes the record and leaves the data in place. `midnight.json` cannot contain a provider, endpoint, credential or upload consent; those exist only in the user-wide `config.json` and `credentials.json`. `.midnight/` is never indexed.
+
 ## Repository discovery and exclusions
 
 Git ignore and exclude rules are respected, including for untracked files; `--require-git` is disabled so non-Git folders also work. A root `.aetherignore` adds ignore rules when it is a regular, non-symlink file no larger than 1 MiB; oversized ignore files are not parsed and are reported. The walker does not follow symlinks, and opens re-check root containment and use no-follow semantics where the OS supports them. Credentials and private keys remain excluded even when generated/vendor paths are explicitly included.

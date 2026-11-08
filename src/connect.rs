@@ -43,22 +43,121 @@ pub fn project_db_path(root: &Path) -> PathBuf {
     root.join(PROJECT_DIR).join(PROJECT_DB)
 }
 
-/// Project database found by walking up from `start`, if one exists.
-///
-/// A repository can ship a `.midnight` directory it did not create on this machine, and SQLite
-/// files are not safe to open from strangers, so on Unix the database must be a regular file
-/// owned by the current user. Anything else is ignored and the global database is used.
-pub fn discover_project_db(start: &Path) -> Option<PathBuf> {
-    for dir in start.ancestors() {
-        let candidate = project_db_path(dir);
-        let Ok(meta) = fs::symlink_metadata(&candidate) else {
-            continue;
-        };
-        if meta.is_file() && owned_by_current_user(&meta) {
-            return Some(candidate);
-        }
+/// Nearest git root at or above `start`, if any.
+pub fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let start = start.canonicalize().ok()?;
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+fn trust_file() -> Result<PathBuf> {
+    Ok(crate::config::config_dir()?.join("trusted_projects.json"))
+}
+
+fn load_trusted() -> Vec<PathBuf> {
+    let Ok(path) = trust_file() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Vec<PathBuf>>(&bytes).unwrap_or_default()
+}
+
+/// Record that the user chose project storage for `root` on this machine. A cloned repository
+/// can contain a `.midnight` directory that someone else prepared; nothing in it is opened or
+/// obeyed until the user ran `init`/`setup`/`connect --storage project` here.
+pub fn trust_project(root: &Path) -> Result<()> {
+    let root = root.canonicalize()?;
+    let mut trusted = load_trusted();
+    if trusted.contains(&root) {
+        return Ok(());
     }
-    None
+    trusted.push(root);
+    let path = trust_file()?;
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent)?;
+    }
+    atomic_write(
+        &path,
+        &(serde_json::to_string_pretty(&trusted)? + "\n"),
+        true,
+    )
+}
+
+/// Projects registered with `trust_project`, for `midnight project list`.
+pub fn list_trusted() -> Vec<PathBuf> {
+    load_trusted()
+}
+
+/// Forget a project. Returns whether it was registered. Its `.midnight/` stays on disk but is no
+/// longer opened or obeyed.
+pub fn untrust_project(root: &Path) -> Result<bool> {
+    let wanted = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut trusted = load_trusted();
+    let before = trusted.len();
+    trusted.retain(|t| *t != wanted);
+    if trusted.len() == before {
+        return Ok(false);
+    }
+    atomic_write(
+        &trust_file()?,
+        &(serde_json::to_string_pretty(&trusted)? + "\n"),
+        true,
+    )?;
+    Ok(true)
+}
+
+/// What `status` reports about project storage around `start`. Reads only; creates nothing.
+pub struct ProjectState {
+    pub root: PathBuf,
+    /// A `.midnight` directory exists at the root.
+    pub has_dir: bool,
+    pub trusted: bool,
+}
+
+/// `None` outside a Git repository (and outside any trusted project).
+pub fn project_state(start: &Path) -> Option<ProjectState> {
+    let start = start.canonicalize().ok()?;
+    let trusted = load_trusted();
+    let root = start
+        .ancestors()
+        .find(|dir| trusted.iter().any(|t| t == dir) || dir.join(".git").exists())?
+        .to_path_buf();
+    Some(ProjectState {
+        has_dir: root.join(PROJECT_DIR).is_dir(),
+        trusted: trusted.contains(&root),
+        root,
+    })
+}
+
+/// Nearest trusted ancestor of `start` whose `.midnight` is a real directory owned by the
+/// current user, and the path of `file` inside it (which must be an owned regular file).
+fn discover_in(start: &Path, trusted: &[PathBuf], file: &str) -> Option<PathBuf> {
+    let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let dir = start
+        .ancestors()
+        .find(|dir| trusted.iter().any(|t| t == dir))?;
+    let meta_dir = fs::symlink_metadata(dir.join(PROJECT_DIR)).ok()?;
+    if !meta_dir.is_dir() || !owned_by_current_user(&meta_dir) {
+        return None;
+    }
+    let candidate = dir.join(PROJECT_DIR).join(file);
+    let meta = fs::symlink_metadata(&candidate).ok()?;
+    (meta.is_file() && owned_by_current_user(&meta)).then_some(candidate)
+}
+
+/// Project database for the project containing `start`, only if the user set it up here.
+pub fn discover_project_db(start: &Path) -> Option<PathBuf> {
+    discover_in(start, &load_trusted(), PROJECT_DB)
+}
+
+/// A file from the trusted project `.midnight/` directory containing `start` (e.g. its
+/// `midnight.json`), if present.
+pub fn discover_project_file(start: &Path, file: &str) -> Option<PathBuf> {
+    discover_in(start, &load_trusted(), file)
 }
 
 #[cfg(unix)]
@@ -387,12 +486,23 @@ fn commit(
     existing: Option<String>,
     updated: String,
     dry_run: bool,
+    backup_dir: Option<&Path>,
 ) -> Result<Outcome> {
     let changed = existing.as_deref() != Some(updated.as_str());
     let mut backup = None;
     if changed && !dry_run {
         if let Some(previous) = &existing {
-            let bak = PathBuf::from(format!("{}.midnight.bak", path.display()));
+            let name = format!(
+                "{}.midnight.bak",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            let bak = match backup_dir {
+                Some(dir) => {
+                    create_private_dir(dir)?;
+                    dir.join(name)
+                }
+                None => path.with_file_name(name),
+            };
             atomic_write(&bak, previous, true)?;
             backup = Some(bak);
         }
@@ -415,13 +525,19 @@ pub fn install(
     command: &str,
     args: &[String],
     dry_run: bool,
+    backup_dir: Option<&Path>,
 ) -> Result<Outcome> {
     let existing = read_existing(path)?;
     let updated = render_install(client, existing.as_deref().unwrap_or(""), command, args)?;
-    commit(path, existing, updated, dry_run)
+    commit(path, existing, updated, dry_run, backup_dir)
 }
 
-pub fn uninstall(path: &Path, client: Client, dry_run: bool) -> Result<Outcome> {
+pub fn uninstall(
+    path: &Path,
+    client: Client,
+    dry_run: bool,
+    backup_dir: Option<&Path>,
+) -> Result<Outcome> {
     let Some(existing) = read_existing(path)? else {
         return Ok(Outcome {
             path: path.to_path_buf(),
@@ -431,7 +547,7 @@ pub fn uninstall(path: &Path, client: Client, dry_run: bool) -> Result<Outcome> 
         });
     };
     let updated = render_remove(client, &existing)?;
-    commit(path, Some(existing), updated, dry_run)
+    commit(path, Some(existing), updated, dry_run, backup_dir)
 }
 
 /// Write via a sibling temporary file and rename, preserving the mode of an existing file.
@@ -609,20 +725,20 @@ mod tests {
     fn install_writes_backup_and_dry_run_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/.mcp.json");
-        let dry = install(&path, Client::ClaudeCode, "/bin/am", &args(), true).unwrap();
+        let dry = install(&path, Client::ClaudeCode, "/bin/am", &args(), true, None).unwrap();
         assert!(dry.changed && !path.exists());
 
-        let first = install(&path, Client::ClaudeCode, "/bin/am", &args(), false).unwrap();
+        let first = install(&path, Client::ClaudeCode, "/bin/am", &args(), false, None).unwrap();
         assert!(first.changed && first.backup.is_none() && path.exists());
-        let same = install(&path, Client::ClaudeCode, "/bin/am", &args(), false).unwrap();
+        let same = install(&path, Client::ClaudeCode, "/bin/am", &args(), false, None).unwrap();
         assert!(!same.changed);
 
-        let updated = install(&path, Client::ClaudeCode, "/bin/new", &args(), false).unwrap();
+        let updated = install(&path, Client::ClaudeCode, "/bin/new", &args(), false, None).unwrap();
         let backup = updated.backup.expect("backup of previous contents");
         assert!(fs::read_to_string(backup).unwrap().contains("/bin/am"));
         assert!(fs::read_to_string(&path).unwrap().contains("/bin/new"));
 
-        let gone = uninstall(&path, Client::ClaudeCode, false).unwrap();
+        let gone = uninstall(&path, Client::ClaudeCode, false, None).unwrap();
         assert!(gone.changed);
         assert!(!fs::read_to_string(&path).unwrap().contains(SERVER_NAME));
     }
@@ -645,14 +761,18 @@ mod tests {
         );
         assert!(!prepare_project_storage(&repo).unwrap().gitignore_changed);
 
+        let deep = repo.join("src/deep");
+        let trusted = vec![repo.clone()];
         assert!(
-            discover_project_db(&repo.join("src/deep")).is_none(),
+            discover_in(&deep, &trusted, PROJECT_DB).is_none(),
             "no db file yet"
         );
         fs::write(&storage.db_path, b"").unwrap();
         assert_eq!(
-            discover_project_db(&repo.join("src/deep")),
-            Some(storage.db_path)
+            discover_in(&deep, &trusted, PROJECT_DB),
+            Some(storage.db_path.clone())
         );
+        // A `.midnight` the user never set up (a cloned repo's) is not honored.
+        assert!(discover_in(&deep, &[], PROJECT_DB).is_none());
     }
 }

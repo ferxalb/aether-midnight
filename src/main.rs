@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_midnight::{
-    auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, runtime, ux,
+    auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, project,
+    runtime, ux,
 };
 
 #[derive(Parser)]
@@ -57,6 +58,16 @@ enum Commands {
         /// Never prompt; fail with the missing flag instead.
         #[arg(long)]
         no_input: bool,
+        /// Run the user-wide setup (provider, key, consent) even inside a repository.
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        /// Set up only this repository: storage, client registration and `midnight.json`.
+        /// This is the default inside a Git repository once the user-wide setup exists.
+        #[arg(long)]
+        project: bool,
+        /// With a repository setup: keep its data in the project (default) or in the OS data directory.
+        #[arg(long, value_enum)]
+        storage: Option<StorageArg>,
     },
     /// Show provider, model, credentials, database, and index/embedding state with next steps.
     Status {
@@ -73,6 +84,11 @@ enum Commands {
         /// Any path inside the project (used only with `--storage project`).
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// List or forget the projects whose `.midnight/` Midnight is allowed to use.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
     },
     /// Register Midnight as an MCP server in an AI client's configuration (or remove it).
     Connect {
@@ -592,6 +608,18 @@ impl PolicyArgs {
     }
 }
 
+#[derive(Subcommand)]
+enum ProjectAction {
+    /// Show the projects you set up on this machine.
+    List,
+    /// Stop using a project's `.midnight/` (data stays on disk; run `init --storage project` to adopt again).
+    Untrust {
+        /// Any path inside the project.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StorageArg {
     Global,
@@ -651,7 +679,7 @@ pub fn main() -> Result<()> {
                     if cli.db.is_some() {
                         anyhow::bail!("--db and --storage project are mutually exclusive");
                     }
-                    let prepared = connect::prepare_project_storage(&path)?;
+                    let (prepared, _) = adopt_project(&connect::project_root(&path)?)?;
                     (prepared.db_path.clone(), Some(prepared))
                 }
             };
@@ -679,6 +707,33 @@ pub fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Project { action } => match action {
+            ProjectAction::List => {
+                let projects = connect::list_trusted();
+                if cli.json {
+                    print_json(&serde_json::json!({ "projects": projects }))?;
+                } else if projects.is_empty() {
+                    println!(
+                        "no projects set up (run `midnight init --storage project` in a repository)"
+                    );
+                } else {
+                    for p in projects {
+                        println!("{}", p.display());
+                    }
+                }
+            }
+            ProjectAction::Untrust { path } => {
+                let root = connect::project_root(&path)?;
+                let removed = connect::untrust_project(&root)?;
+                if cli.json {
+                    print_json(&serde_json::json!({ "project_root": root, "removed": removed }))?;
+                } else if removed {
+                    println!("no longer using {}/.midnight", root.display());
+                } else {
+                    println!("{} was not set up", root.display());
+                }
+            }
+        },
         Commands::Connect {
             client,
             scope,
@@ -715,7 +770,26 @@ pub fn main() -> Result<()> {
             allow_remote_upload,
             no_validate,
             no_input,
+            global,
+            project,
+            storage,
         } => {
+            let cwd = std::env::current_dir().context("determine the working directory")?;
+            let in_repo = connect::find_git_root(&cwd).is_some();
+            let scripted_global = provider.is_some() || api_key_stdin;
+            let project_mode =
+                project || (!global && !scripted_global && in_repo && config::load()?.is_some());
+            if project_mode {
+                project_setup(
+                    &cwd,
+                    storage,
+                    no_input,
+                    &db_path,
+                    cli.db.is_some(),
+                    cli.json,
+                )?;
+                return Ok(());
+            }
             let summary = ux::run_setup(ux::SetupArgs {
                 provider: provider.map(|p| match p {
                     SetupProvider::Rainy => config::Choice::Rainy,
@@ -735,6 +809,17 @@ pub fn main() -> Result<()> {
                 print_json(&summary)?;
             } else {
                 ux::render_setup(&summary);
+            }
+            // First run inside a repository: continue straight into that repository's setup.
+            if in_repo
+                && !global
+                && !scripted_global
+                && !no_input
+                && !cli.json
+                && ux::stdin_is_tty()
+                && prompt_choice("Set up this repository now?", &["yes", "not now"], 0)? == 0
+            {
+                project_setup(&cwd, storage, false, &db_path, cli.db.is_some(), false)?;
             }
         }
         Commands::Status { path } => {
@@ -767,8 +852,11 @@ pub fn main() -> Result<()> {
             // Embed with the provider chosen in `setup`; nothing happens without saved settings.
             let mut embedded: Option<Result<embed::EmbedReport, String>> = None;
             let mut failure: Option<anyhow::Error> = None;
+            let project_semantic_off =
+                project::load_for(&repo)?.is_some_and(|c| c.embeddings_disabled());
             if !result.cancelled
                 && !no_embed
+                && !project_semantic_off
                 && let Some(mut settings) =
                     config::load()?.filter(|s| s.provider != config::Choice::Lexical)
             {
@@ -818,7 +906,9 @@ pub fn main() -> Result<()> {
         } => {
             let query = query_pos.or(query_flag).unwrap_or_default();
             // Flags win; otherwise use what `midnight setup` saved; otherwise lexical.
-            let saved = if embedding.provider.is_none() {
+            let project_semantic_off =
+                project::load_for(&repo)?.is_some_and(|c| c.embeddings_disabled());
+            let saved = if embedding.provider.is_none() && !project_semantic_off {
                 config::load()?.filter(|s| s.provider != config::Choice::Lexical)
             } else {
                 None
@@ -1122,7 +1212,21 @@ pub fn main() -> Result<()> {
         } => {
             print_json(&benchmark::evaluate_fts5(&repo, &manifest, samples)?)?;
         }
-        Commands::Mcp { policy } => mcp::run_stdio(&db_path, &policy.into_policy(), cancellation)?,
+        Commands::Mcp { mut policy } => {
+            // A project file may only narrow what flags left open.
+            if let Some(cfg) = std::env::current_dir()
+                .ok()
+                .map(|cwd| project::load_for(&cwd))
+                .transpose()?
+                .flatten()
+            {
+                policy.read_only |= cfg.mcp.read_only == Some(true);
+                if policy.memory_scopes.is_none() {
+                    policy.memory_scopes = cfg.mcp.memory_scopes;
+                }
+            }
+            mcp::run_stdio(&db_path, &policy.into_policy(), cancellation)?
+        }
         Commands::Token { action } => token_command(&db_path, action)?,
         Commands::ServeHttp { bind } => mcp_http::serve(&db_path, bind, cancellation)?,
     }
@@ -1616,6 +1720,28 @@ struct ConnectRequest {
     path: PathBuf,
 }
 
+/// Numbered terminal menu on stderr; Enter picks `default`. Errors when there is no terminal.
+fn prompt_choice(title: &str, options: &[&str], default: usize) -> Result<usize> {
+    if !ux::stdin_is_tty() {
+        anyhow::bail!("`{title}` needs a terminal; pass the matching flag instead");
+    }
+    eprintln!("{title}");
+    for (i, option) in options.iter().enumerate() {
+        let marker = if i == default { " (default)" } else { "" };
+        eprintln!("  {}) {option}{marker}", i + 1);
+    }
+    eprint!("Choice [{}]: ", default + 1);
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    match line.trim() {
+        "" => Ok(default),
+        text => match text.parse::<usize>() {
+            Ok(n) if (1..=options.len()).contains(&n) => Ok(n - 1),
+            _ => anyhow::bail!("unrecognized choice `{text}`"),
+        },
+    }
+}
+
 fn choose_scope(requested: Option<ScopeArg>) -> Result<connect::Scope> {
     match requested {
         Some(ScopeArg::Project) => return Ok(connect::Scope::Project),
@@ -1625,17 +1751,137 @@ fn choose_scope(requested: Option<ScopeArg>) -> Result<connect::Scope> {
     if !ux::stdin_is_tty() {
         anyhow::bail!("choose where to register the server: --scope project or --scope user");
     }
-    eprintln!("Register Midnight for:");
-    eprintln!("  1) this project only");
-    eprintln!("  2) every project (your user configuration)");
-    eprint!("Choice [2]: ");
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    match line.trim() {
-        "1" => Ok(connect::Scope::Project),
-        "" | "2" => Ok(connect::Scope::User),
-        other => anyhow::bail!("unrecognized choice `{other}`"),
+    match prompt_choice(
+        "Register Midnight for:",
+        &[
+            "this project only",
+            "every project (your user configuration)",
+        ],
+        0,
+    )? {
+        0 => Ok(connect::Scope::Project),
+        _ => Ok(connect::Scope::User),
     }
+}
+
+/// Make `<root>` a Midnight project: private `.midnight/`, git-ignore rule, trusted, database
+/// created, `midnight.json` template written.
+fn adopt_project(root: &Path) -> Result<(connect::ProjectStorage, bool)> {
+    let prepared = connect::prepare_project_storage(root)?;
+    connect::trust_project(&prepared.root)?;
+    drop(db::open_db(&prepared.db_path)?);
+    let wrote_config = project::write_template_if_missing(&prepared.root)?;
+    Ok((prepared, wrote_config))
+}
+
+/// Per-repository setup. The user-wide choices (provider, key, consent) are not asked again.
+fn project_setup(
+    cwd: &Path,
+    storage: Option<StorageArg>,
+    no_input: bool,
+    global_db: &Path,
+    db_forced: bool,
+    json: bool,
+) -> Result<()> {
+    let interactive = !no_input && !json && ux::stdin_is_tty();
+    let root = connect::project_root(cwd)?;
+    let global = config::load()?;
+    if !json {
+        eprintln!("AETHER Midnight - project setup for {}\n", root.display());
+        match &global {
+            Some(s) => eprintln!(
+                "Search provider (from your user setup): {}\n",
+                s.provider.as_str()
+            ),
+            None => eprintln!(
+                "No user-wide setup yet, so this project uses keyword search. Run `midnight setup --global` to add semantic search.\n"
+            ),
+        }
+    }
+    let storage = match storage {
+        Some(choice) => choice,
+        None if interactive => match prompt_choice(
+            "Where should this project's index and memories live?",
+            &[
+                "in this project (.midnight/, git-ignored)",
+                "in the global Midnight data directory",
+            ],
+            0,
+        )? {
+            0 => StorageArg::Project,
+            _ => StorageArg::Global,
+        },
+        None => StorageArg::Project,
+    };
+    if db_forced && storage == StorageArg::Project {
+        anyhow::bail!("--db and --storage project are mutually exclusive");
+    }
+    let mut summary =
+        serde_json::json!({"project_root": root, "storage": "global", "database_path": global_db});
+    match storage {
+        StorageArg::Project => {
+            let (prepared, wrote_config) = adopt_project(&root)?;
+            summary["storage"] = "project".into();
+            summary["database_path"] = serde_json::json!(prepared.db_path);
+            summary["gitignore_changed"] = prepared.gitignore_changed.into();
+            summary["project_config"] = serde_json::json!(project::path_for(&root));
+            if !json {
+                println!("database:        {}", prepared.db_path.display());
+                println!(
+                    "gitignore:       {} {}",
+                    if prepared.gitignore_changed {
+                        "added `.midnight/` to"
+                    } else {
+                        "already ignores `.midnight/` in"
+                    },
+                    prepared.gitignore_path.display()
+                );
+                println!(
+                    "project config:  {}{}",
+                    project::path_for(&root).display(),
+                    if wrote_config { " (created)" } else { "" }
+                );
+            }
+        }
+        StorageArg::Global => {
+            drop(db::open_db(global_db)?);
+            if !json {
+                println!("database:        {} (global)", global_db.display());
+            }
+        }
+    }
+    if json {
+        print_json(&summary)?;
+        return Ok(());
+    }
+    if interactive {
+        let clients = ["Claude Code", "Codex", "Claude Desktop", "skip"];
+        let picked = prompt_choice("Connect an AI client to this project?", &clients, 3)?;
+        let (client, scope) = match picked {
+            0 => (Some(ClientArg::ClaudeCode), ScopeArg::Project),
+            1 => (Some(ClientArg::Codex), ScopeArg::Project),
+            2 => (Some(ClientArg::ClaudeDesktop), ScopeArg::User),
+            _ => (None, ScopeArg::Project),
+        };
+        if let Some(client) = client {
+            connect_command(
+                ConnectRequest {
+                    client,
+                    scope: Some(scope),
+                    storage: None,
+                    read_only: false,
+                    dry_run: false,
+                    remove: false,
+                    path: root.clone(),
+                },
+                None,
+                false,
+            )?;
+        }
+    }
+    println!("\nNext: `midnight index` to index this project, then `midnight search \"query\"`.");
+    println!("Connect a client any time with `midnight connect claude-code --scope project`.");
+    Ok(())
 }
 
 fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) -> Result<()> {
@@ -1648,49 +1894,58 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
     let root = connect::project_root(&req.path)?;
     let config_path = connect::config_path(client, scope, &root, &connect::Dirs::from_env()?)?;
 
-    // Which database should the client be pointed at? Removal never touches storage.
-    let mut storage_note = None;
-    let db_arg: Option<PathBuf> = if req.remove {
-        None
-    } else if let Some(explicit) = db_flag {
-        Some(std::path::absolute(explicit)?)
-    } else {
-        match req.storage {
-            Some(StorageArg::Project) => {
-                if !req.dry_run {
-                    let p = connect::prepare_project_storage(&root)?;
-                    drop(db::open_db(&p.db_path)?);
-                    storage_note = Some(format!(
-                        "project storage ready in {} ({} {})",
-                        p.db_path.display(),
-                        if p.gitignore_changed {
-                            "added to"
-                        } else {
-                            "already in"
-                        },
-                        p.gitignore_path.display()
-                    ));
-                }
-                Some(connect::project_db_path(&root))
-            }
-            Some(StorageArg::Global) => None,
-            None => connect::discover_project_db(&root),
-        }
+    // The entry never pins a database unless --db was given: a server started inside a project
+    // finds that project's `.midnight/` by itself, and otherwise uses the global database. That
+    // keeps a committed project config free of machine-specific paths.
+    let db_arg = match (req.remove, db_flag) {
+        (false, Some(explicit)) => Some(std::path::absolute(explicit)?),
+        _ => None,
     };
+    let mut storage_note = None;
+    if !req.remove && req.storage == Some(StorageArg::Project) && !req.dry_run {
+        let (prepared, _) = adopt_project(&root)?;
+        storage_note = Some(format!(
+            "project storage ready in {} ({} {})",
+            prepared.db_path.display(),
+            if prepared.gitignore_changed {
+                "added to"
+            } else {
+                "already in"
+            },
+            prepared.gitignore_path.display()
+        ));
+    }
+
+    // Project-scope files get a portable command name (resolved through PATH when the client
+    // starts it); user-scope files get the exact binary that ran this command.
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("locate the midnight executable")?;
+    let command = match scope {
+        connect::Scope::User => exe.to_string_lossy().into_owned(),
+        connect::Scope::Project => exe
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "midnight".into()),
+    };
+    // Backups of a project file stay inside the git-ignored `.midnight/` directory.
+    let backup_dir = (matches!(scope, connect::Scope::Project) && config_path.exists())
+        .then(|| root.join(connect::PROJECT_DIR).join("backups"));
+    if backup_dir.is_some() && !req.dry_run {
+        connect::prepare_project_storage(&root)?;
+    }
 
     let outcome = if req.remove {
-        connect::uninstall(&config_path, client, req.dry_run)?
+        connect::uninstall(&config_path, client, req.dry_run, backup_dir.as_deref())?
     } else {
-        let exe = std::env::current_exe()
-            .and_then(|p| p.canonicalize())
-            .context("locate the midnight executable")?;
         let args = connect::server_args(db_arg.as_deref(), req.read_only);
         connect::install(
             &config_path,
             client,
-            &exe.to_string_lossy(),
+            &command,
             &args,
             req.dry_run,
+            backup_dir.as_deref(),
         )?
     };
 
@@ -1701,6 +1956,7 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
             "dry_run": req.dry_run,
             "removed": req.remove,
             "backup": outcome.backup,
+            "command": command,
             "database_path": db_arg,
         }))?;
         return Ok(());
@@ -1723,9 +1979,7 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
         println!("\n{}", outcome.contents);
     }
     if !req.remove && matches!(scope, connect::Scope::Project) {
-        eprintln!(
-            "note: this file contains absolute paths for this machine; review before committing it."
-        );
+        eprintln!("note: the entry runs `{command}` from PATH; make sure the client can find it.");
     }
     if !req.remove && outcome.changed && !req.dry_run {
         eprintln!("restart the client to load the new server.");

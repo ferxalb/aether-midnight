@@ -45,6 +45,19 @@ Use `bench-memory --namespace-count 1` for one large namespace or `--namespace-c
 
 To reproduce the 10k-file full-reconciliation versus direct-refresh visibility workload, run `target/release/aether-midnight refresh-file --repo "$FIXTURE" --path src/00000.rs  # measure under /usr/bin/time -l
 
+### Project storage and client registration
+
+```sh
+midnight init --storage project            # <repo>/.midnight/ (private), .gitignore updated, project trusted
+midnight setup                             # user-wide in a fresh machine; per-repository inside a Git repo afterwards
+midnight project list | untrust [PATH]     # projects whose .midnight/ Midnight may use
+midnight connect claude-code|claude-desktop|codex --scope project|user [--read-only] [--dry-run] [--remove]
+```
+
+Database selection, highest precedence first: `--db`, the `.midnight/midnight.sqlite3` of a trusted project containing the working directory, the OS data directory. `connect` pins a database only when `--db` is given. Project-scope client files run `midnight` from `PATH` (portable, safe to commit); user-scope files, including every Claude Desktop entry, name the absolute binary. Existing client files are merged, never replaced; invalid JSON is refused; the previous contents are saved as `<file>.midnight.bak` (under `.midnight/backups/` for project files). `status --json` reports `project.storage`, `trusted`, and the effective `midnight.json` values.
+
+`.midnight/midnight.json` accepts `version`, `embeddings` (`false` = keyword search for this project) and `mcp.read_only` / `mcp.memory_scopes` (narrowing only). Unknown fields are errors. Memories live in whichever database is selected, so a project with its own database does not see memories stored in the global one; use `--storage global` when memories must be shared across repositories.
+
 ## MCP
 
 Run `aether-midnight mcp` with JSON-RPC messages over stdio. The implementation pins [MCP protocol version 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25), advertises tools, and accepts `initialize`, `ping`, `tools/list`, and `tools/call`. It does not use a third-party MCP SDK. This is the 2025-11-25 handshake subset; the later stateless protocol revision and other transports are not implemented.
