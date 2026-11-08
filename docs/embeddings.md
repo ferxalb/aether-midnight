@@ -177,7 +177,13 @@ are discarded rather than logged. Keys remain in memory only, never in output.
 
 Contract references: [OpenRouter embeddings](https://openrouter.ai/docs/api/api-reference/embeddings/create-embeddings),
 [Rainy SDK protocol](https://github.com/enosislabs/rainy-sdk), and the pinned SDK source.
-Live compatibility remains unverified without credentials.
+Live compatibility: OpenRouter was exercised once by hand (2026-11-08) with
+`qwen/qwen3-embedding-8b` at 4096 dimensions through the `setup` wizard, a consented upload, and
+hybrid search on a real project of 186 indexed files (607 chunks): validation request accepted,
+every file embedded (`semantic coverage: 186/186`), and relevant results came back from both the
+lexical and the semantic side, including Spanish-language text. Not covered by that run: Rainy,
+failure paths against the live service, incremental re-embedding, latency and cost. Rainy stays
+unverified without credentials.
 
 **Request shape.** `{"model", "input": [texts…], "encoding_format": "float", "dimensions": n}` plus the
 allow-listed `--param` fields. Inputs are sent verbatim (no E5 `query:`/`passage:` prefixes — that is

@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (7) — Live OpenRouter verified (manual)
+
+- First live cloud run, on the published `v0.1.0-rc.1` binary: `setup` with OpenRouter and `qwen/qwen3-embedding-8b` (4096 dimensions, validation accepted, consented upload), `index` on a real 186-file project embedded 607 chunks, and `search` returned hybrid-fused results with `semantic coverage: 186/186 files embedded`, including Spanish text. The same run showed that `index` printed nothing while working (fixed in (5)) and that the model list offered an image-only model first (fixed in (6)).
+- Not covered: Rainy, live failure paths, incremental re-embedding against the live service, latency and cost. Raw output and project content are not recorded here. Checklist rows in `docs/release-checklist.md`, `docs/v0.1-status.md` and `docs/embeddings.md` updated.
+
 ## 2026-11-08 (6) — Model picker: five at a time, text models only
 
 - The OpenRouter model step of `setup` listed the first 15 models alphabetically, with image-only models such as `amazon/titan-embed-image-v1` first (and as the Enter default). It now hides image-only models (`image`, `clip`, `vision` in the id), puts the suggested text models first (`openai/text-embedding-3-small|large`, `qwen/qwen3-embedding-8b|4b`, `google/gemini-embedding-001`, `baai/bge-m3`, only when the provider really lists them), then the rest alphabetically, and shows five at a time: `m` reveals the next five, a number picks one, and any id can be typed. The first entry is the Enter default. The vector-size prompt pre-fills the documented size for the suggested models (e.g. 4096 for `qwen/qwen3-embedding-8b`).

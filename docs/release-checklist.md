@@ -16,7 +16,7 @@ All artifacts stay local; all changes stay unstaged and uncommitted.
 | Fresh-process, warm batch, exact 10k/100k KNN, CPU/RSS | PASS |
 | Reproducible archive, checksums, licenses, examples | PASS |
 | Extraction and isolated local install outside repository | PASS |
-| Live Rainy and OpenRouter | SKIP — no configured environment credentials |
+| Live OpenRouter | PASS (one manual run, 2026-11-08) — see `docs/embeddings.md`; live Rainy is still unverified |
 | Script install (`scripts/install.sh`): checksum, idempotency, tamper/path/platform/prefix failures | PASS — tested locally, isolated HOME |
 | CLI signature / Gatekeeper | FAIL — unsigned; Gatekeeper rejects (script reports, never bypasses) |
 | Microsoft runtime signature | PASS — upstream signature verifies |
