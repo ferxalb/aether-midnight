@@ -22,7 +22,7 @@ const MAX_OPEN_RANGE_LINES: u32 = 200;
 const MAX_SNIPPET_LINES: usize = 8;
 const MAX_SNIPPET_BYTES: usize = 4096;
 const DEFAULT_TOKEN_BUDGET: usize = 2048;
-const MAX_TOKEN_BUDGET: usize = 8192;
+pub(crate) const MAX_TOKEN_BUDGET: usize = 8192;
 const MAX_SEARCH_QUERY_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_AETHERIGNORE_BYTES: u64 = MAX_FILE_BYTES;
@@ -2619,7 +2619,7 @@ pub fn repo_map(db_path: &Path, root: &Path) -> Result<RepoMap> {
     })
 }
 
-fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
+pub(crate) fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
     let canonical = path.canonicalize()?;
     if !canonical.starts_with(root) {
         bail!("path escapes repository root");
@@ -2685,7 +2685,7 @@ fn first_lines(text: &str, start: u32, end: u32) -> String {
         .join("\n")
 }
 
-fn bounded_snippet(mut snippet: String) -> (String, bool) {
+pub(crate) fn bounded_snippet(mut snippet: String) -> (String, bool) {
     if snippet.len() <= MAX_SNIPPET_BYTES {
         return (snippet, false);
     }
@@ -2697,7 +2697,10 @@ fn bounded_snippet(mut snippet: String) -> (String, bool) {
     (snippet, true)
 }
 
-fn pack_context(results: Vec<CodeResult>, token_budget: usize) -> (Vec<CodeResult>, usize, bool) {
+pub(crate) fn pack_context(
+    results: Vec<CodeResult>,
+    token_budget: usize,
+) -> (Vec<CodeResult>, usize, bool) {
     let input_count = results.len();
     let mut packed = Vec::with_capacity(input_count);
     let mut used = 0usize;

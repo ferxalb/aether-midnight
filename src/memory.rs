@@ -1438,7 +1438,7 @@ fn classify_candidate(
     Some((phrase, matched_terms))
 }
 
-fn hydrate_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
+pub(crate) fn hydrate_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     Ok(MemoryRecord {
         id: row.get(0)?,
         scope: row.get(1)?,
@@ -2245,7 +2245,7 @@ pub fn compact(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_scope(scope: &str) -> Result<()> {
+pub(crate) fn validate_scope(scope: &str) -> Result<()> {
     if scope.trim().is_empty() || scope.len() > 256 || scope.contains('\0') {
         bail!("memory scope must be a non-empty key of at most 256 bytes");
     }

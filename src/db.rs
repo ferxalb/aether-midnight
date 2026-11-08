@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -50,6 +50,41 @@ const MEMORY_SCOPE_COUNTS_SCHEMA: &str = "CREATE TABLE memory_scope_counts (
          UPDATE memory_scope_counts SET active=active-1 WHERE scope=old.scope;
          UPDATE memory_scope_counts SET active=active-1 WHERE scope='';
      END;";
+
+/// Persisted embedding vectors (schema 6). `scope` is the memory namespace or `repo_id:worktree_id`, so
+/// every semantic query can filter by scope in SQL before any vector is read. Triggers remove vectors
+/// whose source row is deleted, forgotten, or (for code) changes content hash.
+const EMBEDDINGS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS embeddings (
+         kind TEXT NOT NULL CHECK(kind IN ('memory','code')),
+         scope TEXT NOT NULL,
+         owner_id INTEGER NOT NULL,
+         chunk INTEGER NOT NULL DEFAULT 0,
+         line_start INTEGER,
+         line_end INTEGER,
+         model TEXT NOT NULL,
+         revision TEXT NOT NULL,
+         dims INTEGER NOT NULL CHECK(dims > 0),
+         source_hash TEXT NOT NULL,
+         vector BLOB NOT NULL,
+         PRIMARY KEY(kind, owner_id, chunk)
+     ) WITHOUT ROWID;
+     CREATE INDEX IF NOT EXISTS embeddings_scope ON embeddings(kind, scope, model, revision);
+     CREATE TRIGGER IF NOT EXISTS memories_embeddings_delete AFTER DELETE ON memories BEGIN
+         DELETE FROM embeddings WHERE kind='memory' AND owner_id=old.id;
+     END;
+     CREATE TRIGGER IF NOT EXISTS memories_embeddings_soft_delete AFTER UPDATE OF deleted_at ON memories
+     WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+         DELETE FROM embeddings WHERE kind='memory' AND owner_id=new.id;
+     END;
+     CREATE TRIGGER IF NOT EXISTS code_files_embeddings_delete AFTER DELETE ON code_files BEGIN
+         DELETE FROM embeddings WHERE kind='code' AND owner_id=old.id;
+     END;
+     CREATE TRIGGER IF NOT EXISTS code_files_embeddings_rehash AFTER UPDATE OF content_hash ON code_files
+     WHEN old.content_hash IS NOT new.content_hash BEGIN
+         DELETE FROM embeddings WHERE kind='code' AND owner_id=new.id;
+     END;
+     UPDATE metadata SET value='6' WHERE key='schema_version';
+     PRAGMA user_version=6;";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RepoScope {
@@ -278,6 +313,10 @@ fn migrate(connection: &Connection) -> Result<()> {
                     PRIMARY KEY(scope,operation_key)) WITHOUT ROWID;
                     UPDATE metadata SET value='5' WHERE key='schema_version'; PRAGMA user_version=5;")?;
                 migrated_version = 5;
+            }
+            if migrated_version == 5 {
+                connection.execute_batch(EMBEDDINGS_SCHEMA)?;
+                migrated_version = 6;
             }
             if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");

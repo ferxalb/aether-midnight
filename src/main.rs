@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aether_midnight::{auth, benchmark, code, db, mcp, mcp_http, memory};
+use aether_midnight::{auth, benchmark, code, db, embed, mcp, mcp_http, memory};
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +31,21 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
+    },
+    /// Manage local embedding models (explicit download; never implicit).
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+    /// Compute or refresh persistent embeddings for one namespace and/or one indexed repository.
+    /// Needs an installed model (`models pull`); incremental and safe to interrupt.
+    Embed {
+        /// Memory namespace whose active memories are embedded.
+        #[arg(long, alias = "scope")]
+        namespace: Option<String>,
+        /// Repository/worktree whose indexed files are embedded (run `index` first).
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
     /// Check database, FTS5, integrity and writability; exits non-zero on failure.
     Doctor,
@@ -67,6 +82,9 @@ enum Commands {
         /// Approximate context-token budget (Midnight heuristic, not a model tokenizer).
         #[arg(long, default_value_t = 2048)]
         token_budget: usize,
+        /// lexical (default, unchanged output), semantic, or hybrid (RRF of lexical + semantic).
+        #[arg(long, value_enum, default_value_t = SearchModeArg::Lexical)]
+        mode: SearchModeArg,
     },
     /// Read a bounded range from the current source file.
     OpenRange {
@@ -274,7 +292,43 @@ enum MemoryAction {
         query: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// lexical (default, unchanged output), semantic, or hybrid (RRF of BM25 + semantic).
+        #[arg(long, value_enum, default_value_t = SearchModeArg::Lexical)]
+        mode: SearchModeArg,
     },
+}
+
+#[derive(Subcommand)]
+enum ModelsAction {
+    /// List known models and whether each is installed locally.
+    List,
+    /// Download a model into the local cache (the only command that uses the network).
+    Pull {
+        /// Model name, e.g. multilingual-e5-small.
+        name: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SearchModeArg {
+    Lexical,
+    Semantic,
+    Hybrid,
+}
+
+impl From<SearchModeArg> for embed::SearchMode {
+    fn from(mode: SearchModeArg) -> Self {
+        match mode {
+            SearchModeArg::Lexical => embed::SearchMode::Lexical,
+            SearchModeArg::Semantic => embed::SearchMode::Semantic,
+            SearchModeArg::Hybrid => embed::SearchMode::Hybrid,
+        }
+    }
+}
+
+/// Lazy model loader: ONNX Runtime is initialised only if a semantic stage actually needs it.
+fn model_loader() -> impl FnMut() -> Result<Box<dyn embed::TextEmbedder>> {
+    || Ok(Box::new(embed::FastEmbedder::load_installed()?) as Box<dyn embed::TextEmbedder>)
 }
 
 #[derive(Subcommand)]
@@ -405,13 +459,64 @@ fn main() -> Result<()> {
             query_flag,
             limit,
             token_budget,
-        } => print_json(&code::search_code_with_budget(
-            &db_path,
-            &repo,
-            &query_pos.or(query_flag).unwrap_or_default(),
-            limit,
-            token_budget,
-        )?)?,
+            mode,
+        } => {
+            let query = query_pos.or(query_flag).unwrap_or_default();
+            if matches!(mode, SearchModeArg::Lexical) {
+                // Unchanged legacy contract and code path.
+                print_json(&code::search_code_with_budget(
+                    &db_path,
+                    &repo,
+                    &query,
+                    limit,
+                    token_budget,
+                )?)?
+            } else {
+                let response = embed::search_code(
+                    &db_path,
+                    &repo,
+                    &query,
+                    mode.into(),
+                    limit,
+                    token_budget,
+                    &mut model_loader(),
+                )?;
+                if response.info.degraded
+                    && let Some(notice) = &response.info.notice
+                {
+                    eprintln!("warning: {notice}");
+                }
+                print_json(&response)?
+            }
+        }
+        Commands::Models { action } => models_command(action, cli.json)?,
+        Commands::Embed { namespace, repo } => {
+            if namespace.is_none() && repo.is_none() {
+                anyhow::bail!("embed needs --namespace <ns> and/or --repo <path>");
+            }
+            let mut embedder = embed::FastEmbedder::load_installed()?;
+            let mut reports = Vec::new();
+            if let Some(namespace) = namespace {
+                reports.push(embed::embed_memories(
+                    &db_path,
+                    &namespace,
+                    &mut embedder,
+                    &cancellation,
+                )?);
+            }
+            if let Some(repo) = repo {
+                reports.push(embed::embed_code(
+                    &db_path,
+                    &repo,
+                    &mut embedder,
+                    &cancellation,
+                )?);
+            }
+            print_json(&reports)?;
+            if reports.iter().any(|r| r.cancelled) {
+                std::process::exit(130);
+            }
+        }
         Commands::OpenRange {
             repo,
             path,
@@ -679,7 +784,29 @@ fn memory_command(db_path: &std::path::Path, action: MemoryAction, json: bool) -
             namespace,
             query,
             limit,
+            mode,
         } => {
+            if !matches!(mode, SearchModeArg::Lexical) {
+                let response = embed::search_memory(
+                    db_path,
+                    &namespace,
+                    &query,
+                    mode.into(),
+                    limit,
+                    &mut model_loader(),
+                )?;
+                if let Some(notice) = &response.info.notice {
+                    eprintln!("warning: {notice}");
+                }
+                if json {
+                    print_json(&response)?
+                } else {
+                    for r in &response.results {
+                        println!("{:.4}\t{}\t{}", r.score, line(&r.memory), r.match_reason);
+                    }
+                }
+                return Ok(());
+            }
             let rs = memory::recall(db_path, &namespace, &query, None, limit)?;
             if json {
                 print_json(&rs)?
@@ -818,6 +945,47 @@ fn token_command(db_path: &std::path::Path, action: TokenAction) -> Result<()> {
         TokenAction::Revoke { token } => {
             let n = auth::revoke(db_path, &token)?;
             eprintln!("revoked {n} token(s)");
+        }
+    }
+    Ok(())
+}
+
+fn models_command(action: ModelsAction, json: bool) -> Result<()> {
+    let dir = embed::models_dir()?;
+    match action {
+        ModelsAction::List => {
+            let status = embed::model_status(&dir);
+            if json {
+                print_json(&serde_json::json!({"models_dir": dir, "models": [status]}))?;
+            } else {
+                println!(
+                    "{}\t{}d\t{}\t{}",
+                    status.name,
+                    status.dimensions,
+                    if status.installed {
+                        "installed"
+                    } else {
+                        "not installed"
+                    },
+                    status.revision.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        ModelsAction::Pull { name } => {
+            if name != embed::MODEL_NAME {
+                anyhow::bail!("unknown model {name:?}; available: {}", embed::MODEL_NAME);
+            }
+            let status = embed::pull_model(&dir, !json)?;
+            if json {
+                print_json(&status)?;
+            } else {
+                println!(
+                    "installed {} (revision {}) in {}",
+                    status.name,
+                    status.revision.as_deref().unwrap_or("-"),
+                    dir.display()
+                );
+            }
         }
     }
     Ok(())

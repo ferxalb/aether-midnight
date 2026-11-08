@@ -1,6 +1,6 @@
 # Privacy, ignored files, and storage
 
-Midnight is local-only in v1. The engine has no HTTP client, telemetry, cloud endpoint, embedding provider, or network-dependent startup path. The MCP server communicates over its parent process's stdio. Benchmark baselines (`rg`) run locally.
+Midnight is local-only. There is no telemetry, cloud endpoint, or network-dependent startup path. The only network operation is the explicit `models pull`, which downloads the local embedding model from Hugging Face; search, embedding and every other command run offline. Embedding inference is local (`docs/embeddings.md`). The MCP server communicates over its parent process's stdio. Benchmark baselines (`rg`) run locally.
 
 ## Stored data
 

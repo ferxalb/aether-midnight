@@ -4,6 +4,7 @@ pub mod auth;
 pub mod benchmark;
 pub mod code;
 pub mod db;
+pub mod embed;
 pub mod mcp;
 pub mod mcp_http;
 pub mod memory;

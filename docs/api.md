@@ -20,6 +20,15 @@ aether-midnight list-memories --scope project:app
 aether-midnight forget --scope project:app --id 2
 aether-midnight diagnose
 aether-midnight compact
+
+# Phase 1 CLI and Phase 2 embeddings (docs/embeddings.md)
+aether-midnight init
+aether-midnight memory add|get|list|delete|search --namespace project:app …
+aether-midnight models list
+aether-midnight models pull multilingual-e5-small
+aether-midnight embed --namespace project:app --repo /work/app
+aether-midnight memory search --namespace project:app "query" --mode hybrid
+aether-midnight search --repo /work/app "query" --mode hybrid
 ```
 
 For a raw source, `source_uri` is optional. Derived memories must cite a raw `source_id` from the same scope or provide a `source_uri`. Scopes must include a namespace prefix and colon. Time inputs are RFC 3339 and normalized to UTC.

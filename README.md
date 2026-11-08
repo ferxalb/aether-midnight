@@ -18,7 +18,7 @@ It needs no server, account, API key, model, or network connection.
 
 ### What it does not do
 
-- **No semantic search.** There are no embeddings or models. Matching works on whole tokens, not meaning, and arbitrary substrings inside a token are not supported.
+- **Semantic search is opt-in.** Default search is lexical (whole tokens, no arbitrary substrings). `--mode semantic|hybrid` needs a locally installed model and stored embeddings; see [docs/embeddings.md](docs/embeddings.md).
 - **No automatic capture.** Midnight never records conversations. It stores only what you tell it to store.
 - **No file watching.** After you change files, run `index` again (or `refresh-file` for one file).
 - **No UI, cloud sync, or LLM.**

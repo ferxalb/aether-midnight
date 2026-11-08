@@ -30,6 +30,8 @@ tree-sitter-typescript = "0.23.2"
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 tempfile = "3.27.0"
 unicode-normalization = "0.1"
+fastembed = { version = "=5.13.0", default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
+hf-hub = { version = "=0.4.3", default-features = false, features = ["ureq", "native-tls"] }
 
 [dev-dependencies]
 
