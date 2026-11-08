@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 BIN="${UNIVERSAL_BINARY:-$PWD/target/universal/aether-midnight}"
 HARNESS="${HARNESS_BINARY:-$PWD/target/universal/midnight-harness-host}"
 [ -f "$BIN" ] && [ -f "$HARNESS" ] || { echo 'run scripts/build-universal.sh first' >&2; exit 1; }
-lipo -verify_arch "$BIN" arm64 x86_64
+lipo "$BIN" -verify_arch arm64 x86_64
 OUT="$PWD/target/release-candidate"
 mkdir -p "$OUT"
 STAGE=$(mktemp -d "$OUT/stage.XXXXXX")

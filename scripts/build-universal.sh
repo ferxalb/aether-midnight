@@ -19,7 +19,7 @@ cp target/release/midnight-harness "$OUT/midnight-harness-host"
 lipo -create -output "$OUT/aether-midnight" \
     target/aarch64-apple-darwin/release/aether-midnight \
     target/x86_64-apple-darwin/release/aether-midnight
-lipo -verify_arch "$OUT/aether-midnight" arm64 x86_64
+lipo "$OUT/aether-midnight" -verify_arch arm64 x86_64
 [ "$(lipo -archs "$OUT/aether-midnight" | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ')" = "arm64 x86_64 " ] ||
     { echo 'universal binary must contain exactly arm64 and x86_64' >&2; exit 1; }
 # Ad-hoc signature only (required for arm64 to load); not Developer ID, not notarized.
