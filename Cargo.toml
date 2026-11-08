@@ -50,4 +50,3 @@ strip = true
 inherits = "release"
 debug = true
 strip = false
-
