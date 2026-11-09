@@ -29,7 +29,7 @@ const MAX_SNIPPET_LINE_CHARS: usize = 200;
 const MAX_SNIPPET_BYTES: usize = 4096;
 const DEFAULT_TOKEN_BUDGET: usize = 2048;
 pub(crate) const MAX_TOKEN_BUDGET: usize = 8192;
-const MAX_SEARCH_QUERY_BYTES: usize = 4096;
+pub(crate) const MAX_SEARCH_QUERY_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_AETHERIGNORE_BYTES: u64 = MAX_FILE_BYTES;
 const MAX_PARSE_ERROR_PATHS: usize = 20;
@@ -2003,6 +2003,7 @@ struct Candidate {
     /// Raw FTS5 BM25 (negative; lower is better, 0.0 when there was no text match). The
     /// `lexical` score saturates at 50, so this breaks ties before the path does.
     bm25: f64,
+    literal_phrase: bool,
 }
 
 fn indexed_candidates(
@@ -2157,16 +2158,80 @@ fn indexed_candidates(
             candidate.bm25 = hit.rank;
         }
     }
+    // A separate phrase query prevents BM25's short-document preference from dropping a
+    // literal phrase in a long file before ranking. Verify against current source: the FTS
+    // index also contains paths and decomposed identifiers, which are not literal evidence.
+    if is_phrase_query(query) {
+        let phrase = format!("\"{}\"", query.trim().replace('"', "\"\""));
+        for hit in
+            SqliteFtsIndex.search(conn, &scope.repo_id, &scope.worktree_id, &phrase, limit)?
+        {
+            let literal =
+                current_text(&scope.root, &scope.root.join(&hit.path)).is_ok_and(|(text, hash)| {
+                    hash == hit.content_hash && contains_literal_phrase(&text, query)
+                });
+            if literal {
+                let candidate = map.entry(hit.document_id).or_insert(Candidate {
+                    path: hit.path,
+                    hash: hit.content_hash,
+                    generation: hit.generation,
+                    ..Default::default()
+                });
+                candidate.literal_phrase = true;
+                // All phrase candidates use the same phrase BM25 basis, whether or not they
+                // also survived the OR-term window. Mixing the two ranks makes order depend
+                // on the requested window size.
+                candidate.lexical =
+                    (25.0 + (-hit.rank * 1_000_000.0).clamp(0.0, 25.0)).clamp(0.0, 50.0);
+                candidate.bm25 = hit.rank;
+            }
+        }
+    }
     let mut candidates = map.into_values().collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
         let sa = a.exact_path + a.exact_symbol + a.lexical;
         let sb = b.exact_path + b.exact_symbol + b.lexical;
-        sb.total_cmp(&sa)
+        candidate_class(b)
+            .cmp(&candidate_class(a))
+            .then_with(|| sb.total_cmp(&sa))
             .then_with(|| a.bm25.total_cmp(&b.bm25))
             .then_with(|| a.path.cmp(&b.path))
     });
     candidates.truncate(limit);
     Ok(candidates)
+}
+
+fn candidate_class(candidate: &Candidate) -> u8 {
+    if candidate.exact_path >= 100.0 || candidate.exact_symbol > 0.0 {
+        2
+    } else {
+        u8::from(candidate.literal_phrase)
+    }
+}
+
+fn is_phrase_query(query: &str) -> bool {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .take(2)
+        .count()
+        == 2
+}
+
+fn contains_literal_phrase(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    let query = query.trim().to_lowercase();
+    text.match_indices(&query).any(|(start, _)| {
+        let end = start + query.len();
+        !text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !text[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
 }
 
 fn code_match_query(query: &str) -> Option<String> {
@@ -2370,6 +2435,10 @@ fn make_results(
         breakdown.insert("exact_path".into(), candidate.exact_path);
         breakdown.insert("exact_symbol".into(), candidate.exact_symbol);
         breakdown.insert("lexical_fts".into(), candidate.lexical);
+        if candidate.literal_phrase {
+            breakdown.insert("literal_phrase".into(), 1.0);
+            reasons.push("literal_phrase".to_string());
+        }
         if candidate.exact_path > 0.0 {
             reasons.push("path".to_string());
         }

@@ -493,6 +493,16 @@ pub fn embedder_for(settings: &Settings) -> Result<Option<Box<dyn TextEmbedder>>
     })
 }
 
+/// Queries can also contain private text. Saved remote configuration alone is not consent.
+pub fn consented_embedder_for(settings: &Settings) -> Result<Option<Box<dyn TextEmbedder>>> {
+    if settings.provider.is_remote() && !settings.upload_consented() {
+        bail!(
+            "remote query upload requires provider-bound consent; run `midnight setup` and authorise uploads, or use --mode lexical"
+        );
+    }
+    embedder_for(settings)
+}
+
 /// Embed the freshly indexed repository with the configured provider.
 pub fn embed_repository(
     db_path: &Path,

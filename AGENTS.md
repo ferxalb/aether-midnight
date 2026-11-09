@@ -31,6 +31,12 @@ All performance claims must come from running the compiled release CLI or app th
 
 ## Retrieval Changes
 
+Code retrieval in rc.6 uses verified literal-phrase candidates and evidence classes before
+hybrid RRF; `docs/hybrid-mcp.md` is the current contract. MCP provider selection, consent checks
+and connection-local query caching live in `src/mcp/search.rs`. Keep lexical requests offline,
+respect project opt-out, and do not let tool arguments select a provider or grant upload consent.
+Existing HTTP tokens deny remote embeddings unless explicitly minted with that capability.
+
 Any change to memory candidate generation or ranking must (1) keep `src/retrieval_tests.rs` passing, including exact agreement with the exhaustive oracle for up to four informative terms, (2) leave every metric and per-query rank of the frozen suites in `benchmark/` unchanged unless the change is a deliberate, documented contract change (never edit labels to improve a score), and (3) report paired before/after numbers from `bench-retrieval`, `bench-memory`, and `midnight-harness memory-quality` run on the same host, including classes that got slower. Do not make a non-exact shortcut the default; opt-in shortcuts must be labeled through `candidate_coverage`. `docs/retrieval-v04.md` records the guarantees, rejected experiments, and the pending native macOS gate.
 
 ## Data and Documentation

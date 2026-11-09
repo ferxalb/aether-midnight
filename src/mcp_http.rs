@@ -107,6 +107,7 @@ fn connection(
     stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut memory_session = None;
+    let mut session_principal = None;
     while !cancel.load(Ordering::Relaxed) {
         let Some(req) = read_request(&mut reader)? else {
             return Ok(());
@@ -140,6 +141,10 @@ fn connection(
             return Ok(());
         };
         let policy = &record.policy;
+        if session_principal.as_ref() != Some(&record.id) {
+            memory_session = None;
+            session_principal = Some(record.id.clone());
+        }
         match req.method.as_str() {
             "DELETE" => write_response(&stream, 200, "OK", None, req.keep_alive)?,
             "POST" => {

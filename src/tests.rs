@@ -8,6 +8,79 @@ use tempfile::TempDir;
 
 use crate::{code, db, memory};
 
+#[test]
+fn code_literal_phrase_window_uses_one_rank_basis_at_every_limit() {
+    let temp = TempDir::new().unwrap();
+    let repo = new_repo(&temp, "phrase-window");
+    let database = temp.path().join("m.sqlite3");
+    for i in 0..30 {
+        fs::write(
+            repo.join(format!("a_{i:02}.txt")),
+            "privacy scattered first scattered personal scattered intelligence\n",
+        )
+        .unwrap();
+    }
+    for (name, padding) in [
+        ("z_short.txt", 0),
+        ("z_medium.txt", 30),
+        ("z_long.txt", 300),
+    ] {
+        fs::write(
+            repo.join(name),
+            format!(
+                "{}\nPrivacy-first personal intelligence.\n",
+                "unrelated filler\n".repeat(padding)
+            ),
+        )
+        .unwrap();
+    }
+    code::index_repository(&database, &repo, false, false, &AtomicBool::new(false)).unwrap();
+    let query = "Privacy-first personal intelligence";
+    let full = code::search_code(&database, &repo, query, 20).unwrap();
+    assert!(
+        full[..3]
+            .iter()
+            .all(|r| r.match_reason.contains("literal_phrase"))
+    );
+    for limit in [1, 2, 3, 10] {
+        let limited = code::search_code(&database, &repo, query, limit).unwrap();
+        assert_eq!(
+            limited.iter().map(|r| &r.path).collect::<Vec<_>>(),
+            full[..limited.len()]
+                .iter()
+                .map(|r| &r.path)
+                .collect::<Vec<_>>(),
+            "limit={limit}"
+        );
+    }
+}
+
+#[test]
+fn code_phrase_class_requires_literal_source_punctuation_and_boundaries() {
+    let temp = TempDir::new().unwrap();
+    let repo = new_repo(&temp, "phrase-literal");
+    let database = temp.path().join("m.sqlite3");
+    for (name, content) in [
+        ("exact.txt", "PRIVACY-first personal intelligence."),
+        ("punctuation.txt", "Privacy - first personal intelligence."),
+        (
+            "infix.txt",
+            "prefixPrivacy-first personal intelligenceSuffix",
+        ),
+    ] {
+        fs::write(repo.join(name), content).unwrap();
+    }
+    code::index_repository(&database, &repo, false, false, &AtomicBool::new(false)).unwrap();
+    let results =
+        code::search_code(&database, &repo, "Privacy-first personal intelligence", 10).unwrap();
+    let protected: Vec<_> = results
+        .iter()
+        .filter(|r| r.match_reason.contains("literal_phrase"))
+        .map(|r| r.path.as_str())
+        .collect();
+    assert_eq!(protected, vec!["exact.txt"]);
+}
+
 fn new_repo(base: &TempDir, name: &str) -> std::path::PathBuf {
     let root = base.path().join(name);
     fs::create_dir_all(root.join("src")).unwrap();
@@ -526,7 +599,7 @@ fn fts_symbols_paths_and_retrieval_time_freshness_work() {
     assert_eq!(symbol[0].freshness, "fresh");
     assert_eq!(symbol[0].line_start, Some(1));
     let lexical = code::search_code(&database, &repo, "lexical phrase", 5).unwrap();
-    assert_eq!(lexical[0].match_reason, "lexical");
+    assert_eq!(lexical[0].match_reason, "literal_phrase+lexical");
     assert!(
         !code::search_code(&database, &repo, "fn", 5)
             .unwrap()

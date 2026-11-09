@@ -606,6 +606,9 @@ enum TokenAction {
         repo_roots: Vec<PathBuf>,
         #[arg(long)]
         ttl_secs: Option<u64>,
+        /// Permit query and indexed-source uploads to the configured provider, with saved consent.
+        #[arg(long)]
+        allow_remote_embeddings: bool,
     },
     /// List tokens (never prints secrets).
     List,
@@ -615,6 +618,9 @@ enum TokenAction {
 
 #[derive(clap::Args, Clone)]
 struct PolicyArgs {
+    /// Keep this MCP process offline even when a remote provider is configured globally.
+    #[arg(long)]
+    local_only: bool,
     /// Expose only read/recall tools (no remember, forget, or indexing).
     #[arg(long)]
     read_only: bool,
@@ -644,6 +650,9 @@ impl PolicyArgs {
             allowed_tools,
             memory_scopes: self.memory_scopes,
             repo_roots: self.repo_roots,
+            // Stdio is launched by the user. Saved provider-bound consent is still required;
+            // HTTP tokens get a separate explicit grant and default to local-only.
+            allow_remote_embeddings: !self.local_only,
         }
     }
 }
@@ -1074,7 +1083,7 @@ pub fn main() -> Result<()> {
             } else {
                 let mut loader = || -> Result<Box<dyn embed::TextEmbedder>> {
                     match &saved {
-                        Some(settings) => ux::embedder_for(settings)?
+                        Some(settings) => ux::consented_embedder_for(settings)?
                             .ok_or_else(|| anyhow::anyhow!("no embedding provider configured")),
                         None => embedding.build(),
                     }
@@ -1724,6 +1733,7 @@ fn token_command(db_path: &std::path::Path, action: TokenAction) -> Result<()> {
             read_only,
             repo_roots,
             ttl_secs,
+            allow_remote_embeddings,
         } => {
             let code_tools = ["search_code", "open_range", "repo_map", "index_status"];
             let mut tools = tools.unwrap_or_else(|| {
@@ -1764,6 +1774,7 @@ fn token_command(db_path: &std::path::Path, action: TokenAction) -> Result<()> {
                 allowed_tools: Some(tools),
                 memory_scopes: (!all_scopes).then_some(memory_scopes),
                 repo_roots: (!repo_roots.is_empty()).then_some(repo_roots),
+                allow_remote_embeddings,
             };
             let (record, token) = auth::create(db_path, &name, policy, ttl_secs)?;
             eprintln!("created token {} ({}); shown once", record.id, record.name);

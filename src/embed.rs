@@ -1279,6 +1279,9 @@ pub fn search_code(
     if query.trim().is_empty() {
         bail!("code search query cannot be empty");
     }
+    if query.len() > code::MAX_SEARCH_QUERY_BYTES {
+        bail!("code search query exceeds 4096 bytes");
+    }
     let context_lines = context_lines.clamp(1, code::MAX_CONTEXT_LINES);
     let scope = repo_scope(root)?;
     let limit = limit.clamp(1, 20);
@@ -1424,8 +1427,13 @@ pub fn search_code(
             );
         }
     } else {
-        meta.fusion = Some(format!("rrf(k={RRF_K})"));
-        for (path, score) in rrf_fuse(&[&lex_paths, &sem_paths]).into_iter().take(limit) {
+        meta.fusion = Some(format!("literal-priority+rrf(k={RRF_K})"));
+        // Exact source evidence is a retrieval class, not a guessed RRF weight. Within each
+        // class keep RRF's deterministic score/path ordering; memory fusion is unchanged.
+        let mut ranked = rrf_fuse(&[&lex_paths, &sem_paths]);
+        let class = |path: &String| lexical_by_path.get(path).map_or(0, code_evidence_class);
+        ranked.sort_by_key(|a| std::cmp::Reverse(class(&a.0)));
+        for (path, score) in ranked.into_iter().take(limit) {
             let lex_rank = lex_paths.iter().position(|p| *p == path).map(|p| p + 1);
             let sem_rank = sem_paths.iter().position(|p| *p == path).map(|p| p + 1);
             let mut result = match (
@@ -1437,6 +1445,20 @@ pub fn search_code(
                 (None, None) => continue,
             };
             let mut reasons = Vec::new();
+            let evidence_class = code_evidence_class(&result);
+            if evidence_class > 0 {
+                result
+                    .score_breakdown
+                    .insert("evidence_class".into(), f64::from(evidence_class));
+                reasons.push(
+                    if evidence_class == 2 {
+                        "exact"
+                    } else {
+                        "literal_phrase"
+                    }
+                    .into(),
+                );
+            }
             if let Some(r) = lex_rank {
                 reasons.push(format!("lexical#{r}"));
             }
@@ -1477,6 +1499,18 @@ pub fn search_code(
             token_estimator,
         },
     })
+}
+
+fn code_evidence_class(result: &CodeResult) -> u8 {
+    if result.freshness != "fresh" {
+        return 0;
+    }
+    let score = |key: &str| result.score_breakdown.get(key).copied().unwrap_or(0.0);
+    if score("exact_path") >= 100.0 || score("exact_symbol") > 0.0 {
+        2
+    } else {
+        u8::from(score("literal_phrase") > 0.0)
+    }
 }
 
 #[cfg(test)]

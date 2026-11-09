@@ -272,7 +272,20 @@ pub fn resolve_key(choice: Choice) -> Result<Option<(String, KeySource)>> {
 
 /// Build the configured cloud embedder, or explain exactly what is missing.
 pub fn cloud_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
-    let cfg = settings.cloud_config()?;
+    build_cloud_embedder(settings, false)
+}
+
+/// MCP's interactive query budget: one attempt with a five-second transport timeout. Timeouts
+/// are not part of the embedding-space identity, so existing vectors remain compatible.
+pub(crate) fn cloud_query_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
+    build_cloud_embedder(settings, true)
+}
+
+fn build_cloud_embedder(settings: &Settings, query: bool) -> Result<cloud::CloudEmbedder> {
+    let mut cfg = settings.cloud_config()?;
+    if query {
+        cfg.timeout_secs = 5;
+    }
     let var = cfg.provider.key_env().unwrap_or_default();
     let Some((key, _)) = resolve_key(settings.provider)? else {
         bail!(
@@ -280,7 +293,12 @@ pub fn cloud_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
             settings.provider.as_str()
         );
     };
-    cloud::CloudEmbedder::new(cfg, key, var)
+    let embedder = cloud::CloudEmbedder::new(cfg, key, var)?;
+    Ok(if query {
+        embedder.without_retries()
+    } else {
+        embedder
+    })
 }
 
 /// Known-good starting points offered during setup. These are suggestions, not defaults: the saved

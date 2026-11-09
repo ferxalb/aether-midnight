@@ -5,6 +5,13 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+fn db_config_isolation() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "midnight-mcp-test-no-config-{}",
+        std::process::id()
+    ))
+}
+
 #[test]
 fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
     let temp = TempDir::new().unwrap();
@@ -17,6 +24,7 @@ fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
     .unwrap();
     let database = temp.path().join("mcp.sqlite3");
     let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(&database)
         .arg("mcp")
@@ -271,6 +279,7 @@ fn mcp_recall_finds_middle_exact_phrase_and_reports_candidate_coverage() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("mcp-middle-recall.sqlite3");
     let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(&database)
         .arg("mcp")
@@ -338,6 +347,7 @@ fn dots_persistent_memory_lifecycle_preserves_evidence() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("dots.sqlite3");
     let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .args(["--db", database.to_str().unwrap(), "mcp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -510,6 +520,7 @@ fn cli_and_mcp_share_operation_key_identity_and_conflicts() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("keys.sqlite3");
     let cli = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(&database)
         .args([
@@ -526,6 +537,7 @@ fn cli_and_mcp_share_operation_key_identity_and_conflicts() {
     assert!(cli.status.success());
     let record: Value = serde_json::from_slice(&cli.stdout).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(&database)
         .arg("mcp")

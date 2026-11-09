@@ -10,14 +10,16 @@ Midnight indexes your repositories on your machine so you, or an AI agent like C
 - **Built for agents.** One command registers it as an MCP server in Claude Code, Claude Desktop, or Codex.
 - **Optional semantic search.** Use a local model, or a cloud provider you choose (OpenRouter or Rainy).
 
-> **Status:** prerelease (`v0.1.0-rc.5`). Commands and output fields may still change. macOS is the supported platform; **Linux and Windows are experimental** and not stable (see [docs/platforms.md](docs/platforms.md)).
+> **Status:** prerelease (`v0.1.0-rc.6`). Commands and output fields may still change. macOS is the supported platform; **Linux and Windows are experimental** and not stable (see [docs/platforms.md](docs/platforms.md)).
+
+rc.6 is the final planned candidate before the stable-readiness review. See the [release notes](docs/release-notes/v0.1.0-rc.6.md) and [validation checklist](docs/release-checklist.md); stable status is not automatic.
 
 ## Install
 
 **macOS (Apple silicon or Intel).** No Rust or sudo needed:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.5/install.sh | sh -s -- --no-runtime
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.6/install.sh | sh -s -- --no-runtime
 ```
 
 This verifies the download's SHA-256 and installs `aether-midnight` to `~/.local/bin`, plus a shorter `midnight` alias. Add `~/.local/bin` to your `PATH` if it is not there yet. The binary is not signed or notarized; if macOS blocks it, see [docs/installation.md](docs/installation.md).
@@ -106,7 +108,7 @@ midnight forget --scope project:payments --id 2
 
 ## Semantic search (optional)
 
-Pick a provider in `midnight setup`. After that, `index` embeds your code and `search` uses hybrid (keyword + semantic) ranking automatically.
+Pick a provider in `midnight setup`. After you authorize uploads for OpenRouter (or another remote provider), CLI `index` and MCP `index_repository` embed your code; CLI `search` and MCP stdio `search_code` use hybrid automatically. Without a provider they use lexical. Each search can explicitly select `lexical`, `semantic`, or `hybrid`; lexical stays offline. HTTP tokens require a separate remote-embedding grant. MCP `recall` keeps its lexical default.
 
 | Provider | What happens |
 | --- | --- |
@@ -115,6 +117,8 @@ Pick a provider in `midnight setup`. After that, `index` embeds your code and `s
 | **OpenRouter / Rainy** | Sends the text being embedded (code chunks, memories, queries) to that provider, only after you consent in `setup`. The API key is stored with `0600` permissions, or read from `OPENROUTER_API_KEY` / `RAINY_API_KEY`. |
 
 If embedding fails or is incomplete, results say so (`semantic_coverage`); Midnight never silently switches provider. Details are in [docs/embeddings.md](docs/embeddings.md).
+
+Hybrid protects fresh exact paths, symbols and literal phrases before combining other candidates with RRF. See [MCP modes, consent, ranking and cache](docs/hybrid-mcp.md) for activation and the retrieval limits.
 
 ## Per-project storage
 

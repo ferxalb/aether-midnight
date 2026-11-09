@@ -1,5 +1,12 @@
 # Performance contract and benchmark results
 
+> **v0.1.0-rc.6:** [hybrid/MCP validation](hybrid-mcp-validation.md) records paired
+> release-binary checks for literal evidence, frozen code/memory quality, all eight production
+> memory diagnostic classes, 1k/10k memory operations and a separately seeded MCP measurement.
+> It includes slower cases and does not claim a universal latency improvement. The new query
+> cache eliminates repeated embedding requests under its documented bounds; provider latency
+> and availability remain external.
+
 > **v0.5 update:** the v0.5 correction restores the original exact scan default and documents interleaved regression diagnosis. The earlier descending-scan experiment remains in [the v0.5 retrieval record](retrieval-v05.md).
 > **v0.4 update:** current memory-recall measurements and the paired v0.3.1 comparison are in [the v0.4 retrieval record](retrieval-v04.md). Older sections here describe earlier strategies.
 

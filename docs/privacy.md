@@ -1,6 +1,29 @@
 # Privacy, ignored files, and storage
 
-Midnight is local-first. There is no telemetry and no network-dependent startup path. Network use is limited to three explicit, user-invoked operations: `runtime install` (the pinned ONNX Runtime from Microsoft's GitHub release, SHA-256 verified), `models pull` (the pinned model revision from Hugging Face, SHA-256 verified), and `--provider openrouter|rainy` on `embed` or on a `--mode semantic|hybrid` search. The last one sends the text being embedded (memories of the named namespace, chunks of the named repository, or the search query) to the provider you selected, using your own API key from `OPENROUTER_API_KEY` / `RAINY_API_KEY`; it never happens by default, from the environment, from MCP/HTTP, or in lexical modes, and the key is never logged or stored. Vectors from a provider are stored locally like any other, but the provider's own retention terms govern the text it received. Everything else, including local embedding inference, runs offline (`docs/embeddings.md`). The MCP server communicates over its parent process's stdio. Benchmark baselines (`rg`) run locally.
+Midnight is local-first, with lexical retrieval as its unconfigured default and no telemetry.
+Remote embeddings require an explicitly selected provider and credentials; saved configurations
+also require provider-bound upload consent. Once enabled, CLI and MCP stdio code searches default
+to hybrid: searches send query text, and indexing sends eligible source chunks to that provider.
+MCP HTTP additionally requires a token with `--allow-remote-embeddings`; existing tokens deny
+remote calls. MCP tools cannot select providers, supply credentials or grant consent. Explicit
+lexical retrieval stays offline, and `midnight mcp --local-only` disables remote calls for that
+process. A key in the environment alone never enables cloud retrieval. Missing or mismatched
+vectors do not cause query uploads or a provider switch. See [MCP modes and consent](hybrid-mcp.md).
+
+Provider keys are read from `OPENROUTER_API_KEY` / `RAINY_API_KEY` or the private credential store
+when saved through setup; they are never logged or returned by MCP. Vectors stay in the local
+database, while the provider's terms govern text it receives. Runtime/model installation,
+setup validation/model discovery, and explicit release checks/updates can also use the network;
+ordinary lexical retrieval and local inference do not. Runtime and model downloads are pinned
+and verified as described in [embeddings](embeddings.md). MCP uses stdio or authenticated loopback
+HTTP; neither transport implies permission to upload content.
+
+MCP connections cache up to 32 successful query vectors, reusable for 60 seconds from creation,
+with hashed query keys, scope and full model identity. Expired entries are purged lazily on the
+next cache access or connection close; an idle connection can retain expired vectors. No query plaintext is retained by this
+cache and it is never persisted. Consent is checked even on cache hits; fresh database/source
+retrieval runs on every search. Closing the connection drops the cache, and HTTP changes of
+bearer principal reset it. This does not alter the retention of explicitly saved memories.
 
 ## Stored data
 

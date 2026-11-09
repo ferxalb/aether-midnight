@@ -545,6 +545,161 @@ fn code_chunks_embed_search_reindex_and_delete() {
 }
 
 #[test]
+fn literal_phrase_in_long_file_survives_twenty_shared_rrf_distractors() {
+    struct MisleadingEmbedder(ModelIdentity);
+    impl TextEmbedder for MisleadingEmbedder {
+        fn identity(&self) -> &ModelIdentity {
+            &self.0
+        }
+        fn embed(&mut self, kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if kind == TextKind::Passage
+                        && t.contains("Privacy-first personal intelligence")
+                    {
+                        vec![0.0, 1.0]
+                    } else {
+                        vec![1.0, 0.0]
+                    }
+                })
+                .collect())
+        }
+    }
+    let temp = TempDir::new().unwrap();
+    let db = db_in(&temp);
+    let repo = temp.path().join("repo");
+    let phrase = "Privacy-first personal intelligence";
+    write(
+        &repo,
+        "z_target.tsx",
+        &format!(
+            "{}\nconst description = '{phrase}';\n",
+            "// unrelated filler\n".repeat(300)
+        ),
+    );
+    for i in 0..30 {
+        write(
+            &repo,
+            &format!("a_{i:02}.txt"),
+            "Privacy elsewhere first unrelated personal separate intelligence critical auth marker\n",
+        );
+    }
+    write(&repo, "z_symbol.rs", "pub fn critical_auth_marker() {}\n");
+    code::index_repository(&db, &repo, false, false, &no_cancel()).unwrap();
+    let identity = ModelIdentity {
+        name: "adversarial".into(),
+        revision: "v1".into(),
+        dimensions: 2,
+    };
+    embed_code(
+        &db,
+        &repo,
+        &mut MisleadingEmbedder(identity.clone()),
+        &no_cancel(),
+    )
+    .unwrap();
+    let lexical = code::search_code(&db, &repo, phrase, 10).unwrap();
+    assert_eq!(lexical[0].path, "z_target.tsx");
+    assert!(lexical[0].match_reason.contains("literal_phrase"));
+    let mut loader = || Ok(Box::new(MisleadingEmbedder(identity.clone())) as Box<dyn TextEmbedder>);
+    let semantic = search_code(
+        &db,
+        &repo,
+        phrase,
+        SearchMode::Semantic,
+        20,
+        8192,
+        3,
+        &mut loader,
+    )
+    .unwrap();
+    assert!(
+        !semantic
+            .search
+            .results
+            .iter()
+            .any(|r| r.path == "z_target.tsx")
+    );
+    let hybrid = search_code(
+        &db,
+        &repo,
+        phrase,
+        SearchMode::Hybrid,
+        10,
+        8192,
+        3,
+        &mut loader,
+    )
+    .unwrap();
+    assert_eq!(hybrid.search.results[0].path, "z_target.tsx");
+    assert_eq!(
+        hybrid.search.results[0].score_breakdown["evidence_class"],
+        1.0
+    );
+    assert!(
+        hybrid.search.results[0]
+            .match_reason
+            .contains("literal_phrase")
+    );
+    let exact = search_code(
+        &db,
+        &repo,
+        "critical_auth_marker",
+        SearchMode::Hybrid,
+        10,
+        8192,
+        3,
+        &mut loader,
+    )
+    .unwrap();
+    assert_eq!(exact.search.results[0].path, "z_symbol.rs");
+    assert_eq!(
+        exact.search.results[0].score_breakdown["evidence_class"],
+        2.0
+    );
+    // A stale indexed phrase must not retain the protected literal class.
+    write(&repo, "z_target.tsx", "// phrase removed\n");
+    let stale = search_code(
+        &db,
+        &repo,
+        phrase,
+        SearchMode::Hybrid,
+        10,
+        8192,
+        3,
+        &mut loader,
+    )
+    .unwrap();
+    assert!(
+        !stale
+            .search
+            .results
+            .iter()
+            .any(|r| r.score_breakdown.contains_key("evidence_class"))
+    );
+}
+
+#[test]
+fn oversized_code_query_is_rejected_before_loading_any_provider() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    write(&repo, "lib.rs", "fn marker() {}\n");
+    let err = search_code(
+        &db_in(&temp),
+        &repo,
+        &"a".repeat(4097),
+        SearchMode::Hybrid,
+        10,
+        2048,
+        3,
+        &mut never_loader(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("4096"));
+}
+
+#[test]
 fn code_semantic_hits_for_files_edited_after_indexing_are_dropped() {
     let temp = TempDir::new().unwrap();
     let db = db_in(&temp);

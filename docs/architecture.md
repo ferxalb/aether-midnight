@@ -2,6 +2,13 @@
 
 Midnight is one local Rust engine. The CLI, MCP server, and examples call the same core code and use the same SQLite schema.
 
+v0.1.0-rc.6 adds [MCP retrieval modes and literal evidence](hybrid-mcp.md).
+`mcp/search.rs` resolves saved provider configuration under policy and consent, and caches only
+query vectors in bounded connection state. `mcp.rs` still authorizes repositories/namespaces
+before dispatch. HTTP resets that state when the authenticated principal changes. Code lexical
+candidates now include a separately verified phrase lookup; hybrid protects exact and literal
+evidence classes before RRF. Memory lexical ranking and memory fusion are unchanged.
+
 ## Four layers
 
 1. **Sources and scopes.** A repository is identified by its canonical root and Git common directory where available; a worktree gets its own identity. Repository and worktree identifiers are mandatory columns in code index lookups. Agent memories use an explicit caller namespace (for example `user:alice` or `project:payments`) in every query. Raw source rows and derived facts are distinct; derived rows can cite a source row or URI and can supersede an earlier fact while retaining its history.

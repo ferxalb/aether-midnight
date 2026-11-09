@@ -8,6 +8,16 @@ use std::sync::atomic::AtomicBool;
 
 use crate::{VERSION, code, memory};
 
+mod search;
+
+/// State is private to one MCP connection. Query-vector reuse is bounded, expires and is never
+/// persisted; memory retains its existing lazily opened SQLite connection.
+#[derive(Default)]
+pub struct Session {
+    memory: Option<memory::MemorySession>,
+    search: search::QueryCache,
+}
+
 /// Newest protocol revision this server implements; offered when the client asks for an unknown one.
 const PROTOCOL_VERSION: &str = "2025-11-25";
 /// Revisions whose `tools` surface this server speaks. The reply echoes the client's request when
@@ -26,7 +36,8 @@ fn negotiated_version(params: &Value) -> &'static str {
 const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// Least-privilege limits applied to every tool call on any transport.
-/// The default policy is unrestricted so existing stdio users are unaffected.
+/// The default permits local tools; remote embeddings require a separate grant. The stdio CLI
+/// grants remote capability unless --local-only is set, but saved upload consent is still required.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Policy {
     /// When set, only these tools are listed or callable.
@@ -36,6 +47,10 @@ pub struct Policy {
     pub memory_scopes: Option<Vec<String>>,
     /// When set, code tools may only name a repository inside one of these roots.
     pub repo_roots: Option<Vec<PathBuf>>,
+    /// Remote embedding calls additionally require saved provider-bound upload consent.
+    /// Missing on existing HTTP tokens means false; model arguments cannot grant this.
+    #[serde(default)]
+    pub allow_remote_embeddings: bool,
 }
 
 const CODE_TOOLS: [&str; 7] = [
@@ -185,7 +200,7 @@ impl Policy {
 pub fn handle_message(
     db_path: &Path,
     policy: &Policy,
-    memory_session: &mut Option<memory::MemorySession>,
+    memory_session: &mut Option<Session>,
     request: &Value,
     cancellation: &AtomicBool,
 ) -> Option<Value> {
@@ -217,7 +232,7 @@ pub fn handle_message(
                 .and_then(|args| {
                     let mut checked = params.clone();
                     checked["arguments"] = args;
-                    call_tool(db_path, memory_session, &checked, cancellation)
+                    call_tool(db_path, policy, memory_session, &checked, cancellation)
                 });
             match outcome {
                 Ok(result) => ok_response(
@@ -347,16 +362,16 @@ fn initialize(id: Value, params: &Value) -> Value {
             "protocolVersion":negotiated_version(params),
             "capabilities":{"tools":{"listChanged":false}},
             "serverInfo":{"name":"aether-midnight","version":VERSION},
-            "instructions":"Local-only repository retrieval and explicitly scoped agent memory. repo_path is optional when the server was started inside a Git repository (or its policy names one root); otherwise pass it. Memory scopes are required unless the policy pins one."
+            "instructions":"Repository retrieval and explicitly scoped agent memory. search_code defaults to lexical unless an embedding provider is configured and permitted, then hybrid. Explicit lexical never sends queries. Remote modes use only the user's saved provider and consent. repo_path is optional inside a Git repository or with one policy root. Memory scopes are required unless pinned; recall defaults to lexical."
         }),
     )
 }
 
 pub fn tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool(
             "index_repository",
-            "Incrementally index eligible local files in one repository. Returns partial/complete status and skip counts.",
+            "Incrementally index eligible files in one repository. With a configured, consented and permitted provider, also update embeddings (remote providers receive source chunks). Otherwise build the lexical index. Returns completeness, skip counts, and embedding status or an actionable embedding notice.",
             json!({"type":"object","properties":{"repo_path":{"type":"string"},"include_generated":{"type":"boolean"},"verify_hashes":{"type":"boolean"}}}),
         ),
         tool(
@@ -366,7 +381,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "search_code",
-            "Search exact paths, extracted symbols, whole lexical tokens, and identifier-boundary fragments. Arbitrary substrings inside a token are unsupported. Returns current-source evidence and packs snippets within a deterministic estimated-token budget.",
+            "Search code using lexical, semantic, or hybrid retrieval. Defaults to hybrid with a configured, permitted provider; otherwise lexical. Hybrid protects exact paths, symbols and literal phrases before RRF. Remote modes send only the query to the saved provider and require user consent. Never configures providers or uploads source files. Returns current-source evidence within an estimated-token budget.",
             json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192},"context_lines":{"type":"integer","minimum":1,"maximum":8,"description":"Snippet lines per result, starting at the matching line (default 3). Lines longer than 200 characters are cut around the match."}},"required":["query"]}),
         ),
         tool(
@@ -414,14 +429,23 @@ pub fn tools() -> Vec<Value> {
             "Immediately suppress one memory and remove it from the memory search index.",
             json!({"type":"object","properties":{"scope":{"type":"string"},"id":{"type":"integer"}},"required":["scope","id"]}),
         ),
-    ]
+    ];
+    for tool in &mut tools {
+        if matches!(tool["name"].as_str(), Some("search_code" | "recall")) {
+            tool["inputSchema"]["properties"]["mode"] = json!({
+                "type":"string", "enum":["lexical","semantic","hybrid"],
+                "description":"lexical never contacts a provider. search_code defaults to hybrid with a configured, permitted provider; recall defaults to lexical. Remote modes require saved user consent and cannot select a provider."
+            });
+        }
+    }
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    // Hints let clients skip confirmation for read-only tools. Everything here is local, so the
-    // tools never reach an open world; only `forget` removes data a user stored.
+    // Search may contact a configured provider. Hints describe capability, not authority;
+    // policy and saved consent are enforced before any remote request.
     let read_only = !WRITE_TOOLS.contains(&name);
-    let mut annotations = json!({"readOnlyHint":read_only,"openWorldHint":false});
+    let mut annotations = json!({"readOnlyHint":read_only,"openWorldHint":matches!(name, "index_repository" | "search_code" | "recall")});
     if !read_only {
         annotations["destructiveHint"] = json!(name == "forget");
         if matches!(name, "index_repository" | "refresh_indexed_file" | "forget") {
@@ -433,7 +457,8 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 
 fn call_tool(
     db_path: &Path,
-    memory_session: &mut Option<memory::MemorySession>,
+    policy: &Policy,
+    memory_session: &mut Option<Session>,
     params: &Value,
     cancellation: &AtomicBool,
 ) -> Result<Value> {
@@ -461,7 +486,33 @@ fn call_tool(
                 verify_hashes,
                 cancellation,
             )?;
-            Ok(serde_json::to_value(result)?)
+            let mut result = serde_json::to_value(result)?;
+            if !cancellation.load(std::sync::atomic::Ordering::Relaxed) {
+                let embedded = (|| -> Result<Option<crate::embed::EmbedReport>> {
+                    let Some(settings) = search::index_settings(&repo, policy)? else {
+                        return Ok(None);
+                    };
+                    let Some(mut embedder) = crate::ux::consented_embedder_for(&settings)? else {
+                        return Ok(None);
+                    };
+                    Ok(Some(crate::embed::embed_code(
+                        db_path,
+                        &repo,
+                        embedder.as_mut(),
+                        cancellation,
+                    )?))
+                })();
+                match embedded {
+                    Ok(Some(report)) => result["embedding"] = serde_json::to_value(report)?,
+                    Ok(None) => {}
+                    Err(error) => {
+                        result["embedding_notice"] = json!(format!(
+                            "{error:#}; lexical indexing succeeded; use `midnight index` to complete embeddings"
+                        ))
+                    }
+                }
+            }
+            Ok(result)
         }
         "refresh_indexed_file" => {
             let repo = path_arg(&args, "repo_path")?;
@@ -475,6 +526,33 @@ fn call_tool(
         }
         "search_code" => {
             let repo = path_arg(&args, "repo_path")?;
+            let (mode, settings) = search::resolve(&args, Some(&repo), policy, false)?;
+            if mode != crate::embed::SearchMode::Lexical {
+                let cache = memory_session
+                    .get_or_insert_with(Session::default)
+                    .search
+                    .clone();
+                let mut loader = search::loader(
+                    settings,
+                    policy.allow_remote_embeddings,
+                    cache,
+                    repo.to_string_lossy().into_owned(),
+                );
+                return Ok(serde_json::to_value(crate::embed::search_code(
+                    db_path,
+                    &repo,
+                    required_str(&args, "query")?,
+                    mode,
+                    args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
+                    args.get("token_budget")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(2048) as usize,
+                    args.get("context_lines")
+                        .and_then(Value::as_u64)
+                        .map_or(code::DEFAULT_CONTEXT_LINES, |n| n.min(64) as usize),
+                    &mut loader,
+                )?)?);
+            }
             let result = code::search_code_with_context(
                 db_path,
                 &repo,
@@ -548,19 +626,50 @@ fn call_tool(
             let result = ensure_memory_session(db_path, memory_session)?.remember_batch(&inputs)?;
             Ok(serde_json::to_value(result)?)
         }
-        "recall" => Ok(serde_json::to_value(
-            ensure_memory_session(db_path, memory_session)?.recall_with_policy(
-                required_str(&args, "scope")?,
-                required_str(&args, "query")?,
-                optional_str(&args, "at"),
-                args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
-                match optional_str(&args, "broad_terms") {
-                    None | Some("exact") => memory::BroadTermPolicy::Exact,
-                    Some("recent") => memory::BroadTermPolicy::Recent,
-                    Some(other) => bail!("broad_terms must be exact or recent, not {other:?}"),
-                },
-            )?,
-        )?),
+        "recall" => {
+            let (mode, settings) = search::resolve(&args, None, policy, true)?;
+            if mode != crate::embed::SearchMode::Lexical {
+                if optional_str(&args, "at").is_some()
+                    || args.get("broad_terms").is_some_and(|v| v != "exact")
+                {
+                    bail!(
+                        "semantic/hybrid recall requires current time and broad_terms=exact; use mode=lexical for historical or recent-window recall"
+                    );
+                }
+                let scope = required_str(&args, "scope")?;
+                let cache = memory_session
+                    .get_or_insert_with(Session::default)
+                    .search
+                    .clone();
+                let mut loader = search::loader(
+                    settings,
+                    policy.allow_remote_embeddings,
+                    cache,
+                    format!("memory:{scope}"),
+                );
+                return Ok(serde_json::to_value(crate::embed::search_memory(
+                    db_path,
+                    scope,
+                    required_str(&args, "query")?,
+                    mode,
+                    args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
+                    &mut loader,
+                )?)?);
+            }
+            Ok(serde_json::to_value(
+                ensure_memory_session(db_path, memory_session)?.recall_with_policy(
+                    required_str(&args, "scope")?,
+                    required_str(&args, "query")?,
+                    optional_str(&args, "at"),
+                    args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
+                    match optional_str(&args, "broad_terms") {
+                        None | Some("exact") => memory::BroadTermPolicy::Exact,
+                        Some("recent") => memory::BroadTermPolicy::Recent,
+                        Some(other) => bail!("broad_terms must be exact or recent, not {other:?}"),
+                    },
+                )?,
+            )?)
+        }
         "list_memories" => Ok(serde_json::to_value(
             ensure_memory_session(db_path, memory_session)?.list_memories(
                 required_str(&args, "scope")?,
@@ -578,12 +687,14 @@ fn call_tool(
 
 fn ensure_memory_session<'a>(
     db_path: &Path,
-    session: &'a mut Option<memory::MemorySession>,
+    session: &'a mut Option<Session>,
 ) -> Result<&'a mut memory::MemorySession> {
-    if session.is_none() {
-        *session = Some(memory::MemorySession::open(db_path)?);
+    let session = session.get_or_insert_with(Session::default);
+    if session.memory.is_none() {
+        session.memory = Some(memory::MemorySession::open(db_path)?);
     }
     session
+        .memory
         .as_mut()
         .context("memory database session failed to initialize")
 }
@@ -678,7 +789,11 @@ mod tests {
         for tool in super::tools() {
             let name = tool["name"].as_str().unwrap();
             let hints = &tool["annotations"];
-            assert_eq!(hints["openWorldHint"], false, "{name}");
+            assert_eq!(
+                hints["openWorldHint"],
+                matches!(name, "index_repository" | "search_code" | "recall"),
+                "{name}"
+            );
             let writes = super::WRITE_TOOLS.contains(&name);
             assert_eq!(hints["readOnlyHint"], !writes, "{name}");
             assert_eq!(hints["destructiveHint"] == true, name == "forget", "{name}");

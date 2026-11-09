@@ -273,6 +273,7 @@ pub struct CloudEmbedder {
     secret: String,
     concurrency: usize,
     retry_backoff: std::time::Duration,
+    max_retries: usize,
 }
 
 impl CloudEmbedder {
@@ -350,11 +351,19 @@ impl CloudEmbedder {
             secret: api_key,
             concurrency,
             retry_backoff: std::time::Duration::from_millis(1000),
+            max_retries: REMOTE_RETRIES,
         })
     }
 
     pub fn config(&self) -> &CloudConfig {
         &self.config
+    }
+
+    /// Interactive MCP queries fall back to lexical after one failed attempt. Bulk embedding
+    /// retains its bounded retry policy; a transient outage must not stall an agent's tool loop.
+    pub(crate) fn without_retries(mut self) -> Self {
+        self.max_retries = 0;
+        self
     }
 
     fn request(&self, batch: &[String]) -> EmbeddingsRequest {
@@ -398,7 +407,7 @@ impl CloudEmbedder {
                     if hint.rate_limited {
                         gate.on_rate_limit();
                     }
-                    if !hint.retryable || attempt >= REMOTE_RETRIES {
+                    if !hint.retryable || attempt >= self.max_retries {
                         return Err(e);
                     }
                     attempt += 1;

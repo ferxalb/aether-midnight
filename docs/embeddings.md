@@ -1,7 +1,7 @@
 # Embeddings and hybrid retrieval (v0.1 Phases 2–3)
 
 Midnight can add semantic retrieval on top of its existing FTS5/BM25 search. It is **opt-in and
-never required**: every lexical command behaves exactly as before and never loads a model, the ONNX
+never required**: lexical commands never load a model, the ONNX
 Runtime, or a network client. Embeddings come from the local model (default) or, only when you
 select it explicitly, a cloud provider (see [Cloud providers](#cloud-providers)).
 
@@ -53,8 +53,10 @@ aether-midnight memory search --namespace project:app "disk cache" --mode hybrid
 aether-midnight search "where do we validate passwords" --mode hybrid --repo .
 ```
 
-`--mode` defaults to `lexical`, which keeps the legacy output byte-for-byte (a bare array for
-`memory search`, the original object for `search`). `semantic` and `hybrid` return the same result
+`memory search` defaults to `lexical`. Code `search` and MCP stdio `search_code` default to
+`hybrid` with a saved provider and otherwise `lexical`; HTTP also checks token permissions.
+Lexical keeps the bare memory array or code response shape. Code literal-phrase ordering has
+changed in rc.6; see [the ranking contract](hybrid-mcp.md). `semantic` and `hybrid` return result
 objects wrapped with status fields:
 
 ```json
@@ -102,7 +104,12 @@ owners and for any other model/revision, and skips unchanged items by hash.
   and semantic top-50 (code: best chunk per file, top 20). Equal scores order by ascending id/path,
   so output is deterministic. `match_reason` records `hybrid:lexical#r+semantic#r(cos …)`.
 * **Freshness**: a semantic code hit is returned only if the file still hashes to the indexed value.
-* Lexical retrieval code, candidate generation and ranking are unchanged.
+* **Code literal evidence (v0.1.0-rc.6)**: a separate bounded phrase lookup adds
+  verified current-source literal candidates to lexical retrieval. Hybrid orders fresh exact
+  paths/symbols, then literal phrases, then other candidates; each class uses RRF/path ordering.
+  Code reports `literal-priority+rrf(k=60)` and protected `evidence_class` metadata. Numeric RRF
+  scores are not globally descending across classes. Memory lexical ranking and RRF are unchanged.
+  [MCP modes, consent and the connection-local query cache](hybrid-mcp.md) describe the full contract.
 
 ## ONNX Runtime
 
@@ -138,9 +145,12 @@ not been run there, so `runtime install` does not offer them and no support is c
 
 ## Cloud providers
 
-Local embeddings stay the default. Selecting `--provider openrouter` or `--provider rainy` on
+Unconfigured retrieval stays lexical; explicit embedding commands default to the local model.
+Selecting `--provider openrouter` or `--provider rainy` on
 `embed` or on a `--mode semantic|hybrid` search sends the text being embedded (memories, code chunks
-of the named repository, or the search query) to that provider. Nothing is sent otherwise: lexical
+of the named repository, or the search query) to that provider. Saved setup preferences can also
+select that provider for CLI/MCP searches and indexing, with upload consent and MCP policy checks.
+Lexical
 modes never touch a provider, the provider is never inferred from the environment, and a missing
 credential is an error instead of a fallback to another provider or model.
 

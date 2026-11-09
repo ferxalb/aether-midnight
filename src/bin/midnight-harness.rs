@@ -348,7 +348,7 @@ fn license_inventory(output: &Path, force: bool) -> Result<Value> {
 }
 
 // ---------- memory-quality oracle (persistent MCP) ----------
-fn fixture_records(fx: &Value, reverse: bool) -> Vec<Value> {
+fn fixture_records(fx: &Value, reverse: bool) -> Result<Vec<Value>> {
     let mut recs: Vec<Value> = fx["records"].as_array().cloned().unwrap_or_default();
     if let Some(bg) = fx.get("background_collection").filter(|v| v.is_object()) {
         for i in 0..bg["count"].as_u64().unwrap() {
@@ -384,7 +384,58 @@ fn fixture_records(fx: &Value, reverse: bool) -> Vec<Value> {
     if reverse {
         recs.reverse();
     }
-    recs
+    order_fixture_dependencies(recs)
+}
+
+/// Respect source/supersession foreign keys while retaining the requested order among ready
+/// records. A raw reverse is not insertable when a derived record depends on an earlier source.
+fn order_fixture_dependencies(records: Vec<Value>) -> Result<Vec<Value>> {
+    let mut by_key = HashMap::new();
+    for (index, record) in records.iter().enumerate() {
+        let key = record["key"]
+            .as_str()
+            .context("fixture record needs a string key")?;
+        if by_key.insert(key, index).is_some() {
+            bail!("duplicate fixture record key {key:?}");
+        }
+    }
+    let mut pending = vec![0usize; records.len()];
+    let mut dependents = vec![Vec::new(); records.len()];
+    for (index, record) in records.iter().enumerate() {
+        for field in ["source_key", "supersedes_key"] {
+            if let Some(key) = record.get(field).and_then(Value::as_str) {
+                let parent = *by_key
+                    .get(key)
+                    .with_context(|| format!("fixture {field} refers to missing key {key:?}"))?;
+                pending[index] += 1;
+                dependents[parent].push(index);
+            }
+        }
+    }
+    let mut ready: BTreeSet<usize> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (*n == 0).then_some(i))
+        .collect();
+    let mut order = Vec::with_capacity(records.len());
+    while let Some(index) = ready.pop_first() {
+        order.push(index);
+        for child in &dependents[index] {
+            pending[*child] -= 1;
+            if pending[*child] == 0 {
+                ready.insert(*child);
+            }
+        }
+    }
+    if order.len() != records.len() {
+        bail!("fixture source/supersession dependencies contain a cycle");
+    }
+    drop(by_key);
+    let mut records: Vec<Option<Value>> = records.into_iter().map(Some).collect();
+    Ok(order
+        .into_iter()
+        .map(|i| records[i].take().expect("each index is emitted once"))
+        .collect())
 }
 
 fn valid_at(m: &Value, at: Option<&str>) -> bool {
@@ -402,6 +453,7 @@ fn memory_quality(
     db: &Path,
 ) -> Result<Value> {
     let fx = read_json(fixture)?;
+    let records = fixture_records(&fx, reverse)?;
     let queries: Vec<&Value> = fx["queries"]
         .as_array()
         .unwrap()
@@ -414,7 +466,7 @@ fn memory_quality(
         HashMap::<String, String>::new(),
     );
     let mut remember_ms = vec![];
-    for r in fixture_records(&fx, reverse) {
+    for r in records {
         let mut args = serde_json::Map::new();
         for k in [
             "scope",
@@ -748,4 +800,39 @@ fn main() -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    #[test]
+    fn reverse_fixture_keeps_sources_and_superseded_records_before_dependents() {
+        let fixture = json!({"records":[
+            {"key":"source"},
+            {"key":"old","source_key":"source"},
+            {"key":"new","source_key":"source","supersedes_key":"old"},
+            {"key":"independent"}
+        ]});
+        let forward = fixture_records(&fixture, false).unwrap();
+        let reverse = fixture_records(&fixture, true).unwrap();
+        let keys = |rs: &[Value]| {
+            rs.iter()
+                .map(|r| r["key"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&forward), ["source", "old", "new", "independent"]);
+        assert_eq!(keys(&reverse), ["independent", "source", "old", "new"]);
+    }
+
+    #[test]
+    fn invalid_fixture_dependencies_return_errors_before_starting_midnight() {
+        for records in [
+            json!([{"key":"a","source_key":"missing"}]),
+            json!([{"key":"a","source_key":"b"},{"key":"b","source_key":"a"}]),
+            json!([{"key":"a"},{"key":"a"}]),
+        ] {
+            assert!(order_fixture_dependencies(records.as_array().unwrap().clone()).is_err());
+        }
+    }
 }

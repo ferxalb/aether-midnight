@@ -5,6 +5,13 @@ use std::process::{Child, Command, Stdio};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+fn db_config_isolation() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "midnight-mcp-test-no-config-{}",
+        std::process::id()
+    ))
+}
+
 struct Server {
     child: Child,
     port: u16,
@@ -19,6 +26,7 @@ impl Drop for Server {
 
 fn start(db: &std::path::Path, extra: &[&str]) -> Server {
     let mut child = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(db)
         .arg("serve-http")
@@ -44,6 +52,7 @@ fn start(db: &std::path::Path, extra: &[&str]) -> Server {
 
 fn mint(db: &std::path::Path, name: &str, extra: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(db)
         .args(["token", "create", "--name", name])
@@ -216,6 +225,7 @@ fn http_rejects_unauthenticated_invalid_revoked_and_expired_tokens() {
     // The good token works, then revocation bites on the very next request.
     assert!(!call(&server, &token, "list_memories", json!({})).0);
     let status = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(&db)
         .args(["token", "revoke", "victim"])
@@ -311,6 +321,7 @@ fn secret_for(scope: &str) -> Value {
 fn http_refuses_non_loopback_bind() {
     let temp = TempDir::new().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+        .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(temp.path().join("m.sqlite3"))
         .args(["serve-http", "--bind", "0.0.0.0:0"])
@@ -325,6 +336,7 @@ fn token_creation_requires_explicit_scope_and_roots() {
     let db = temp.path().join("m.sqlite3");
     for extra in [vec![], vec!["--tools", "search_code", "--all-scopes"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_aether-midnight"))
+            .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
             .arg("--db")
             .arg(&db)
             .args(["token", "create", "--name", "x"])
