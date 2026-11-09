@@ -9,12 +9,14 @@ candidate workflow does not automatically authorize or establish stable readines
 | Literal-evidence ranking, frozen code/memory quality and paired diagnostics | PASS — deliberate code-order changes and slower cases documented in the evidence |
 | Automated implementation checks | PASS — 210 tests, zero failures, three ignored; strict Clippy, formatting and release build |
 | rc.6 version/installer/archive/notes consistency | PASS — manifest, lockfile, installer pin and workflow notes agree; `cargo check --locked` and installer shell syntax pass |
-| Tagged rc.6 workflow, Universal 2 archive and published checksums | PENDING — not established by local source validation |
-| Install and update from the published rc.6 assets | PENDING |
-| Real MCP clients against the published rc.6 artifact | PENDING — record client/version and results privately; publish only reviewed aggregate conclusions |
-| Runtime checks for every architecture claimed as supported | PENDING — packaging is not runtime validation |
-| Signing/notarization and clean-machine installation expectations | OPEN — unsigned distribution remains documented; resolve the stable distribution decision explicitly |
-| Live Rainy provider, if claimed as validated for stable | PENDING |
+| Tagged rc.6 workflow, Universal 2 archive and published checksums | PASS — published workflow succeeded, archive checksum verified, installed binary matches the asset; [real-repository report](rc6-real-repo-validation.md) |
+| Install and update from the published rc.6 assets | PASS in isolated prefixes — repeat installation and negative checks passed; real rc.5 → rc.6 update succeeded after an initial HTTP 504; clean-machine quarantine test remains open |
+| Real MCP clients against the published rc.6 artifact | PARTIAL — real Claude Code/Codex CLI calls completed; repeated remote fallbacks and unconfirmed live HTTP hybrid remain open; Desktop GUI access was blocked |
+| Runtime checks for every architecture claimed as supported | PARTIAL — native x86_64 real-repository and bounded 100k diagnostics passed; arm64 runtime not tested |
+| Signing/notarization and clean-machine installation expectations | OPEN — ad-hoc verification passes, but no Developer ID/notarization and Gatekeeper rejects the artifact; clean-machine quarantined download not tested |
+| Live Rainy provider, if claimed as validated for stable | PENDING — no Rainy credential available for this campaign |
+| Real-repository structural extraction | PARTIAL — valid Rust cfg-attributed pattern in src/main.rs triggers the grammar's error flag; lexical completeness is preserved |
+| Default cloud hybrid availability | OPEN — 10 of 17 authorized full-coverage remote-mode probe calls degraded with generic network/timeout notices; not a production failure-rate estimate |
 
 Do not promote rc.6 automatically: review these gates and [platform support](platforms.md), then
 record the stable decision. No tag or release is created by editing this checklist.

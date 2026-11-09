@@ -2,6 +2,14 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-09 (1) — Validate the published rc.6 on the real repository
+
+- Verified the published workflow, archive checksum and byte identity of the installed binary. Isolated install, repeat install and negative checksum/HTTP cases passed; a real rc.5 → rc.6 update passed on retry after HTTP 504. Ad-hoc signature verification succeeds, but Developer ID/notarization are absent and Gatekeeper rejects the artifact. No security setting was bypassed.
+- Indexed the repository through the installed release. A transport failure preserved partial embeddings; a resumed invocation completed coverage for 105 files and 2032 vectors, and an unchanged invocation reused all vectors. Integrity passed and private campaign files were not indexed. A real long-file literal ranked first in lexical and hybrid. Valid cfg-attributed Rust patterns in src/main.rs still trigger Tree-sitter errors, independently of the cooperative time budget; structural completeness remains false while lexical completeness is true.
+- Real Claude Code and Codex CLI traces confirm MCP calls and successful lexical/semantic retrieval; Claude also completed hybrid. The full-coverage remote-mode probes included 10 degraded lexical fallbacks in 17 requests. The notice groups network failures and timeouts, so neither provider blame nor a timeout-only diagnosis is established. Successful live HTTP hybrid and a successful hybrid call in the final Codex mode probe were not established. Desktop GUI access could not start, arm64 was not exercised and Rainy credentials were unavailable.
+- Installed-binary frozen code results and memory-v2 quality exactly match the validated implementation. Native 100k diagnostics completed; the memory workload found all 50 labeled records at rank one and passed 150 namespace-isolation checks without leaks. No new latency or universal-relevance claim is made.
+- Reviewed evidence: `docs/rc6-real-repo-validation.md`; current gate states: `docs/release-checklist.md`. Raw client traces, versions, provider responses, downloads and diagnostics remain ignored and private. No runtime code, production database, permanent client configuration, version, tag or publication was changed.
+
 ## 2026-11-08 (23) — Prepare v0.1.0-rc.6 for the final candidate review
 
 - Align `Cargo.toml`, `Cargo.lock`, the pinned installer, current install examples and release instructions on `0.1.0-rc.6`. Add `docs/release-notes/v0.1.0-rc.6.md` for the tag workflow and label the MCP/ranking contract as rc.6. Historical rc.5 notes and tracker entries remain unchanged.

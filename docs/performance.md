@@ -1,5 +1,9 @@
 # Performance contract and benchmark results
 
+> **Published rc.6 validation:** [the real-repository campaign](rc6-real-repo-validation.md)
+> confirms the installed artifact, unchanged lexical fixtures and bounded native 100k diagnostics.
+> It records remote-mode fallbacks and open distribution/platform gates; it makes no new latency
+> improvement claim.
 > **v0.1.0-rc.6:** [hybrid/MCP validation](hybrid-mcp-validation.md) records paired
 > release-binary checks for literal evidence, frozen code/memory quality, all eight production
 > memory diagnostic classes, 1k/10k memory operations and a separately seeded MCP measurement.
