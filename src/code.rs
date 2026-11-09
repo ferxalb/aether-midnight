@@ -3258,3 +3258,23 @@ mod index_lock_tests {
         assert!(acquire_index_lock(&database, &scope).is_ok());
     }
 }
+
+#[cfg(test)]
+mod tmp_diag {
+    use super::ParserCache;
+    use std::time::{Duration, Instant};
+    #[test]
+    #[ignore]
+    fn tmp_diag_parse() {
+        let path = std::env::var("DIAG_FILE").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (label, t) in [("original", text.clone()), ("no_amp", text.replace(" & ", " and "))] {
+            let mut cache = ParserCache::default();
+            let s = Instant::now();
+            let (syms, err) = cache
+                .extract_with_budget(Some("tsx"), &t, Duration::from_secs(30), &std::sync::atomic::AtomicBool::new(false))
+                .unwrap();
+            eprintln!("DIAG {label}: elapsed={:?} parse_error={err} symbols={}", s.elapsed(), syms.len());
+        }
+    }
+}
