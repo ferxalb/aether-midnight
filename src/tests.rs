@@ -1663,3 +1663,36 @@ fn journal_mode_contention_diagnostic() {
         println!("journal_setter={setter} calls=4000 errors={errors:?}");
     }
 }
+
+#[test]
+fn rare_token_file_outranks_saturated_common_word_matches_regardless_of_path() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("rank.sqlite3");
+    let repo = new_repo(&temp, "rank-repo");
+    // Each common word appears in a minority of files, so their BM25 is far above the point
+    // where the bounded lexical score saturates; the path must not decide the order.
+    for i in 0..120 {
+        let mut body = String::from("pub fn filler() {}\n");
+        if i % 5 == 0 {
+            body.push_str("// unique unique unique\n");
+        }
+        if i % 4 == 0 {
+            body.push_str("// marker marker\n");
+        }
+        if i % 6 == 0 {
+            body.push_str("// alpha alpha alpha alpha\n");
+        }
+        fs::write(repo.join("src").join(format!("f{i:03}.rs")), body).unwrap();
+    }
+    fs::write(
+        repo.join("src/z_target.rs"),
+        "// zxqv-unique-marker-alpha\npub fn t() {}\n",
+    )
+    .unwrap();
+    run_index(&database, &repo);
+    for limit in [1, 5, 10] {
+        let results =
+            code::search_code(&database, &repo, "zxqv-unique-marker-alpha", limit).unwrap();
+        assert_eq!(results[0].path, "src/z_target.rs", "limit {limit}");
+    }
+}

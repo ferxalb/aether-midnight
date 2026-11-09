@@ -1968,6 +1968,9 @@ struct Candidate {
     exact_path: f64,
     exact_symbol: f64,
     lexical: f64,
+    /// Raw FTS5 BM25 (negative; lower is better, 0.0 when there was no text match). The
+    /// `lexical` score saturates at 50, so this breaks ties before the path does.
+    bm25: f64,
 }
 
 fn indexed_candidates(
@@ -2119,13 +2122,16 @@ fn indexed_candidates(
                 ..Default::default()
             });
             candidate.lexical = lexical;
+            candidate.bm25 = hit.rank;
         }
     }
     let mut candidates = map.into_values().collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
         let sa = a.exact_path + a.exact_symbol + a.lexical;
         let sb = b.exact_path + b.exact_symbol + b.lexical;
-        sb.total_cmp(&sa).then_with(|| a.path.cmp(&b.path))
+        sb.total_cmp(&sa)
+            .then_with(|| a.bm25.total_cmp(&b.bm25))
+            .then_with(|| a.path.cmp(&b.path))
     });
     candidates.truncate(limit);
     Ok(candidates)

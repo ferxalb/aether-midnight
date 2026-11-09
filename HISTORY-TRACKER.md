@@ -2,6 +2,13 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (18) — Code search: ties on the saturated lexical score are broken by BM25, not by path
+
+- **Cause of open finding 1 (entry 16):** `lexical_fts` is `25 + clamp(-bm25*1e6, 0, 25)`, capped at 50, so any text match above roughly 2.5e-5 BM25 scores 50, and `indexed_candidates` then ordered equal scores by path. Minimal reproduction (120 files, each common word in a minority of files, one `z_target.rs` with `zxqv-unique-marker-alpha`): raw SQLite BM25 ranks the target first (-6.99 against -4.67), `search_code` returned it 10th at limit 10 and 5th at limit 5. With the common words in over half of the files (BM25 near 1e-6) it was already first, so the symptom depends on the corpus.
+- **Change:** equal scores are now ordered by the raw BM25 carried in the candidate, then by path. No field, score value or schema changes; the saturated score itself is untouched. Documented in `docs/api.md`. Regression test `rare_token_file_outranks_saturated_common_word_matches_regardless_of_path`.
+- **Paired measurement** (`midnight-harness retrieval-quality`, release binaries built from the same tree before and after, same host, `nice -n 19`): MRR 1.0 and recall@5 1.0 before and after for both strategies (`unicode61`, `identifier_decomposition`); first-relevant rank and the ranks of all relevant files identical on all 46 positive queries per strategy. The top-5 order changed on 41 of 102 query runs, always among files with equal relevance. That fixture has four files and an MRR of 1.0, so it cannot show the improvement; the improvement is evidenced only by the reproduction above. No latency claim is made. `src/retrieval_tests.rs` (memory) passes; memory retrieval was not touched, so `bench-memory`/`bench-retrieval` were not re-run.
+- **Not verified / open:** the real project from entry 16 was not re-measured; `hybrid` and `semantic` modes were not diagnosed (RRF consumes the lexical order, so it may be affected or have its own cause); exact-phrase queries are still an OR of terms with no phrase class.
+
 ## 2026-11-08 (17) — A file that fails to parse no longer makes the index `complete:false`
 
 - **Diagnosis (open finding 3 of entry 16):** on the real file (`Products.tsx`, 2.2 KB, TSX) the parse takes about 1.2 ms in a debug build, far below the 250 ms budget, and reports an error; replacing the bare `&` in its JSX text (`Products & Research`) with `and` removes the error. It is a grammar limitation on valid TSX, not the time budget. The parse-error flag does not distinguish the two causes.
