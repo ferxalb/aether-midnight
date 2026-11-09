@@ -26,6 +26,7 @@ pub(crate) const MAX_TOKEN_BUDGET: usize = 8192;
 const MAX_SEARCH_QUERY_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_AETHERIGNORE_BYTES: u64 = MAX_FILE_BYTES;
+const MAX_PARSE_ERROR_PATHS: usize = 20;
 const PARSER_TIME_BUDGET: Duration = Duration::from_millis(250);
 const MAX_INDEX_WORKERS: usize = 12;
 const MAX_PIPELINE_BYTES: usize = 8 * 1024 * 1024;
@@ -93,6 +94,11 @@ pub struct IndexStatus {
     pub complete: bool,
     pub catalog_complete: bool,
     pub structural_complete: bool,
+    /// Indexed files whose Tree-sitter parse failed (syntax error or time budget). They stay
+    /// searchable by text; only their structural symbols are affected.
+    pub parse_error_files: u64,
+    /// At most `MAX_PARSE_ERROR_PATHS` of those paths, sorted.
+    pub parse_error_paths: Vec<String>,
     pub eligible_files: u64,
     pub eligible_bytes: u64,
     pub indexed_files: u64,
@@ -1210,7 +1216,7 @@ fn index_scoped(
     Ok(report(
         scope,
         generation,
-        writer.structural_complete,
+        true,
         true,
         false,
         writer.structural_complete,
@@ -1839,6 +1845,8 @@ pub fn index_status(db_path: &Path, root: &Path) -> Result<IndexStatus> {
             complete: false,
             catalog_complete: false,
             structural_complete: false,
+            parse_error_files: 0,
+            parse_error_paths: Vec::new(),
             eligible_files: 0,
             eligible_bytes: 0,
             indexed_files: 0,
@@ -1854,6 +1862,25 @@ pub fn index_status(db_path: &Path, root: &Path) -> Result<IndexStatus> {
         params![scope.repo_id, scope.worktree_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let parse_error_files: u64 = conn.query_row(
+        "SELECT count(*) FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND parse_error=1",
+        params![scope.repo_id, scope.worktree_id],
+        |row| row.get::<_, i64>(0).map(|n| n as u64),
+    )?;
+    let parse_error_paths = conn
+        .prepare(
+            "SELECT rel_path FROM code_files WHERE repo_id=?1 AND worktree_id=?2 AND parse_error=1
+             ORDER BY rel_path LIMIT ?3",
+        )?
+        .query_map(
+            params![
+                scope.repo_id,
+                scope.worktree_id,
+                MAX_PARSE_ERROR_PATHS as i64
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(IndexStatus {
         repo_id: scope.repo_id,
         worktree_id: scope.worktree_id,
@@ -1861,9 +1888,11 @@ pub fn index_status(db_path: &Path, root: &Path) -> Result<IndexStatus> {
         branch,
         revision,
         generation: generation as u64,
-        complete: catalog_complete != 0 && structural_complete != 0,
+        complete: catalog_complete != 0,
         catalog_complete: catalog_complete != 0,
         structural_complete: structural_complete != 0,
+        parse_error_files,
+        parse_error_paths,
         eligible_files: eligible_files as u64,
         eligible_bytes: eligible_bytes as u64,
         indexed_files: indexed_files as u64,
@@ -1908,7 +1937,7 @@ pub fn search_code_with_budget(
         )
         .optional()?;
     let (generation, complete) = status
-        .map(|(g, catalog, structural)| (g as u64, catalog != 0 && structural != 0))
+        .map(|(g, catalog, _structural)| (g as u64, catalog != 0))
         .unwrap_or((0, false));
     let candidates = indexed_candidates(&conn, &scope, query, limit)?;
     let mut results = make_results(&scope, query, candidates, complete, limit)?;
@@ -2479,7 +2508,7 @@ pub fn open_range(
     };
     let (generation, complete) = indexed
         .as_ref()
-        .map(|r| (r.2 as u64, r.3 != 0 && r.4 != 0))
+        .map(|r| (r.2 as u64, r.3 != 0))
         .unwrap_or((0, false));
     let count = text.lines().count().max(1) as u32;
     if start > count {
@@ -3256,25 +3285,5 @@ mod index_lock_tests {
         assert!(acquire_index_lock(&database, &scope).is_err());
         drop(next);
         assert!(acquire_index_lock(&database, &scope).is_ok());
-    }
-}
-
-#[cfg(test)]
-mod tmp_diag {
-    use super::ParserCache;
-    use std::time::{Duration, Instant};
-    #[test]
-    #[ignore]
-    fn tmp_diag_parse() {
-        let path = std::env::var("DIAG_FILE").unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        for (label, t) in [("original", text.clone()), ("no_amp", text.replace(" & ", " and "))] {
-            let mut cache = ParserCache::default();
-            let s = Instant::now();
-            let (syms, err) = cache
-                .extract_with_budget(Some("tsx"), &t, Duration::from_secs(30), &std::sync::atomic::AtomicBool::new(false))
-                .unwrap();
-            eprintln!("DIAG {label}: elapsed={:?} parse_error={err} symbols={}", s.elapsed(), syms.len());
-        }
     }
 }

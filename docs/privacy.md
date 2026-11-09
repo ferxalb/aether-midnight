@@ -40,7 +40,7 @@ Code and memories have separate tables, APIs, and indexes. Code queries require 
 
 ## Operational limits
 
-Midnight uses a bounded per-index worker pool and one SQLite writer, with no live filesystem watcher. Each Tree-sitter parse has a 250 ms cooperative budget; a parse that reaches the budget keeps lexical retrieval available but marks structural indexing incomplete. The progress callback also checks cancellation. A canceled index stops dispatch, releases queued buffers, joins workers, stays marked partial, and can be recovered by the next index run. Incomplete indexes can be read by a separate process while indexing continues, with results marked partial. MCP requests in one process are serialized. Search contexts use a deterministic token estimate rather than a model tokenizer. See [performance](performance.md) for measured memory limits and unverified allocator/mmap values.
+Midnight uses a bounded per-index worker pool and one SQLite writer, with no live filesystem watcher. Each Tree-sitter parse has a 250 ms cooperative budget; a parse that reaches the budget keeps lexical retrieval available but marks structural indexing incomplete (`structural_complete=false`; `complete` is unaffected). The progress callback also checks cancellation. A canceled index stops dispatch, releases queued buffers, joins workers, stays marked partial, and can be recovered by the next index run. Incomplete indexes can be read by a separate process while indexing continues, with results marked partial. MCP requests in one process are serialized. Search contexts use a deterministic token estimate rather than a model tokenizer. See [performance](performance.md) for measured memory limits and unverified allocator/mmap values.
 
 ## Published benchmark evidence
 

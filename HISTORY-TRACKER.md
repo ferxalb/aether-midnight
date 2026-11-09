@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (17) — A file that fails to parse no longer makes the index `complete:false`
+
+- **Diagnosis (open finding 3 of entry 16):** on the real file (`Products.tsx`, 2.2 KB, TSX) the parse takes about 1.2 ms in a debug build, far below the 250 ms budget, and reports an error; replacing the bare `&` in its JSX text (`Products & Research`) with `and` removes the error. It is a grammar limitation on valid TSX, not the time budget. The parse-error flag does not distinguish the two causes.
+- **Contract change (documented in `docs/api.md`):** `complete` (reports and `index_status`) and `index_complete` (`search_code`, `open_range`, hybrid fusion) now mean catalog plus lexical index complete. `structural_complete` stays separate; `index_status` adds `parse_error_files` and `parse_error_paths` (at most 20). `list_symbols` and `repo_map` keep requiring structural completeness. Additive fields, no schema change (still 7, opens with rc.4); clients that read `complete:false` as "a parse error exists" must read `structural_complete`.
+- **Tests:** replaced `structural_parse_errors_keep_every_index_surface_marked_incomplete` with `parse_errors_keep_catalog_complete_and_flag_structural_separately` (text search finds the broken file, `list_symbols` invents nothing, fixing the file clears the flag) and adjusted the assertion in `discovery_honors_ignores_security_limits_and_safe_override`. No retrieval ranking changed, so the frozen suites were not re-run.
+
 ## 2026-11-08 (16) — v0.1.0-rc.4 published automatically; validated on the installed release
 
 - The `v0.1.0-rc.4` tag push ran the workflow and its new `release` job created the prerelease with the archive, `.sha256` and `install.sh`. Verified against the public URLs: checksums, the installed `~/.local/bin/aether-midnight` is byte-identical to the published binary (SHA-256 prefix `98fe9e4483a5ff2c`), universal (`x86_64 arm64`), the README command run with an isolated `HOME` installs, links `midnight`, reports `0.1.0-rc.4` and re-runs idempotently, `update --check` reports up to date.

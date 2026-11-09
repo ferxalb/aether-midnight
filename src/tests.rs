@@ -760,39 +760,60 @@ fn indexed_identifier_subwords_match_camel_case_fragments() {
 }
 
 #[test]
-fn structural_parse_errors_keep_every_index_surface_marked_incomplete() {
+fn parse_errors_keep_catalog_complete_and_flag_structural_separately() {
     let temp = TempDir::new().unwrap();
     let database = temp.path().join("parse-error.sqlite3");
     let repo = new_repo(&temp, "malformed-repo");
+    fs::write(repo.join("src/good.rs"), "pub fn good_symbol() {}\n").unwrap();
     fs::write(
         repo.join("src/broken.rs"),
-        "pub fn broken_symbol() { let = ; }\n",
+        "pub fn broken_symbol() { let = ; }\n// BROKEN_TEXT_MARKER lives only in a comment\n",
     )
     .unwrap();
 
     let report = run_index(&database, &repo);
-    assert!(!report.complete);
+    assert!(report.complete);
     assert!(report.catalog_complete);
     assert!(!report.structural_complete);
-    assert!(!code::index_status(&database, &repo).unwrap().complete);
-    assert!(!code::repo_map(&database, &repo).unwrap().complete);
+    assert_eq!(report.skipped.get("tree_sitter_parse_error"), Some(&1));
+
+    let status = code::index_status(&database, &repo).unwrap();
+    assert!(status.complete);
+    assert!(status.catalog_complete);
+    assert!(!status.structural_complete);
+    assert_eq!(status.parse_error_files, 1);
+    assert_eq!(status.parse_error_paths, vec!["src/broken.rs".to_string()]);
+
+    // Text retrieval over the file with the parse error stays complete.
+    let found = code::search_code(&database, &repo, "BROKEN_TEXT_MARKER", 5).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, "src/broken.rs");
+    assert!(found[0].index_complete);
     assert!(
-        code::search_code(&database, &repo, "broken_symbol", 5)
-            .unwrap()
-            .iter()
-            .all(|result| !result.index_complete)
-    );
-    assert!(
-        code::list_symbols(&database, &repo, Some("broken_symbol"), 5)
-            .unwrap()
-            .iter()
-            .all(|result| result["index_complete"] == false)
-    );
-    assert!(
-        !code::open_range(&database, &repo, "src/broken.rs", 1, 1)
+        code::open_range(&database, &repo, "src/broken.rs", 1, 1)
             .unwrap()
             .index_complete
     );
+
+    // Symbol surfaces keep reporting that structural data is partial.
+    assert!(!code::repo_map(&database, &repo).unwrap().complete);
+    let good = code::list_symbols(&database, &repo, Some("good_symbol"), 5).unwrap();
+    assert_eq!(good.len(), 1);
+    assert_eq!(good[0]["index_complete"], false);
+    // No symbol is invented for text that is not a declaration.
+    assert!(
+        code::list_symbols(&database, &repo, Some("BROKEN_TEXT_MARKER"), 5)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Fixing the file clears the flag on the next index.
+    fs::write(repo.join("src/broken.rs"), "pub fn fixed_symbol() {}\n").unwrap();
+    let fixed = run_index(&database, &repo);
+    assert!(fixed.complete && fixed.structural_complete);
+    let status = code::index_status(&database, &repo).unwrap();
+    assert_eq!(status.parse_error_files, 0);
+    assert!(status.parse_error_paths.is_empty());
 }
 
 #[test]
@@ -857,7 +878,7 @@ fn discovery_honors_ignores_security_limits_and_safe_override() {
     let report = run_index(&database, &repo);
     assert!(report.catalog_complete);
     assert!(!report.structural_complete);
-    assert!(!report.complete);
+    assert!(report.complete);
     assert!(
         report
             .skipped

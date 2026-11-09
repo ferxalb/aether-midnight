@@ -1343,9 +1343,9 @@ pub fn search_code(
     meta.mode_used = mode;
     let (_generation, complete): (u64, bool) = conn
         .query_row(
-            "SELECT generation,is_complete,structural_complete FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
+            "SELECT generation,is_complete FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
             params![scope.repo_id, scope.worktree_id],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? != 0 && r.get::<_, i64>(2)? != 0)),
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? != 0)),
         )
         .unwrap_or((0, false));
     let scope_label = format!("repo:{}:worktree:{}", scope.repo_id, scope.worktree_id);
