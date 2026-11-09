@@ -65,7 +65,7 @@ objects wrapped with status fields:
 ```
 
 For code, the original `CodeSearchResponse` fields (`results`, `token_budget`, …) are flattened beside
-these. Each result keeps its source path, line range, snippet, freshness and scope.
+these. Each result keeps its source path, line range, snippet and freshness; the scope is stated once on the response.
 
 ### Degraded behaviour
 

@@ -473,7 +473,17 @@ fn write(root: &Path, rel: &str, text: &str) {
 }
 
 fn code_search(db: &Path, root: &Path, query: &str, mode: SearchMode) -> CodeHybridResponse {
-    search_code(db, root, query, mode, 10, 4096, &mut hash_loader("r1")).unwrap()
+    search_code(
+        db,
+        root,
+        query,
+        mode,
+        10,
+        4096,
+        code::DEFAULT_CONTEXT_LINES,
+        &mut hash_loader("r1"),
+    )
+    .unwrap()
 }
 
 #[test]

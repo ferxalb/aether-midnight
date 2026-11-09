@@ -53,6 +53,16 @@ fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
         .filter_map(|item| item["name"].as_str())
         .collect::<Vec<_>>();
     assert!(names.contains(&"search_code"));
+    let search_tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "search_code")
+        .unwrap();
+    assert_eq!(
+        search_tool["inputSchema"]["properties"]["context_lines"]["maximum"],
+        8
+    );
     assert!(names.contains(&"refresh_indexed_file"));
     assert!(names.contains(&"remember"));
     assert!(names.contains(&"remember_batch"));
@@ -69,6 +79,17 @@ fn mcp_stdio_handshake_lists_tools_and_returns_grounded_result() {
     assert_eq!(rows["results"][0]["path"], "src/lib.rs");
     assert_eq!(rows["results"][0]["freshness"], "fresh_unindexed");
     assert!(rows["estimated_tokens"].as_u64().unwrap() <= rows["token_budget"].as_u64().unwrap());
+    assert!(rows["scope"].as_str().unwrap().starts_with("repo:"));
+    assert!(rows["results"][0].get("scope").is_none());
+    write_request(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0","id":31,"method":"tools/call",
+            "params":{"name":"search_code","arguments":{"repo_path":repo,"query":"stdio_grounded_marker","limit":5,"context_lines":1}}
+        }),
+    );
+    let one_line = read_response(&mut stdout);
+    assert_eq!(one_line["result"]["isError"], false);
 
     write_request(
         &mut stdin,

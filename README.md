@@ -10,14 +10,14 @@ Midnight indexes your repositories on your machine so you, or an AI agent like C
 - **Built for agents.** One command registers it as an MCP server in Claude Code, Claude Desktop, or Codex.
 - **Optional semantic search.** Use a local model, or a cloud provider you choose (OpenRouter or Rainy).
 
-> **Status:** prerelease (`v0.1.0-rc.4`). Commands and output fields may still change. macOS is the supported platform; **Linux and Windows are experimental** and not stable (see [docs/platforms.md](docs/platforms.md)).
+> **Status:** prerelease (`v0.1.0-rc.5`). Commands and output fields may still change. macOS is the supported platform; **Linux and Windows are experimental** and not stable (see [docs/platforms.md](docs/platforms.md)).
 
 ## Install
 
 **macOS (Apple silicon or Intel).** No Rust or sudo needed:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.4/install.sh | sh -s -- --no-runtime
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.5/install.sh | sh -s -- --no-runtime
 ```
 
 This verifies the download's SHA-256 and installs `aether-midnight` to `~/.local/bin`, plus a shorter `midnight` alias. Add `~/.local/bin` to your `PATH` if it is not there yet. The binary is not signed or notarized; if macOS blocks it, see [docs/installation.md](docs/installation.md).

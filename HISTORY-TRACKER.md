@@ -2,6 +2,25 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-08 (21) — Version 0.1.0-rc.5
+
+- `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README, `docs/installation.md`, `docs/release-checklist.md`, `CHANGELOG.md` and the `docs/v0.1-status.md` banner now name `0.1.0-rc.5`; `docs/api.md` labels its three contract changes with 0.1.0-rc.5 instead of "development". Past rc.4 entries and `docs/release-notes/v0.1.0-rc.4.md` are untouched.
+- `docs/release-notes/v0.1.0-rc.5.md` is required by the release workflow (it fails without it). It leads with the field changes (`scope` on the response, `complete` meaning, snippet defaults and `context_lines`), states that the schema stays 7, drops the rc.4 limitation about parse errors, and adds the open ones found this cycle (exact phrase in long files, non-deterministic remote query embeddings).
+- Not validated: the tag workflow has not run for rc.5, and the rc.5 binary has not been run against Claude Code or Codex. This entry changes no Rust code.
+
+## 2026-11-08 (20) — Compact `search_code` results: scope once, capped lines, 3 snippet lines by default
+
+- **Contract change (documented in `docs/api.md`):** `scope` moves from each result to the response; snippet lines are capped at 200 characters (cut centered on the match, `…` on each cut side, `snippet_truncated` and the response `truncated` set); snippets default to 3 lines from the matching line, with `context_lines` (MCP) / `--context-lines` (CLI), 1–8, to ask for more. `freshness`, `index_generation` and `index_complete` stay per result. `open_range` still returns exact full lines. The per-result token estimate no longer charges the scope string. No schema change. Clients reading `result.scope` must switch to `response.scope`; this is the only breaking field move.
+- **Measured with the release binary on this repository (4 queries, limit 3, lexical, indexed without a provider):** summed per-result estimated tokens 3470 → 1220 (−65 %), response JSON 14353 → 7199 bytes (−50 %), same result paths in the same order. The estimator is the project heuristic, not a model tokenizer; no latency or retrieval-quality claim is made (frozen retrieval suites were not re-run: paths and order are untouched, and the change is in rendering).
+- **Side effect:** semantic hits now report `line_end` as the last line shown, not the end of the whole chunk.
+- Tests: three unit tests (default and clamped context lines, centered cut and exact `open_range`, scope once per response) and MCP assertions in `tests/mcp_stdio.rs`.
+
+## 2026-11-08 (19) — Diagnosis: `hybrid` and exact-phrase queries after the BM25 tie-break
+
+- **`hybrid` (real OpenRouter embeddings, synthetic 121-file fixture, same database copied for both binaries, 5 runs each):** the target file ranked 6, 6, 6, 7, 7 before the entry (18) change and 1, 1, 1, 1, 1 after. `hybrid` fuses the top-20 lexical list with the semantic list by RRF, so it inherited the saturated-tie order. Note that the provider's query embedding is not deterministic: `semantic` mode returned two different score sets for the same query and binary (target rank 1 or 4), so semantic-only numbers from a single run are not evidence.
+- **Exact phrase, lexical:** with a short file holding the phrase (`retry backoff jitter policy`) and 60 files with the words scattered, the phrase file ranked 10th before and 1st after. With the same phrase in a 300-line file it is absent from the top 10 both before and after: queries are an OR of terms ranked by BM25, which cannot see adjacency, and there is no phrase class as in memory recall. This is a genuine gap, not fixed here; closing it is a retrieval-contract change that needs its own design and paired numbers.
+- Evidence is local and synthetic; no code from a real repository was sent to the provider (about 190 embedding calls for files of a few lines each, plus about 15 query embeddings).
+
 ## 2026-11-08 (18) — Code search: ties on the saturated lexical score are broken by BM25, not by path
 
 - **Cause of open finding 1 (entry 16):** `lexical_fts` is `25 + clamp(-bm25*1e6, 0, 25)`, capped at 50, so any text match above roughly 2.5e-5 BM25 scores 50, and `indexed_candidates` then ordered equal scores by path. Minimal reproduction (120 files, each common word in a minority of files, one `z_target.rs` with `zxqv-unique-marker-alpha`): raw SQLite BM25 ranks the target first (-6.99 against -4.67), `search_code` returned it 10th at limit 10 and 5th at limit 5. With the common words in over half of the files (BM25 near 1e-6) it was already first, so the symptom depends on the corpus.

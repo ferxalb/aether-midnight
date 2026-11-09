@@ -1265,6 +1265,7 @@ fn code_knn(
 
 /// Code search in `lexical`, `semantic` or `hybrid` mode for one repository/worktree. Semantic
 /// hits are chunk-level and are verified against the current file hash before being returned.
+#[allow(clippy::too_many_arguments)] // Flat public entry point shared by the CLI and tests.
 pub fn search_code(
     db_path: &Path,
     root: &Path,
@@ -1272,11 +1273,13 @@ pub fn search_code(
     mode: SearchMode,
     limit: usize,
     token_budget: usize,
+    context_lines: usize,
     loader: Loader<'_>,
 ) -> Result<CodeHybridResponse> {
     if query.trim().is_empty() {
         bail!("code search query cannot be empty");
     }
+    let context_lines = context_lines.clamp(1, code::MAX_CONTEXT_LINES);
     let scope = repo_scope(root)?;
     let limit = limit.clamp(1, 20);
     let budget = token_budget.clamp(64, code::MAX_TOKEN_BUDGET);
@@ -1320,7 +1323,7 @@ pub fn search_code(
         None
     } else {
         // Maximum pool and budget: packing happens once, after fusion.
-        Some(code::search_code_with_budget(
+        Some(code::search_code_with_context(
             db_path,
             root,
             query,
@@ -1330,6 +1333,7 @@ pub fn search_code(
             } else {
                 budget
             },
+            context_lines,
         )?)
     };
     let Some((hits, _)) = semantic else {
@@ -1361,13 +1365,22 @@ pub fn search_code(
             continue;
         }
         sem_paths.push(hit.path.clone());
+        let shown =
+            ((hit.line_end + 1).saturating_sub(hit.line_start) as usize).clamp(1, context_lines);
+        let mut line_capped = false;
         let snippet: String = text
             .lines()
             .skip(hit.line_start.saturating_sub(1) as usize)
-            .take(((hit.line_end + 1).saturating_sub(hit.line_start)).min(8) as usize)
+            .take(shown)
+            .map(|line| {
+                let (line, capped) = code::cap_line(line, None);
+                line_capped |= capped;
+                line
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let (snippet, truncated) = code::bounded_snippet(snippet);
+        let truncated = truncated || line_capped;
         let mut breakdown = BTreeMap::new();
         breakdown.insert("semantic_cosine".to_string(), f64::from(hit.similarity));
         semantic_results.insert(
@@ -1375,9 +1388,8 @@ pub fn search_code(
             CodeResult {
                 path: hit.path.clone(),
                 line_start: Some(hit.line_start),
-                line_end: Some(hit.line_end),
+                line_end: Some(hit.line_start + shown as u32 - 1),
                 match_reason: "semantic".into(),
-                scope: scope_label.clone(),
                 index_generation: hit.generation,
                 index_complete: complete,
                 freshness: "fresh".into(),
@@ -1444,6 +1456,7 @@ pub fn search_code(
     }
     let was_at_limit = fused.len() >= limit;
     let (results, estimated_tokens, packed_truncated) = code::pack_context(fused, budget);
+    let snippet_cut = results.iter().any(|result| result.snippet_truncated);
     if token_estimator.is_empty() {
         token_estimator =
             "midnight-heuristic-v1 (identifier chunks, punctuation, and fixed metadata allowance)"
@@ -1452,10 +1465,15 @@ pub fn search_code(
     Ok(CodeHybridResponse {
         info: meta,
         search: CodeSearchResponse {
+            scope: scope_label,
             results,
             token_budget: budget,
             estimated_tokens,
-            truncated: truncated_flag || packed_truncated || was_at_limit || !complete,
+            truncated: truncated_flag
+                || packed_truncated
+                || was_at_limit
+                || !complete
+                || snippet_cut,
             token_estimator,
         },
     })

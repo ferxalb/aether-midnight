@@ -224,6 +224,9 @@ enum Commands {
         /// Approximate context-token budget (Midnight heuristic, not a model tokenizer).
         #[arg(long, default_value_t = 2048)]
         token_budget: usize,
+        /// Snippet lines per result, 1-8, starting at the matching line. Lines over 200 characters are cut around the match.
+        #[arg(long, default_value_t = code::DEFAULT_CONTEXT_LINES)]
+        context_lines: usize,
         /// lexical, semantic, or hybrid (RRF of lexical + semantic). Default: the mode implied by `midnight setup` (hybrid with a provider, else lexical).
         #[arg(long, value_enum)]
         mode: Option<SearchModeArg>,
@@ -1031,6 +1034,7 @@ pub fn main() -> Result<()> {
             query_flag,
             limit,
             token_budget,
+            context_lines,
             mode,
             embedding,
         } => {
@@ -1051,8 +1055,14 @@ pub fn main() -> Result<()> {
             let human = human_output(cli.json, cli.human);
             if matches!(mode, SearchModeArg::Lexical) {
                 // Unchanged legacy contract and code path.
-                let response =
-                    code::search_code_with_budget(&db_path, &repo, &query, limit, token_budget)?;
+                let response = code::search_code_with_context(
+                    &db_path,
+                    &repo,
+                    &query,
+                    limit,
+                    token_budget,
+                    context_lines,
+                )?;
                 if human {
                     ux::render_search(&query, None, &response);
                     if config::load().ok().flatten().is_none() {
@@ -1076,6 +1086,7 @@ pub fn main() -> Result<()> {
                     mode.into(),
                     limit,
                     token_budget,
+                    context_lines,
                     &mut loader,
                 )?;
                 if response.info.degraded

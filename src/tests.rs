@@ -1696,3 +1696,106 @@ fn rare_token_file_outranks_saturated_common_word_matches_regardless_of_path() {
         assert_eq!(results[0].path, "src/z_target.rs", "limit {limit}");
     }
 }
+
+#[test]
+fn search_snippets_default_to_three_lines_and_honor_context_lines() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("context.sqlite3");
+    let repo = new_repo(&temp, "context-repo");
+    let body: String = (1..=20)
+        .map(|n| {
+            if n == 5 {
+                "// context_anchor_token\n".to_string()
+            } else {
+                format!("// filler line {n}\n")
+            }
+        })
+        .collect();
+    fs::write(repo.join("src/context.rs"), body).unwrap();
+    run_index(&database, &repo);
+
+    let default = code::search_code(&database, &repo, "context_anchor_token", 5).unwrap();
+    assert_eq!(default[0].line_start, Some(5));
+    assert_eq!(default[0].line_end, Some(7));
+    assert_eq!(default[0].snippet.as_ref().unwrap().lines().count(), 3);
+
+    for (asked, shown) in [(1, 1), (8, 8), (50, 8), (0, 1)] {
+        let response = code::search_code_with_context(
+            &database,
+            &repo,
+            "context_anchor_token",
+            5,
+            2048,
+            asked,
+        )
+        .unwrap();
+        let result = &response.results[0];
+        assert_eq!(
+            result.snippet.as_ref().unwrap().lines().count(),
+            shown,
+            "context_lines {asked}"
+        );
+        assert_eq!(result.line_end, Some(5 + shown as u32 - 1));
+    }
+}
+
+#[test]
+fn long_snippet_lines_are_cut_around_the_match_and_open_range_stays_exact() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("longline.sqlite3");
+    let repo = new_repo(&temp, "longline-repo");
+    let long = format!("{} needle_far_right {}", "x ".repeat(800), "y ".repeat(800));
+    fs::write(
+        repo.join("src/long.md"),
+        format!("{long}\nshort second line\n"),
+    )
+    .unwrap();
+    run_index(&database, &repo);
+
+    let response =
+        code::search_code_with_context(&database, &repo, "needle_far_right", 5, 2048, 3).unwrap();
+    let result = &response.results[0];
+    let snippet = result.snippet.as_ref().unwrap();
+    assert!(
+        snippet.contains("needle_far_right"),
+        "match must stay visible"
+    );
+    assert!(snippet.contains('…'));
+    assert!(result.snippet_truncated);
+    assert!(response.truncated);
+    assert!(snippet.lines().next().unwrap().chars().count() < 215);
+    assert_eq!(snippet.lines().nth(1).unwrap(), "2: short second line");
+
+    let full = code::open_range(&database, &repo, "src/long.md", 1, 1).unwrap();
+    assert!(
+        full.content.contains(&long),
+        "open_range returns the whole line"
+    );
+}
+
+#[test]
+fn search_scope_is_stated_once_per_response_not_per_result() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("scope.sqlite3");
+    let repo = new_repo(&temp, "scope-repo");
+    fs::write(repo.join("src/a.rs"), "pub fn scoped_marker_a() {}\n").unwrap();
+    fs::write(repo.join("src/b.rs"), "pub fn scoped_marker_b() {}\n").unwrap();
+    run_index(&database, &repo);
+    let response =
+        code::search_code_with_budget(&database, &repo, "scoped_marker_a scoped_marker_b", 5, 2048)
+            .unwrap();
+    assert!(response.results.len() >= 2);
+    let status = code::index_status(&database, &repo).unwrap();
+    assert_eq!(
+        response.scope,
+        format!("repo:{}:worktree:{}", status.repo_id, status.worktree_id)
+    );
+    let json = serde_json::to_value(&response).unwrap();
+    assert!(json["scope"].is_string());
+    for result in json["results"].as_array().unwrap() {
+        assert!(result.get("scope").is_none());
+        for kept in ["freshness", "index_generation", "index_complete"] {
+            assert!(result.get(kept).is_some(), "{kept} stays per result");
+        }
+    }
+}

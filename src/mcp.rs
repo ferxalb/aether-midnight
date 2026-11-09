@@ -367,7 +367,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "search_code",
             "Search exact paths, extracted symbols, whole lexical tokens, and identifier-boundary fragments. Arbitrary substrings inside a token are unsupported. Returns current-source evidence and packs snippets within a deterministic estimated-token budget.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192}},"required":["query"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192},"context_lines":{"type":"integer","minimum":1,"maximum":8,"description":"Snippet lines per result, starting at the matching line (default 3). Lines longer than 200 characters are cut around the match."}},"required":["query"]}),
         ),
         tool(
             "open_range",
@@ -475,7 +475,7 @@ fn call_tool(
         }
         "search_code" => {
             let repo = path_arg(&args, "repo_path")?;
-            let result = code::search_code_with_budget(
+            let result = code::search_code_with_context(
                 db_path,
                 &repo,
                 required_str(&args, "query")?,
@@ -483,6 +483,9 @@ fn call_tool(
                 args.get("token_budget")
                     .and_then(Value::as_u64)
                     .unwrap_or(2048) as usize,
+                args.get("context_lines")
+                    .and_then(Value::as_u64)
+                    .map_or(code::DEFAULT_CONTEXT_LINES, |n| n.min(64) as usize),
             )?;
             Ok(serde_json::to_value(result)?)
         }

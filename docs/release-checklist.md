@@ -30,16 +30,16 @@ maintainer steps below are done. The binary is unsigned and not notarized (docum
 Detailed commands, evidence and measurements: [v0.1-status.md](v0.1-status.md).
 Installation: [installation.md](installation.md). Signing: [release-signing.md](release-signing.md).
 
-## Publish the v0.1.0-rc.4 prerelease (maintainer)
+## Publish the v0.1.0-rc.5 prerelease (maintainer)
 
-Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.4`, tag `v0.1.0-rc.4`,
-`aether-midnight-0.1.0-rc.4-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
+Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.5`, tag `v0.1.0-rc.5`,
+`aether-midnight-0.1.0-rc.5-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
 both read the release by that tag, so they only work once it exists. The workflow creates it.
 
 1. Write `docs/release-notes/v<version>.md` (state: unsigned, not notarized, what was and was not
    tested). The workflow appends the archive SHA-256 and fails if the file is missing.
 2. Commit, then tag that exact commit and push the tag:
-   `git tag v0.1.0-rc.4 && git push origin v0.1.0-rc.4`.
+   `git tag v0.1.0-rc.5 && git push origin v0.1.0-rc.5`.
 3. The "macOS release artifacts" workflow runs on the tag: it builds the Universal 2 binary,
    packages it, runs the offline installer smoke test, then a `release` job checks that the tag
    equals `v` + the `Cargo.toml` version, and creates the GitHub Release with the archive, its

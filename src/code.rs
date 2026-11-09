@@ -19,7 +19,13 @@ use crate::{INDEX_FORMAT_VERSION, MAX_FILE_BYTES};
 const DEFAULT_BATCH_FILES: usize = 512;
 const DEFAULT_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OPEN_RANGE_LINES: u32 = 200;
-const MAX_SNIPPET_LINES: usize = 8;
+/// Snippet lines returned per result unless the caller asks for more (`context_lines`).
+pub const DEFAULT_CONTEXT_LINES: usize = 3;
+/// Largest `context_lines` accepted.
+pub const MAX_CONTEXT_LINES: usize = 8;
+/// A snippet line longer than this many characters is cut (around the match when it is the
+/// first line) and the result is marked `snippet_truncated`; `open_range` returns full lines.
+const MAX_SNIPPET_LINE_CHARS: usize = 200;
 const MAX_SNIPPET_BYTES: usize = 4096;
 const DEFAULT_TOKEN_BUDGET: usize = 2048;
 pub(crate) const MAX_TOKEN_BUDGET: usize = 8192;
@@ -115,7 +121,6 @@ pub struct CodeResult {
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
     pub match_reason: String,
-    pub scope: String,
     pub index_generation: u64,
     pub index_complete: bool,
     pub freshness: String,
@@ -128,6 +133,8 @@ pub struct CodeResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CodeSearchResponse {
+    /// Repository/worktree every result belongs to (stated once per response).
+    pub scope: String,
     pub results: Vec<CodeResult>,
     pub token_budget: usize,
     pub estimated_tokens: usize,
@@ -1920,6 +1927,25 @@ pub fn search_code_with_budget(
     limit: usize,
     token_budget: usize,
 ) -> Result<CodeSearchResponse> {
+    search_code_with_context(
+        db_path,
+        root,
+        query,
+        limit,
+        token_budget,
+        DEFAULT_CONTEXT_LINES,
+    )
+}
+
+pub fn search_code_with_context(
+    db_path: &Path,
+    root: &Path,
+    query: &str,
+    limit: usize,
+    token_budget: usize,
+    context_lines: usize,
+) -> Result<CodeSearchResponse> {
+    let context_lines = context_lines.clamp(1, MAX_CONTEXT_LINES);
     if query.trim().is_empty() {
         bail!("code search query cannot be empty");
     }
@@ -1940,20 +1966,26 @@ pub fn search_code_with_budget(
         .map(|(g, catalog, _structural)| (g as u64, catalog != 0))
         .unwrap_or((0, false));
     let candidates = indexed_candidates(&conn, &scope, query, limit)?;
-    let mut results = make_results(&scope, query, candidates, complete, limit)?;
+    let mut results = make_results(&scope, query, candidates, complete, limit, context_lines)?;
     let used_direct_fallback = results.is_empty() && !complete;
     if used_direct_fallback {
-        results = cold_search(&conn, &scope, query, generation)?;
+        results = cold_search(&conn, &scope, query, generation, context_lines)?;
     }
     let fallback_has_result = used_direct_fallback && !results.is_empty();
     let budget = token_budget.clamp(64, MAX_TOKEN_BUDGET);
     let was_at_limit = results.len() >= limit;
     let (results, estimated_tokens, context_truncated) = pack_context(results, budget);
+    let snippet_cut = results.iter().any(|result| result.snippet_truncated);
     Ok(CodeSearchResponse {
+        scope: format!("repo:{}:worktree:{}", scope.repo_id, scope.worktree_id),
         results,
         token_budget: budget,
         estimated_tokens,
-        truncated: !complete || fallback_has_result || was_at_limit || context_truncated,
+        truncated: !complete
+            || fallback_has_result
+            || was_at_limit
+            || context_truncated
+            || snippet_cut,
         token_estimator:
             "midnight-heuristic-v1 (identifier chunks, punctuation, and fixed metadata allowance)"
                 .into(),
@@ -2306,25 +2338,32 @@ fn make_results(
     candidates: Vec<Candidate>,
     complete: bool,
     limit: usize,
+    context_lines: usize,
 ) -> Result<Vec<CodeResult>> {
     let mut out = Vec::new();
     for candidate in candidates.into_iter().take(limit) {
         let abs = scope.root.join(&candidate.path);
         let checked = current_text(&scope.root, &abs).ok();
-        let (freshness, snippet, line_start, line_end) = if let Some((text, current_hash)) = checked
-        {
-            if current_hash == candidate.hash {
-                let (start, end, snippet) = excerpt(&text, query);
-                ("fresh".to_string(), Some(snippet), Some(start), Some(end))
+        let (freshness, snippet, line_start, line_end, line_capped) =
+            if let Some((text, current_hash)) = checked {
+                if current_hash == candidate.hash {
+                    let (start, end, snippet, capped) = excerpt(&text, query, context_lines);
+                    (
+                        "fresh".to_string(),
+                        Some(snippet),
+                        Some(start),
+                        Some(end),
+                        capped,
+                    )
+                } else {
+                    ("stale".to_string(), None, None, None, false)
+                }
             } else {
-                ("stale".to_string(), None, None, None)
-            }
-        } else {
-            ("unavailable".to_string(), None, None, None)
-        };
+                ("unavailable".to_string(), None, None, None, false)
+            };
         let (snippet, snippet_truncated) = snippet
             .map(bounded_snippet)
-            .map(|(text, truncated)| (Some(text), truncated))
+            .map(|(text, truncated)| (Some(text), truncated || line_capped))
             .unwrap_or((None, false));
         let mut reasons = Vec::new();
         let mut breakdown = BTreeMap::new();
@@ -2345,7 +2384,6 @@ fn make_results(
             line_start,
             line_end,
             match_reason: reasons.join("+"),
-            scope: format!("repo:{}:worktree:{}", scope.repo_id, scope.worktree_id),
             index_generation: candidate.generation,
             index_complete: complete,
             freshness,
@@ -2364,6 +2402,7 @@ fn cold_search(
     scope: &RepoScope,
     query: &str,
     generation: u64,
+    context_lines: usize,
 ) -> Result<Vec<CodeResult>> {
     let mut builder = WalkBuilder::new(&scope.root);
     builder
@@ -2446,12 +2485,14 @@ fn cold_search(
         if !path_hit && !text_hit {
             continue;
         }
-        let (line_start, line_end, snippet) = if path_hit {
-            (1, 1, first_lines(&text.0, 1, 1))
+        let (line_start, line_end, snippet, line_capped) = if path_hit {
+            let (snippet, capped) = snippet_lines(&text.0, 1, 1, None);
+            (1, 1, snippet, capped)
         } else {
-            excerpt(&text.0, query)
+            excerpt(&text.0, query, context_lines)
         };
         let (snippet, snippet_truncated) = bounded_snippet(snippet);
+        let snippet_truncated = snippet_truncated || line_capped;
         let mut breakdown = BTreeMap::new();
         breakdown.insert("cold_path".into(), if path_hit { 60.0 } else { 0.0 });
         breakdown.insert("cold_lexical".into(), if text_hit { 25.0 } else { 0.0 });
@@ -2464,7 +2505,6 @@ fn cold_search(
             } else {
                 "cold_lexical".into()
             },
-            scope: format!("repo:{}:worktree:{}", scope.repo_id, scope.worktree_id),
             index_generation: generation,
             index_complete: false,
             freshness: "fresh_unindexed".into(),
@@ -2700,7 +2740,7 @@ fn safe_relative_path(input: &str) -> Result<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-fn excerpt(text: &str, query: &str) -> (u32, u32, String) {
+fn excerpt(text: &str, query: &str, context_lines: usize) -> (u32, u32, String, bool) {
     let query = query.trim();
     let lower = text.to_ascii_lowercase();
     let found = (!query.is_empty())
@@ -2712,14 +2752,64 @@ fn excerpt(text: &str, query: &str) -> (u32, u32, String) {
             .find_map(|term| lower.find(&term.to_ascii_lowercase()))
             .unwrap_or(0)
     });
-    let line = text.as_bytes()[..offset.min(text.len())]
+    let offset = offset.min(text.len());
+    let before = &text.as_bytes()[..offset];
+    let line = before.iter().filter(|&&b| b == b'\n').count() + 1;
+    let line_begin = before
         .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
-        + 1;
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let match_column = text[line_begin..offset].chars().count();
     let start = line as u32;
-    let end = (start + MAX_SNIPPET_LINES as u32 - 1).min(text.lines().count().max(1) as u32);
-    (start, end, first_lines(text, start, end))
+    let end = (start + context_lines as u32 - 1).min(text.lines().count().max(1) as u32);
+    let (snippet, capped) = snippet_lines(text, start, end, Some(match_column));
+    (start, end, snippet, capped)
+}
+
+/// Numbered snippet lines with each line capped at `MAX_SNIPPET_LINE_CHARS`. `match_column`
+/// centers the cut of the first line on the match so the matched text stays visible.
+fn snippet_lines(text: &str, start: u32, end: u32, match_column: Option<usize>) -> (String, bool) {
+    let mut capped = false;
+    let lines = text
+        .lines()
+        .enumerate()
+        .filter(|(i, _)| (*i + 1) >= start as usize && (*i + 1) <= end as usize)
+        .map(|(i, line)| {
+            let column = if i + 1 == start as usize {
+                match_column
+            } else {
+                None
+            };
+            let (line, was_capped) = cap_line(line, column);
+            capped |= was_capped;
+            format!("{}: {}", i + 1, line)
+        })
+        .collect::<Vec<_>>();
+    (lines.join("\n"), capped)
+}
+
+/// Cut `line` to `MAX_SNIPPET_LINE_CHARS` characters, marking each cut side with `…`. When
+/// `match_column` is known the kept window starts a quarter-window before it.
+pub(crate) fn cap_line(line: &str, match_column: Option<usize>) -> (String, bool) {
+    if line.chars().nth(MAX_SNIPPET_LINE_CHARS).is_none() {
+        return (line.to_string(), false);
+    }
+    let length = line.chars().count();
+    let start = match_column
+        .map_or(0, |column| {
+            column.saturating_sub(MAX_SNIPPET_LINE_CHARS / 4)
+        })
+        .min(length - MAX_SNIPPET_LINE_CHARS);
+    let end = start + MAX_SNIPPET_LINE_CHARS;
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(line.chars().skip(start).take(MAX_SNIPPET_LINE_CHARS));
+    if end < length {
+        out.push('…');
+    }
+    (out, true)
 }
 
 fn first_lines(text: &str, start: u32, end: u32) -> String {
@@ -2752,10 +2842,8 @@ pub(crate) fn pack_context(
     let mut used = 0usize;
     let mut truncated = false;
     for mut result in results {
-        let metadata_tokens = 28
-            + estimate_tokens(&result.path)
-            + estimate_tokens(&result.match_reason)
-            + estimate_tokens(&result.scope);
+        let metadata_tokens =
+            28 + estimate_tokens(&result.path) + estimate_tokens(&result.match_reason);
         if used.saturating_add(metadata_tokens) > token_budget {
             truncated = true;
             break;
