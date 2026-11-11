@@ -363,6 +363,12 @@ impl MemorySession {
         })
     }
 
+    /// The session's database connection, shared by read-only code and hybrid search so a
+    /// long-lived MCP session does not reopen and re-migrate the database on every request.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn remember(
         &mut self,
@@ -891,7 +897,7 @@ pub fn recall(
     recall_on(&conn, scope, query, at, limit)
 }
 
-fn recall_on(
+pub(crate) fn recall_on(
     conn: &Connection,
     scope: &str,
     query: &str,

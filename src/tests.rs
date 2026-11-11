@@ -1872,3 +1872,55 @@ fn search_scope_is_stated_once_per_response_not_per_result() {
         }
     }
 }
+
+#[test]
+fn exact_symbol_lookup_searches_the_nocase_name_index_and_folds_only_ascii() {
+    let base = TempDir::new().unwrap();
+    let repo = new_repo(&base, "symbol-index");
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn MixedCaseSymbol() {}\npub fn other_symbol() {}\n",
+    )
+    .unwrap();
+    let database = base.path().join("db.sqlite3");
+    assert!(run_index(&database, &repo).complete);
+
+    let conn = db::open_db(&database).unwrap();
+    let plan = conn
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            code::EXACT_SYMBOL_FILES_SQL
+        ))
+        .unwrap()
+        .query_map(rusqlite::params!["r", "w", "x", 10i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("USING INDEX code_symbols_name")),
+        "exact symbol lookup must search the name index: {plan:?}"
+    );
+    // The rewrite from lower(name)=lower(?) is equivalent only while both fold ASCII alone.
+    let folded: (String, i64) = conn
+        .query_row(
+            "SELECT lower('ÉÖA'), 'ÉÖA'='éöa' COLLATE NOCASE",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(folded, ("ÉÖa".to_string(), 0));
+    drop(conn);
+
+    for query in ["mixedcasesymbol", "MIXEDCASESYMBOL", "MixedCaseSymbol"] {
+        let results = code::search_code(&database, &repo, query, 5).unwrap();
+        assert_eq!(results[0].path, "src/lib.rs", "{query}");
+        assert!(
+            results[0].match_reason.contains("symbol"),
+            "{query}: {}",
+            results[0].match_reason
+        );
+    }
+}

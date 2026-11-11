@@ -16,6 +16,44 @@
 
 This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
+## 2026-11-11: exact-symbol index and MCP connection reuse
+
+Two changes with identical results: the exact-symbol candidate query now compares
+`s.name=?3 COLLATE NOCASE`, so SQLite searches `code_symbols_name` instead of probing every
+file of the worktree (the old `lower(s.name)=lower(?3)` could not use the NOCASE index; both fold
+only ASCII in the bundled build, which `src/tests.rs` asserts), and the MCP read-only code tools and
+semantic/hybrid recall reuse the session connection instead of reopening the database per request.
+
+Paired measurement: release binaries of the parent commit and of this change, Linux x86_64 cloud
+container (identifiers withheld), the generated 10,000-file / 100 MiB fixture (seed `20261103`,
+one symbol per file) indexed once by the parent binary and reused by both, `midnight-harness
+measure-mcp` through `aether-midnight --db DB mcp`, one request in flight. Each run sends 330
+requests (7 lexical `search_code` queries plus `open_range`, `list_symbols`, `index_status`,
+`repo_map`, 30 times); three runs per binary, interleaved parent/change. All 990 responses of
+every run are byte-identical to the first parent run.
+
+| Request class (n=90 each) | Parent p50 / p95 ms | Change p50 / p95 ms |
+| --- | ---: | ---: |
+| `search_code`, exact symbol (3 queries; range across queries) | 7.9–8.2 / 13.6–14.2 | 3.7–4.0 / 6.1–6.5 |
+| `search_code`, no symbol match (`seed20261103`, `missing_symbol_zz`) | 7.4 / 11.6–12.2 | 3.1–3.2 / 5.0–5.4 |
+| `search_code`, broad term (`payload`, `usize`) | 13.9 / 22.8–23.6 | 9.7 / 15.9–16.2 |
+| `open_range` | 0.809 / 1.214 | 0.231 / 0.355 |
+| `list_symbols` | 5.194 / 8.098 | 4.483 / 7.401 |
+| `index_status` | 5.938 / 9.058 | 5.307 / 7.895 |
+| `repo_map` | 7.509 / 12.368 | 6.955 / 10.962 |
+
+Process totals per 330-request run (n=3 each): wall 2.58–3.04 s → 1.71–1.89 s, CPU
+(user+system) 2.53–2.96 s → 1.66–1.81 s, peak RSS 15.3–15.6 MB → 16.0–16.4 MB (about
+0.8 MB higher: the shared connection keeps its page and statement caches for the session).
+This fixture has one symbol per file; repositories with more files gain more from the symbol
+index because the old plan scaled with the worktree's file count. No real-repository or native
+macOS run was made for this change. CLI one-shot commands only gain from the symbol query.
+The frozen `retrieval-quality` suite and the three frozen memory suites (`memory_quality_v2`,
+`memory_quality_single_term_v1`, `memory_retrieval_adversarial_v1`) produce identical
+non-timing output under both binaries (code MRR 0.978261; memory v2 MRR 0.891667). Memory
+candidate generation and ranking are unchanged, so `bench-memory`/`bench-retrieval` were not
+rerun.
+
 ## Measurement handling
 
 Published benchmark artifacts retain measured result distributions and sample counts. Host, runtime, account, and local path identifiers are omitted. Percentiles use the benchmark's recorded nearest-index rule. Results describe their measured fixture and are not cross-machine guarantees.

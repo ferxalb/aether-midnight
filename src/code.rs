@@ -1805,6 +1805,11 @@ fn flush_batch(
 pub fn index_status(db_path: &Path, root: &Path) -> Result<IndexStatus> {
     let scope = repo_scope(root)?;
     let conn = open_db(db_path)?;
+    index_status_scoped(&conn, scope)
+}
+
+/// [`index_status`] on a caller-owned connection.
+pub(crate) fn index_status_scoped(conn: &Connection, scope: RepoScope) -> Result<IndexStatus> {
     let row = conn
         .query_row(
             "SELECT root,branch,revision,generation,is_complete,structural_complete,eligible_files,eligible_bytes,
@@ -1945,16 +1950,36 @@ pub fn search_code_with_context(
     token_budget: usize,
     context_lines: usize,
 ) -> Result<CodeSearchResponse> {
-    let context_lines = context_lines.clamp(1, MAX_CONTEXT_LINES);
+    validate_search_query(query)?;
+    let scope = repo_scope(root)?;
+    let conn = open_db(db_path)?;
+    search_code_scoped(&conn, &scope, query, limit, token_budget, context_lines)
+}
+
+fn validate_search_query(query: &str) -> Result<()> {
     if query.trim().is_empty() {
         bail!("code search query cannot be empty");
     }
     if query.len() > MAX_SEARCH_QUERY_BYTES {
         bail!("code search query exceeds 4096 bytes");
     }
-    let scope = repo_scope(root)?;
+    Ok(())
+}
+
+/// [`search_code_with_context`] on a caller-owned connection, for long-lived sessions (MCP) that
+/// should not reopen and re-migrate the database on every request. `scope` must come from
+/// [`repo_scope`] for this request so branch and revision facts stay current.
+pub(crate) fn search_code_scoped(
+    conn: &Connection,
+    scope: &RepoScope,
+    query: &str,
+    limit: usize,
+    token_budget: usize,
+    context_lines: usize,
+) -> Result<CodeSearchResponse> {
+    validate_search_query(query)?;
+    let context_lines = context_lines.clamp(1, MAX_CONTEXT_LINES);
     let limit = limit.clamp(1, 20);
-    let conn = open_db(db_path)?;
     let status: Option<(i64, i64, i64)> = conn
         .query_row(
             "SELECT generation,is_complete,structural_complete FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
@@ -1965,11 +1990,11 @@ pub fn search_code_with_context(
     let (generation, complete) = status
         .map(|(g, catalog, _structural)| (g as u64, catalog != 0))
         .unwrap_or((0, false));
-    let candidates = indexed_candidates(&conn, &scope, query, limit)?;
-    let mut results = make_results(&scope, query, candidates, complete, limit, context_lines)?;
+    let candidates = indexed_candidates(conn, scope, query, limit)?;
+    let mut results = make_results(scope, query, candidates, complete, limit, context_lines)?;
     let used_direct_fallback = results.is_empty() && !complete;
     if used_direct_fallback {
-        results = cold_search(&conn, &scope, query, generation, context_lines)?;
+        results = cold_search(conn, scope, query, generation, context_lines)?;
     }
     let fallback_has_result = used_direct_fallback && !results.is_empty();
     let budget = token_budget.clamp(64, MAX_TOKEN_BUDGET);
@@ -1991,6 +2016,16 @@ pub fn search_code_with_context(
                 .into(),
     })
 }
+
+/// Files declaring a symbol whose name equals the query, ignoring ASCII case. `COLLATE NOCASE`
+/// on the column lets SQLite search `code_symbols_name` (declared `COLLATE NOCASE`); the earlier
+/// `lower(s.name)=lower(?3)` could not use it and probed every file in the worktree. Both fold
+/// only ASCII letters in this bundled build (no ICU), so the matched set is identical.
+pub(crate) const EXACT_SYMBOL_FILES_SQL: &str =
+    "SELECT DISTINCT f.id,f.rel_path,f.content_hash,f.indexed_generation
+     FROM code_symbols s JOIN code_files f ON f.id=s.file_id
+     WHERE f.repo_id=?1 AND f.worktree_id=?2 AND s.name=?3 COLLATE NOCASE
+     ORDER BY f.rel_path LIMIT ?4";
 
 #[derive(Default)]
 struct Candidate {
@@ -2110,12 +2145,7 @@ fn indexed_candidates(
         }
     }
     {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT f.id,f.rel_path,f.content_hash,f.indexed_generation
-             FROM code_symbols s JOIN code_files f ON f.id=s.file_id
-             WHERE f.repo_id=?1 AND f.worktree_id=?2 AND lower(s.name)=lower(?3)
-             ORDER BY f.rel_path LIMIT ?4",
-        )?;
+        let mut stmt = conn.prepare_cached(EXACT_SYMBOL_FILES_SQL)?;
         let rows = stmt.query_map(
             params![scope.repo_id, scope.worktree_id, query.trim(), limit as i64],
             |row| {
@@ -2597,14 +2627,32 @@ pub fn open_range(
     start: u32,
     end: u32,
 ) -> Result<OpenRangeResult> {
+    validate_open_range(start, end)?;
+    let scope = repo_scope(root)?;
+    safe_relative_path(path)?;
+    let conn = open_db(db_path)?;
+    open_range_scoped(&conn, &scope, path, start, end)
+}
+
+fn validate_open_range(start: u32, end: u32) -> Result<()> {
     if start == 0 || end < start || end - start + 1 > MAX_OPEN_RANGE_LINES {
         bail!("line range must be 1..=200 lines and start at line 1 or later");
     }
-    let scope = repo_scope(root)?;
+    Ok(())
+}
+
+/// [`open_range`] on a caller-owned connection.
+pub(crate) fn open_range_scoped(
+    conn: &Connection,
+    scope: &RepoScope,
+    path: &str,
+    start: u32,
+    end: u32,
+) -> Result<OpenRangeResult> {
+    validate_open_range(start, end)?;
     let rel = safe_relative_path(path)?;
     let absolute = scope.root.join(&rel);
     let indexed: Option<(String, i64, i64, i64, i64)> = {
-        let conn = open_db(db_path)?;
         conn.query_row(
             "SELECT f.content_hash,f.indexed_generation,r.generation,r.is_complete,r.structural_complete
              FROM code_files f JOIN repositories r ON r.repo_id=f.repo_id AND r.worktree_id=f.worktree_id
@@ -2654,6 +2702,45 @@ pub fn list_symbols(
     }
     let scope = repo_scope(root)?;
     let conn = open_db(db_path)?;
+    let rows = symbol_rows(&conn, &scope, name, limit)?;
+    drop(conn);
+    symbols_with_freshness(&scope, rows)
+}
+
+type SymbolRow = (
+    String,
+    String,
+    String,
+    u32,
+    u32,
+    i64,
+    i64,
+    i64,
+    i64,
+    bool,
+    String,
+);
+
+/// [`list_symbols`] on a caller-owned connection.
+pub(crate) fn list_symbols_scoped(
+    conn: &Connection,
+    scope: &RepoScope,
+    name: Option<&str>,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>> {
+    if name.is_some_and(|name| name.len() > MAX_SEARCH_QUERY_BYTES) {
+        bail!("symbol search query exceeds 4096 bytes");
+    }
+    let rows = symbol_rows(conn, scope, name, limit)?;
+    symbols_with_freshness(scope, rows)
+}
+
+fn symbol_rows(
+    conn: &Connection,
+    scope: &RepoScope,
+    name: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SymbolRow>> {
     let pattern = name.unwrap_or("");
     let mut stmt = conn.prepare(
         "SELECT f.rel_path,s.name,s.kind,s.line_start,s.line_end,s.byte_start,s.byte_end,f.indexed_generation,r.generation,(r.is_complete AND r.structural_complete),f.content_hash
@@ -2685,9 +2772,13 @@ pub fn list_symbols(
             ))
         },
     )?;
-    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    drop(conn);
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn symbols_with_freshness(
+    scope: &RepoScope,
+    rows: Vec<SymbolRow>,
+) -> Result<Vec<serde_json::Value>> {
     let mut freshness_by_path = BTreeMap::<String, bool>::new();
     let mut results = Vec::with_capacity(rows.len());
     for (
@@ -2722,6 +2813,11 @@ pub fn list_symbols(
 pub fn repo_map(db_path: &Path, root: &Path) -> Result<RepoMap> {
     let scope = repo_scope(root)?;
     let conn = open_db(db_path)?;
+    repo_map_scoped(&conn, scope)
+}
+
+/// [`repo_map`] on a caller-owned connection.
+pub(crate) fn repo_map_scoped(conn: &Connection, scope: RepoScope) -> Result<RepoMap> {
     let status: Option<(u64, bool)> = conn
         .query_row(
             "SELECT generation,(is_complete AND structural_complete) FROM repositories WHERE repo_id=?1 AND worktree_id=?2",

@@ -2,6 +2,13 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-11 (1) — Index exact-symbol lookups and reuse the MCP session connection
+
+- Exact-symbol candidates in `search_code` now use `s.name=?3 COLLATE NOCASE` (`code::EXACT_SYMBOL_FILES_SQL`), which searches the `code_symbols_name` index; the previous `lower()` comparison probed every file of the worktree on every query. Matching is unchanged because both forms fold only ASCII in the bundled SQLite; `exact_symbol_lookup_searches_the_nocase_name_index_and_folds_only_ascii` asserts the plan and the folding premise.
+- MCP `search_code` (all modes), `open_range`, `list_symbols`, `repo_map`, `index_status` and semantic/hybrid `recall` reuse the session's SQLite connection through new `*_scoped`/`*_on` library entry points; the path-based functions keep their signatures and delegate. Hybrid search no longer opens a second connection for its lexical stage. Repository scope is still resolved per request; no schema, ranking or output change.
+- Paired release measurement on the generated 10k-file fixture over MCP: all 990 responses identical; exact-symbol `search_code` p50 about 8 ms → 4 ms, `open_range` p50 0.81 → 0.23 ms, run CPU 2.5–3.0 s → 1.7–1.8 s; peak RSS about 0.8 MB higher. Frozen code and memory quality suites unchanged. Details and limits: `docs/performance.md` (2026-11-11 section); connection model: `docs/architecture.md`.
+- Validation: `cargo fmt --check`, strict all-target/all-feature Clippy and `cargo test --locked` pass.
+
 ## 2026-11-09 (1) — Validate the published rc.6 on the real repository
 
 - Verified the published workflow, archive checksum and byte identity of the installed binary. Isolated install, repeat install and negative checksum/HTTP cases passed; a real rc.5 → rc.6 update passed on retry after HTTP 504. Ad-hoc signature verification succeeds, but Developer ID/notarization are absent and Gatekeeper rejects the artifact. No security setting was bypassed.

@@ -538,10 +538,12 @@ fn call_tool(
                     cache,
                     repo.to_string_lossy().into_owned(),
                 );
-                return Ok(serde_json::to_value(crate::embed::search_code(
-                    db_path,
-                    &repo,
-                    required_str(&args, "query")?,
+                let query = required_str(&args, "query")?;
+                let scope = crate::db::repo_scope(&repo)?;
+                return Ok(serde_json::to_value(crate::embed::search_code_on(
+                    session_connection(db_path, memory_session)?,
+                    &scope,
+                    query,
                     mode,
                     args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
                     args.get("token_budget")
@@ -553,10 +555,12 @@ fn call_tool(
                     &mut loader,
                 )?)?);
             }
-            let result = code::search_code_with_context(
-                db_path,
-                &repo,
-                required_str(&args, "query")?,
+            let query = required_str(&args, "query")?;
+            let scope = crate::db::repo_scope(&repo)?;
+            let result = code::search_code_scoped(
+                session_connection(db_path, memory_session)?,
+                &scope,
+                query,
                 args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
                 args.get("token_budget")
                     .and_then(Value::as_u64)
@@ -569,9 +573,10 @@ fn call_tool(
         }
         "open_range" => {
             let repo = path_arg(&args, "repo_path")?;
-            let result = code::open_range(
-                db_path,
-                &repo,
+            let scope = crate::db::repo_scope(&repo)?;
+            let result = code::open_range_scoped(
+                session_connection(db_path, memory_session)?,
+                &scope,
                 required_str(&args, "path")?,
                 required_u32(&args, "line_start")?,
                 required_u32(&args, "line_end")?,
@@ -581,20 +586,29 @@ fn call_tool(
         "list_symbols" => {
             let repo = path_arg(&args, "repo_path")?;
             let name = args.get("name").and_then(Value::as_str);
-            Ok(serde_json::to_value(code::list_symbols(
-                db_path,
-                &repo,
+            let scope = crate::db::repo_scope(&repo)?;
+            Ok(serde_json::to_value(code::list_symbols_scoped(
+                session_connection(db_path, memory_session)?,
+                &scope,
                 name,
                 args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
             )?)?)
         }
         "repo_map" => {
             let repo = path_arg(&args, "repo_path")?;
-            Ok(serde_json::to_value(code::repo_map(db_path, &repo)?)?)
+            let scope = crate::db::repo_scope(&repo)?;
+            Ok(serde_json::to_value(code::repo_map_scoped(
+                session_connection(db_path, memory_session)?,
+                scope,
+            )?)?)
         }
         "index_status" => {
             let repo = path_arg(&args, "repo_path")?;
-            Ok(serde_json::to_value(code::index_status(db_path, &repo)?)?)
+            let scope = crate::db::repo_scope(&repo)?;
+            Ok(serde_json::to_value(code::index_status_scoped(
+                session_connection(db_path, memory_session)?,
+                scope,
+            )?)?)
         }
         "remember" => {
             if let Some(key) = optional_str(&args, "operation_key") {
@@ -637,6 +651,7 @@ fn call_tool(
                     );
                 }
                 let scope = required_str(&args, "scope")?;
+                let query = required_str(&args, "query")?;
                 let cache = memory_session
                     .get_or_insert_with(Session::default)
                     .search
@@ -647,10 +662,10 @@ fn call_tool(
                     cache,
                     format!("memory:{scope}"),
                 );
-                return Ok(serde_json::to_value(crate::embed::search_memory(
-                    db_path,
+                return Ok(serde_json::to_value(crate::embed::search_memory_on(
+                    session_connection(db_path, memory_session)?,
                     scope,
-                    required_str(&args, "query")?,
+                    query,
                     mode,
                     args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
                     &mut loader,
@@ -683,6 +698,14 @@ fn call_tool(
         ),
         _ => bail!("unknown tool {name}"),
     }
+}
+
+/// The session's shared connection, opened (and migrated) once per MCP session.
+fn session_connection<'a>(
+    db_path: &Path,
+    session: &'a mut Option<Session>,
+) -> Result<&'a rusqlite::Connection> {
+    Ok(ensure_memory_session(db_path, session)?.connection())
 }
 
 fn ensure_memory_session<'a>(

@@ -1071,13 +1071,30 @@ pub fn search_memory(
     if query.trim().is_empty() {
         bail!("memory search query cannot be empty");
     }
-    let limit = limit.clamp(1, 100);
     let conn = open_db(db_path)?;
+    search_memory_on(&conn, scope, query, mode, limit, loader)
+}
+
+/// [`search_memory`] on a caller-owned connection. The lexical stage runs on the same
+/// connection instead of opening a second one.
+pub(crate) fn search_memory_on(
+    conn: &Connection,
+    scope: &str,
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+    loader: Loader<'_>,
+) -> Result<MemorySearchResponse> {
+    memory::validate_scope(scope)?;
+    if query.trim().is_empty() {
+        bail!("memory search query cannot be empty");
+    }
+    let limit = limit.clamp(1, 100);
     let mut meta = info(mode);
     let mut semantic: Option<(Vec<(i64, f32)>, ModelIdentity)> = None;
     if mode != SearchMode::Lexical {
         match prepare_query(
-            &conn,
+            conn,
             "memory",
             scope,
             query,
@@ -1087,7 +1104,7 @@ pub fn search_memory(
             Prepared::Ready(embedder, vector) => {
                 let id = embedder.identity().clone();
                 let now = crate::db::now_utc();
-                let (hits, coverage) = memory_knn(&conn, scope, &id, &vector, &now, POOL)?;
+                let (hits, coverage) = memory_knn(conn, scope, &id, &vector, &now, POOL)?;
                 if coverage.embedded == 0 {
                     degrade(
                         &mut meta,
@@ -1111,8 +1128,8 @@ pub fn search_memory(
     }
     let lexical_needed = mode != SearchMode::Semantic || semantic.is_none();
     let lexical = if lexical_needed {
-        memory::recall(
-            db_path,
+        memory::recall_on(
+            conn,
             scope,
             query,
             None,
@@ -1133,7 +1150,7 @@ pub fn search_memory(
     if mode == SearchMode::Semantic {
         let mut results = Vec::new();
         for (id, similarity) in hits.iter().take(limit) {
-            if let Some(memory) = fetch_memory(&conn, scope, *id)? {
+            if let Some(memory) = fetch_memory(conn, scope, *id)? {
                 results.push(MemorySearchResult {
                     memory,
                     match_reason: "semantic".into(),
@@ -1165,7 +1182,7 @@ pub fn search_memory(
         }
         let (memory, coverage) = match lexical_by_id.remove(&id) {
             Some(r) => (r.memory, r.candidate_coverage),
-            None => match fetch_memory(&conn, scope, id)? {
+            None => match fetch_memory(conn, scope, id)? {
                 Some(m) => (m, CandidateCoverage::Complete),
                 None => continue,
             },
@@ -1282,25 +1299,56 @@ pub fn search_code(
     if query.len() > code::MAX_SEARCH_QUERY_BYTES {
         bail!("code search query exceeds 4096 bytes");
     }
-    let context_lines = context_lines.clamp(1, code::MAX_CONTEXT_LINES);
     let scope = repo_scope(root)?;
+    let conn = open_db(db_path)?;
+    search_code_on(
+        &conn,
+        &scope,
+        query,
+        mode,
+        limit,
+        token_budget,
+        context_lines,
+        loader,
+    )
+}
+
+/// [`search_code`] on a caller-owned connection; the lexical stage reuses it. `scope` must come
+/// from [`repo_scope`] for this request.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_code_on(
+    conn: &Connection,
+    scope: &RepoScope,
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+    token_budget: usize,
+    context_lines: usize,
+    loader: Loader<'_>,
+) -> Result<CodeHybridResponse> {
+    if query.trim().is_empty() {
+        bail!("code search query cannot be empty");
+    }
+    if query.len() > code::MAX_SEARCH_QUERY_BYTES {
+        bail!("code search query exceeds 4096 bytes");
+    }
+    let context_lines = context_lines.clamp(1, code::MAX_CONTEXT_LINES);
     let limit = limit.clamp(1, 20);
     let budget = token_budget.clamp(64, code::MAX_TOKEN_BUDGET);
-    let conn = open_db(db_path)?;
     let mut meta = info(mode);
     let mut semantic: Option<(Vec<CodeHit>, ModelIdentity)> = None;
     if mode != SearchMode::Lexical {
         match prepare_query(
-            &conn,
+            conn,
             "code",
-            &code_scope_key(&scope),
+            &code_scope_key(scope),
             query,
             loader,
             "aether-midnight embed --repo <path>",
         ) {
             Prepared::Ready(embedder, vector) => {
                 let id = embedder.identity().clone();
-                let (hits, coverage) = code_knn(&conn, &scope, &id, &vector)?;
+                let (hits, coverage) = code_knn(conn, scope, &id, &vector)?;
                 if coverage.embedded == 0 {
                     degrade(
                         &mut meta,
@@ -1326,9 +1374,9 @@ pub fn search_code(
         None
     } else {
         // Maximum pool and budget: packing happens once, after fusion.
-        Some(code::search_code_with_context(
-            db_path,
-            root,
+        Some(code::search_code_scoped(
+            conn,
+            scope,
             query,
             if semantic.is_some() { 20 } else { limit },
             if semantic.is_some() {
