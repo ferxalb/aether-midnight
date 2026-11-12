@@ -16,6 +16,46 @@
 
 This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
+## 2026-11-12: memory usability, partial top-k KNN and schema 8
+
+Paired release binaries of the parent commit (`fd0fe48`) and of this change, same Linux x86_64
+cloud container (identifiers withheld), `midnight-harness measure-mcp`, one request in flight,
+interleaved runs. Each binary reads its own copy of a database seeded once by the parent binary
+(the change's copy was migrated to schema 8 before measuring). Remote embeddings came from a
+deterministic loopback OpenAI-compatible endpoint (384 dimensions) started for the measurement,
+so its latency is part of every semantic and write-time-embedding sample; it is not a provider
+measurement.
+
+| Workload | Parent p50 / p95 ms | Change p50 / p95 ms | Responses |
+| --- | ---: | ---: | --- |
+| Semantic `recall`, 10,000 embedded memories, 60 distinct queries × 3 runs | 62.4 / 82.1 | 59.2 / 82.9 | identical |
+| Semantic `search_code`, 10,000 files / 20,000 chunk vectors, 60 queries × 3 runs | 102.5 / 129.8 | 90.0 / 114.5 | identical |
+| Lexical `remember` (no provider configured), 300 | 0.244 / 0.390 | 0.265 / 0.450 | identical except `created_at` |
+| Lexical `recall`, 10k namespace, 300 | 1.647 / 2.327 | 1.535 / 2.110 | identical |
+| `list_memories`, 300 | 0.231 / 0.352 | 0.242 / 0.347 | identical except `created_at` |
+| Code MCP workload of the 2026-11-11 section, 9 runs each | per class within ±0.15 ms | per class within ±0.15 ms | identical except index timestamps |
+
+Process CPU per semantic run: memory 3.69–3.86 s → 3.50–3.81 s, code 6.14–6.19 s → 5.34–5.45 s;
+peak RSS unchanged within 0.5 MB. The semantic gain comes from selecting the top k without
+sorting every hit, borrowing vector blobs instead of copying them, and cached statements; a unit
+test checks that the selection equals a full sort plus truncation, ties included. Lexical
+`remember` is about 0.02 ms slower at p50 because each call now reads the saved provider settings
+to decide whether to embed (no provider is configured in that run).
+
+Write-time embedding: with the loopback provider, `remember` took 37.8 / 56.3 ms (p50 / p95,
+n=300) against 0.212 / 0.395 ms with `embed:false`; that time is the provider round trip and
+scales with real provider latency. The local-model path (one model load per MCP connection
+instead of one per uncached query) is **unmeasured**: this host has no pinned ONNX Runtime.
+
+Schema 8: a fresh full index of the generated 10,000-file fixture produced 16,965,632 instead of
+18,743,296 database bytes (−9.5%, identical in all 5 runs per binary). Index wall time
+(1.40–1.54 s → 1.34–1.58 s) and CPU did not differ beyond run-to-run noise.
+
+The frozen `retrieval-quality` suite and the three frozen memory suites, each with forward and
+reverse insertion order, produce identical non-timing output under both binaries. Memory
+candidate generation and ranking are unchanged, so `bench-memory`/`bench-retrieval` were not
+rerun.
+
 ## 2026-11-11: exact-symbol index and MCP connection reuse
 
 Two changes with identical results: the exact-symbol candidate query now compares

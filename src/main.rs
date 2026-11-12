@@ -149,6 +149,11 @@ enum Commands {
         /// Remove the Midnight entry instead of adding it.
         #[arg(long)]
         remove: bool,
+        /// Also add (or with --remove, take out) a short managed block in the project's
+        /// CLAUDE.md (Claude Code) or AGENTS.md (Codex) telling the agent when to search code
+        /// and when to recall or remember. Text outside the block is never changed.
+        #[arg(long)]
+        with_instructions: bool,
         /// Any path inside the project (used for project scope and project storage).
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -425,6 +430,32 @@ enum MemoryAction {
         namespace: String,
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        /// Skip this many of the newest memories (paging; at most 100000).
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Only list this kind.
+        #[arg(long, value_enum)]
+        kind: Option<MemoryKind>,
+    },
+    /// List namespaces that hold active memories, with their counts.
+    Scopes,
+    /// Write every active memory of a namespace as JSON Lines (oldest first) for backup or moving
+    /// it to another database. Forgotten memories are not exported.
+    Export {
+        #[arg(long, alias = "scope")]
+        namespace: String,
+        /// Output file (created, never overwritten). Default: standard output.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Import a file written by `memory export`, atomically: all records or none. Records get new
+    /// ids; provenance and supersession links are remapped.
+    Import {
+        /// File to read (`-` for standard input).
+        input: PathBuf,
+        /// Put every imported memory in this namespace instead of its exported one.
+        #[arg(long, alias = "scope")]
+        namespace: Option<String>,
     },
     /// Delete (suppress) a memory in its exact namespace.
     Delete {
@@ -813,6 +844,7 @@ pub fn main() -> Result<()> {
             read_only,
             dry_run,
             remove,
+            with_instructions,
             path,
         } => connect_command(
             ConnectRequest {
@@ -822,6 +854,7 @@ pub fn main() -> Result<()> {
                 read_only,
                 dry_run,
                 remove,
+                with_instructions,
                 path,
             },
             cli.db.clone(),
@@ -1432,12 +1465,93 @@ fn memory_command(db_path: &std::path::Path, action: MemoryAction, json: bool) -
             }
             None => anyhow::bail!("memory {id} not found in namespace {namespace:?}"),
         },
-        MemoryAction::List { namespace, limit } => {
-            let ms = memory::list_memories(db_path, &namespace, limit)?;
+        MemoryAction::List {
+            namespace,
+            limit,
+            offset,
+            kind,
+        } => {
+            let kind = kind.map(|kind| match kind {
+                MemoryKind::Source => "source",
+                MemoryKind::Derived => "derived",
+            });
+            let ms = memory::list_memories_page(db_path, &namespace, kind, limit, offset)?;
             if json {
                 print_json(&ms)?
             } else {
                 ms.iter().for_each(|m| println!("{}", line(m)))
+            }
+        }
+        MemoryAction::Scopes => {
+            let scopes = memory::list_scopes(db_path)?;
+            if json {
+                print_json(&scopes)?
+            } else if scopes.is_empty() {
+                eprintln!("no namespaces hold active memories");
+            } else {
+                scopes
+                    .iter()
+                    .for_each(|s| println!("{}\t{}", s.scope, s.active_memories))
+            }
+        }
+        MemoryAction::Export { namespace, output } => {
+            let report = match &output {
+                Some(path) => {
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    let file = options
+                        .open(path)
+                        .with_context(|| format!("create export file {}", path.display()))?;
+                    let mut writer = std::io::BufWriter::new(file);
+                    memory::export_jsonl(db_path, &namespace, &mut writer)?
+                }
+                None => {
+                    let stdout = std::io::stdout();
+                    let mut writer = std::io::BufWriter::new(stdout.lock());
+                    memory::export_jsonl(db_path, &namespace, &mut writer)?
+                }
+            };
+            // stdout may carry the export itself, so the summary goes to stderr there.
+            if output.is_some() && json {
+                print_json(&report)?
+            } else {
+                eprintln!(
+                    "exported {} memories from {}",
+                    report.exported, report.scope
+                );
+            }
+        }
+        MemoryAction::Import { input, namespace } => {
+            let report = if input.as_os_str() == "-" {
+                let stdin = std::io::stdin();
+                memory::import_jsonl(db_path, &mut stdin.lock(), namespace.as_deref())?
+            } else {
+                let file = std::fs::File::open(&input)
+                    .with_context(|| format!("open import file {}", input.display()))?;
+                memory::import_jsonl(
+                    db_path,
+                    &mut std::io::BufReader::new(file),
+                    namespace.as_deref(),
+                )?
+            };
+            if json {
+                print_json(&report)?
+            } else {
+                println!("imported {} memories", report.imported);
+                for (scope, count) in &report.scopes {
+                    println!("  {scope}\t{count}");
+                }
+                if report.dropped_source_links + report.dropped_supersedes_links > 0 {
+                    println!(
+                        "  dropped links to memories missing from the file: {} source, {} supersedes",
+                        report.dropped_source_links, report.dropped_supersedes_links
+                    );
+                }
             }
         }
         MemoryAction::Delete { namespace, id } => {
@@ -1869,6 +1983,7 @@ struct ConnectRequest {
     read_only: bool,
     dry_run: bool,
     remove: bool,
+    with_instructions: bool,
     path: PathBuf,
 }
 
@@ -2024,6 +2139,7 @@ fn project_setup(
                     read_only: false,
                     dry_run: false,
                     remove: false,
+                    with_instructions: false,
                     path: root.clone(),
                 },
                 None,
@@ -2045,6 +2161,13 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
     };
     let root = connect::project_root(&req.path)?;
     let config_path = connect::config_path(client, scope, &root, &connect::Dirs::from_env()?)?;
+    let instructions_path = if req.with_instructions {
+        Some(connect::instructions_path(client, &root).context(
+            "--with-instructions needs a client with a project instructions file (claude-code: CLAUDE.md, codex: AGENTS.md)",
+        )?)
+    } else {
+        None
+    };
 
     // The entry never pins a database unless --db was given: a server started inside a project
     // finds that project's `.midnight/` by itself, and otherwise uses the global database. That
@@ -2105,6 +2228,27 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
         )?
     };
 
+    let instructions = match &instructions_path {
+        Some(path) => {
+            let project_scope = memory::project_scope_for(&root)
+                .context("cannot derive a project memory namespace from this directory name")?;
+            let backup_dir = path
+                .exists()
+                .then(|| root.join(connect::PROJECT_DIR).join("backups"));
+            if backup_dir.is_some() && !req.dry_run {
+                connect::prepare_project_storage(&root)?;
+            }
+            Some(connect::update_instructions(
+                path,
+                &project_scope,
+                req.remove,
+                req.dry_run,
+                backup_dir.as_deref(),
+            )?)
+        }
+        None => None,
+    };
+
     if json {
         print_json(&serde_json::json!({
             "path": outcome.path,
@@ -2114,6 +2258,11 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
             "backup": outcome.backup,
             "command": command,
             "database_path": db_arg,
+            "instructions": instructions.as_ref().map(|i| serde_json::json!({
+                "path": i.path,
+                "changed": i.changed,
+                "backup": i.backup,
+            })),
         }))?;
         return Ok(());
     }
@@ -2130,6 +2279,19 @@ fn connect_command(req: ConnectRequest, db_flag: Option<PathBuf>, json: bool) ->
     }
     if let Some(bak) = &outcome.backup {
         println!("previous contents saved to {}", bak.display());
+    }
+    if let Some(instructions) = &instructions {
+        let verb = match (req.remove, instructions.changed, req.dry_run) {
+            (_, false, _) => "instructions already up to date:",
+            (false, true, true) => "would add instructions to",
+            (true, true, true) => "would remove instructions from",
+            (false, true, false) => "added instructions to",
+            (true, true, false) => "removed instructions from",
+        };
+        println!("{verb} {}", instructions.path.display());
+        if let Some(bak) = &instructions.backup {
+            println!("previous contents saved to {}", bak.display());
+        }
     }
     if req.dry_run && outcome.changed && !req.remove {
         println!("\n{}", outcome.contents);

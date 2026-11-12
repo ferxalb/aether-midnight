@@ -10,7 +10,7 @@
 //!   model identity before a single vector is read, and joins the live source row.
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -340,8 +340,26 @@ fn dot_with_blob(blob: &[u8], query: &[f32]) -> Option<f32> {
     )
 }
 
+/// Reference ordering for [`top_k_hits`]: descending similarity, then `tie`.
+#[cfg(test)]
 fn sort_hits<T>(hits: &mut [(T, f32)], tie: impl Fn(&T, &T) -> std::cmp::Ordering) {
     hits.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| tie(&a.0, &b.0)));
+}
+
+/// The first `k` elements of the `sort_hits` order, in that order, without sorting the rest.
+/// `tie` must make the order total (unique keys), so the selected set and its order are exactly
+/// those of a full sort followed by truncation.
+fn top_k_hits<T>(hits: &mut Vec<(T, f32)>, k: usize, tie: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    let order = |a: &(T, f32), b: &(T, f32)| b.1.total_cmp(&a.1).then_with(|| tie(&a.0, &b.0));
+    if k == 0 {
+        hits.clear();
+        return;
+    }
+    if hits.len() > k {
+        hits.select_nth_unstable_by(k - 1, order);
+        hits.truncate(k);
+    }
+    hits.sort_by(order);
 }
 
 /// Deterministic Reciprocal Rank Fusion. `score(d) = sum 1 / (RRF_K + rank_i(d))`, ranks 1-based.
@@ -386,6 +404,97 @@ fn remove_other_models(
            AND (model<>?3 OR revision<>?4 OR dims<>?5)",
         params![kind, scope, id.name, id.revision, id.dimensions as i64],
     )?)
+}
+
+/// Embed specific memories right after they were stored, on a caller-owned connection. Rows that
+/// are no longer active, or already have a vector of this model for the same content hash, are
+/// skipped. Unlike [`embed_memories`] it neither scans the namespace nor removes vectors of other
+/// model revisions; `embed --namespace` still reconciles those.
+pub(crate) fn embed_memory_ids(
+    conn: &Connection,
+    scope: &str,
+    memory_ids: &[i64],
+    embedder: &mut dyn TextEmbedder,
+) -> Result<EmbedReport> {
+    memory::validate_scope(scope)?;
+    let id = embedder.identity().clone();
+    let mut report = EmbedReport {
+        kind: "memory",
+        scope: scope.to_string(),
+        model: id.name.clone(),
+        revision: id.revision.clone(),
+        ..Default::default()
+    };
+    let mut todo: Vec<(i64, String, String)> = Vec::with_capacity(memory_ids.len());
+    {
+        let mut stmt = conn.prepare_cached(
+            "SELECT m.content,e.source_hash,e.model,e.revision,e.dims FROM memories m
+             LEFT JOIN embeddings e ON e.kind='memory' AND e.owner_id=m.id AND e.chunk=0
+             WHERE m.id=?1 AND m.scope=?2 AND m.deleted_at IS NULL",
+        )?;
+        for &mid in memory_ids {
+            let row = stmt
+                .query_row(params![mid, scope], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                })
+                .optional()?;
+            let Some((content, stored, model, revision, dims)) = row else {
+                continue;
+            };
+            let hash = hash_bytes(content.as_bytes());
+            let same_model = model.as_deref() == Some(id.name.as_str())
+                && revision.as_deref() == Some(id.revision.as_str())
+                && dims == Some(id.dimensions as i64);
+            if same_model && stored.as_deref() == Some(hash.as_str()) {
+                report.unchanged += 1;
+            } else {
+                todo.push((mid, content, hash));
+            }
+        }
+    }
+    for batch in todo.chunks(BATCH) {
+        let texts: Vec<&str> = batch.iter().map(|(_, c, _)| c.as_str()).collect();
+        let vectors = embedder.embed(TextKind::Passage, &texts)?;
+        if vectors.len() != batch.len() {
+            bail!(
+                "embedder returned {} vectors for {} inputs",
+                vectors.len(),
+                batch.len()
+            );
+        }
+        if vectors
+            .iter()
+            .any(|v| v.len() != id.dimensions || v.iter().any(|x| !x.is_finite()))
+        {
+            bail!("embedder returned a vector with the wrong dimensions or non-finite values");
+        }
+        let tx = conn.unchecked_transaction()?;
+        for ((mid, _, hash), vector) in batch.iter().zip(&vectors) {
+            tx.prepare_cached(
+                "INSERT OR REPLACE INTO embeddings(kind,scope,owner_id,chunk,line_start,line_end,model,revision,dims,source_hash,vector)
+                 SELECT 'memory',?1,?2,0,NULL,NULL,?3,?4,?5,?6,?7
+                 WHERE EXISTS (SELECT 1 FROM memories WHERE id=?2 AND scope=?1 AND deleted_at IS NULL)",
+            )?
+            .execute(params![
+                scope,
+                mid,
+                id.name,
+                id.revision,
+                id.dimensions as i64,
+                hash,
+                encode_vector(vector)
+            ])?;
+            report.embedded += 1;
+        }
+        tx.commit()?;
+    }
+    Ok(report)
 }
 
 /// Incrementally embed the active memories of one namespace. Unchanged memories are skipped by
@@ -1006,7 +1115,7 @@ fn memory_knn(
     now: &str,
     k: usize,
 ) -> Result<(Vec<(i64, f32)>, Coverage)> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT e.owner_id,e.vector FROM embeddings e
          JOIN memories m ON m.id=e.owner_id
          WHERE e.kind='memory' AND e.scope=?1 AND e.model=?2 AND e.revision=?3 AND e.dims=?4
@@ -1024,20 +1133,19 @@ fn memory_knn(
     ])?;
     while let Some(row) = rows.next()? {
         let owner: i64 = row.get(0)?;
-        let blob: Vec<u8> = row.get(1)?;
-        if let Some(sim) = dot_with_blob(&blob, query) {
+        if let Some(sim) = dot_with_blob(row.get_ref(1)?.as_blob()?, query) {
             hits.push((owner, sim));
         }
     }
+    drop(rows);
     let embedded = hits.len() as u64;
-    sort_hits(&mut hits, |a, b| a.cmp(b));
-    hits.truncate(k);
-    let eligible: i64 = conn.query_row(
-        "SELECT count(*) FROM memories WHERE scope=?1 AND deleted_at IS NULL
+    top_k_hits(&mut hits, k, |a, b| a.cmp(b));
+    let eligible: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM memories WHERE scope=?1 AND deleted_at IS NULL
            AND (valid_from IS NULL OR valid_from<=?2) AND (valid_to IS NULL OR valid_to>?2)",
-        params![scope, now],
-        |r| r.get(0),
-    )?;
+        )?
+        .query_row(params![scope, now], |r| r.get(0))?;
     Ok((
         hits,
         Coverage {
@@ -1216,14 +1324,15 @@ fn code_knn(
     id: &ModelIdentity,
     query: &[f32],
 ) -> Result<(Vec<CodeHit>, Coverage)> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT f.rel_path,e.chunk,e.line_start,e.line_end,e.vector,f.content_hash,f.indexed_generation
          FROM embeddings e JOIN code_files f ON f.id=e.owner_id
          WHERE e.kind='code' AND e.scope=?1 AND e.model=?2 AND e.revision=?3 AND e.dims=?4
            AND f.repo_id=?5 AND f.worktree_id=?6",
     )?;
+    // Every file with at least one valid vector has an entry, so `best.len()` is the number of
+    // embedded files.
     let mut best: HashMap<String, CodeHit> = HashMap::new();
-    let mut embedded_files = std::collections::HashSet::new();
     let mut rows = stmt.query(params![
         code_scope_key(scope),
         id.name,
@@ -1233,30 +1342,30 @@ fn code_knn(
         scope.worktree_id
     ])?;
     while let Some(row) = rows.next()? {
-        let path: String = row.get(0)?;
-        let blob: Vec<u8> = row.get(4)?;
-        let Some(similarity) = dot_with_blob(&blob, query) else {
+        let Some(similarity) = dot_with_blob(row.get_ref(4)?.as_blob()?, query) else {
             continue;
         };
-        embedded_files.insert(path.clone());
+        let path = row.get_ref(0)?.as_str()?;
+        let chunk: i64 = row.get(1)?;
+        // Same rule as before: keep the higher similarity, then the lower chunk.
+        if best.get(path).is_some_and(|cur| {
+            cur.similarity > similarity || (cur.similarity == similarity && cur.chunk <= chunk)
+        }) {
+            continue;
+        }
         let hit = CodeHit {
-            path: path.clone(),
-            chunk: row.get(1)?,
+            path: path.to_string(),
+            chunk,
             line_start: row.get::<_, Option<u32>>(2)?.unwrap_or(1),
             line_end: row.get::<_, Option<u32>>(3)?.unwrap_or(1),
             similarity,
             file_hash: row.get(5)?,
             generation: row.get::<_, i64>(6)? as u64,
         };
-        match best.get(&path) {
-            Some(cur)
-                if cur.similarity > similarity
-                    || (cur.similarity == similarity && cur.chunk <= hit.chunk) => {}
-            _ => {
-                best.insert(path, hit);
-            }
-        }
+        best.insert(hit.path.clone(), hit);
     }
+    drop(rows);
+    let embedded_files = best.len();
     let eligible: i64 = conn.query_row(
         "SELECT count(*) FROM code_files WHERE repo_id=?1 AND worktree_id=?2",
         params![scope.repo_id, scope.worktree_id],
@@ -1269,13 +1378,12 @@ fn code_knn(
             (h, s)
         })
         .collect();
-    sort_hits(&mut hits, |a, b| a.path.cmp(&b.path));
-    hits.truncate(20);
+    top_k_hits(&mut hits, 20, |a, b| a.path.cmp(&b.path));
     Ok((
         hits.into_iter().map(|h| h.0).collect(),
         Coverage {
             eligible: eligible as u64,
-            embedded: embedded_files.len() as u64,
+            embedded: embedded_files as u64,
         },
     ))
 }

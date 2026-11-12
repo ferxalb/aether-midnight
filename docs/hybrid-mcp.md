@@ -11,6 +11,7 @@ use to MCP. It does not change the database schema or the memory lexical ranking
 | MCP stdio `search_code` | lexical | hybrid |
 | MCP HTTP `search_code` | lexical | hybrid only if the token permits remote embeddings, or the provider is local |
 | MCP `recall` | lexical | lexical; semantic/hybrid must be explicit |
+| MCP `remember` / `remember_batch` | store only | store, then embed the new memories (`embed:false` skips) |
 
 All code searches accept `lexical`, `semantic`, and `hybrid`. An explicit lexical request never
 loads a model, reads credentials, or contacts a provider, even with saved cloud settings.
@@ -43,7 +44,12 @@ MCP `search_code` examples (arguments of `tools/call`):
 
 `repo_path` resolution, repository-root policy, freshness checks, limits and snippet budgets
 apply in every mode. MCP accepts no provider, model, endpoint, credential or consent override.
-`search_code` embeds only the query; it never embeds source files on demand. With saved consent
+`search_code` embeds only the query; it never embeds source files on demand. `remember` and
+`remember_batch` embed only the memories they just stored, under the rules `index_repository`
+uses (policy remote grant and saved consent for remote providers), with the interactive
+one-attempt budget; the write is never undone by an embedding failure. With the local provider,
+one MCP connection loads the model once and reuses it for every query and stored memory; earlier
+builds loaded it again for each query-cache miss. With saved consent
 and permission, `index_repository` also incrementally embeds the indexed repository. It keeps
 its lexical report and adds `embedding` on success or `embedding_notice` on failure. A provider
 failure does not undo successful lexical indexing. `refresh_indexed_file` remains lexical-only;

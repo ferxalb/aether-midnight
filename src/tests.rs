@@ -145,7 +145,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -178,7 +178,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "7");
+    assert_eq!(schema, "8");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -234,7 +234,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -312,7 +312,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
@@ -320,7 +320,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "7");
+    assert_eq!(schema_version, "8");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,
@@ -397,7 +397,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 7);
+    assert_eq!(reopened_version, 8);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()

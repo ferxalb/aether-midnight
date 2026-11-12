@@ -2,6 +2,15 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (1) — Make memory usable by default and speed up exact KNN
+
+- MCP memory calls without `scope` use `project:<default repository directory>` (the repository code tools default to), unless a policy pins one scope or its scope list excludes the default; explicit scopes are never replaced. `initialize` instructions now say when to recall and remember, the source → derived workflow, and the scope in effect. New tools `get_memory` and `list_scopes`; `list_memories` gains `offset` and `kind`. Tool descriptions carry a worked example.
+- `remember`/`remember_batch` embed the memories they just stored when a provider is configured and permitted under `index_repository`'s rules (remote grant, saved consent, project opt-out), with the one-attempt interactive budget; `remember` reports `embedding` or `embedding_notice`, `embed:false` opts out, and a failure never undoes the write. Both are now `openWorldHint`. One MCP connection loads the local model at most once (it was reloaded on every query-cache miss).
+- CLI: `memory scopes`, `memory list --offset/--kind`, `memory export` (JSON Lines, new `0600` file) and atomic `memory import` with id remapping; `connect --with-instructions` manages a marked block in `CLAUDE.md`/`AGENTS.md`. The derived-provenance error now says how to fix it.
+- Exact KNN selects the top k without a full sort, borrows vector blobs and caches statements (identical results). Schema 8 drops the duplicate `code_files_scope_path` index (−9.5% database bytes on the 10k fixture). Older binaries refuse a schema-8 database.
+- Paired release measurements, all responses identical: semantic code search p50 102.5 → 90.0 ms, semantic recall 62.4 → 59.2 ms (loopback provider included), lexical memory operations and the code workload within noise, lexical `remember` +0.02 ms p50. Local-model reuse is unmeasured (no pinned runtime on this host). Frozen quality suites unchanged. Details: `docs/performance.md` (2026-11-12); contract: `docs/api.md`, `docs/hybrid-mcp.md`, `docs/privacy.md`, `docs/architecture.md`.
+- Validation: `cargo fmt --check`, strict Clippy and `cargo test --locked` pass. `cli_update` intermittently fails one test with an error while spawning a freshly copied binary; it also fails on the parent commit and is unrelated.
+
 ## 2026-11-11 (1) — Index exact-symbol lookups and reuse the MCP session connection
 
 - Exact-symbol candidates in `search_code` now use `s.name=?3 COLLATE NOCASE` (`code::EXACT_SYMBOL_FILES_SQL`), which searches the `code_symbols_name` index; the previous `lower()` comparison probed every file of the worktree on every query. Matching is unchanged because both forms fold only ASCII in the bundled SQLite; `exact_symbol_lookup_searches_the_nocase_name_index_and_folds_only_ascii` asserts the plan and the folding premise.
