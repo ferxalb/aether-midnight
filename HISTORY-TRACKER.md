@@ -2,6 +2,14 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (2) — Prepare rc.7, add the rc.7 validation procedure, index paths by trigram
+
+- Version `0.1.0-rc.7` in `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README and `docs/installation.md`; new `docs/release-notes/v0.1.0-rc.7.md`; `docs/release-checklist.md` now lists rc.7 gates (measurement, real-repository, real-client and publication gates open) above the rc.6 campaign; `CHANGELOG.md` and `docs/v0.1-status.md` point at rc.7. No tag, release or publication was made. Downgrade advice (back up before the first rc.7 run) is in `docs/installation.md`.
+- `midnight-harness rc7-workloads --repo FIXTURE --output DIR` writes deterministic `measure-mcp` request files with the shapes of the rc.7 campaign. `docs/macos-benchmark-guide.md#rc7-validation` gives the native procedure: rc.6 vs rc.7 seeded once, lexical workloads, local-model reuse (unmeasured so far), a large real repository and real clients.
+- Profiling found a path-substring scan of the whole catalog in every `search_code`. Schema 9 adds `code_path_fts` (contentless FTS5 trigram over `rel_path`, trigger-maintained, idempotent migration with backfill); path candidates of three or more characters read it and keep the original `instr(lower(...))` predicate and ordering. A test checks equality with an ASCII-folding oracle across Unicode, quotes, short queries, deletes and renames.
+- Paired release measurement on the 10k fixture, all 3,960 responses identical: lexical `search_code` p50 3.1–4.2 → 0.5–1.3 ms, terms in every file 9.2–9.4 → 6.6–6.7 ms (the remainder is FTS5 BM25 scoring, unchanged); costs +2.9% database bytes and about 7–8% more indexing CPU. Frozen quality suites unchanged. Details: `docs/performance.md` (2026-11-12, path trigram index); format: `docs/architecture.md`.
+- Validation: `cargo fmt --check`, strict Clippy, `cargo test --locked`, `cargo check --locked` and installer shell syntax pass.
+
 ## 2026-11-12 (1) — Make memory usable by default and speed up exact KNN
 
 - MCP memory calls without `scope` use `project:<default repository directory>` (the repository code tools default to), unless a policy pins one scope or its scope list excludes the default; explicit scopes are never replaced. `initialize` instructions now say when to recall and remember, the source → derived workflow, and the scope in effect. New tools `get_memory` and `list_scopes`; `list_memories` gains `offset` and `kind`. Tool descriptions carry a worked example.

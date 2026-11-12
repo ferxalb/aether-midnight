@@ -2017,6 +2017,44 @@ pub(crate) fn search_code_scoped(
     })
 }
 
+/// Path-substring candidates: rows whose `rel_path` contains the query under SQLite's ASCII-only
+/// case folding, ordered by `rel_path` (`exact_first` puts a whole-path match first). Queries of
+/// at least three characters first narrow the rows through the `code_path_fts` trigram index; the
+/// same `instr` predicate then decides membership, so both forms return the same rows in the same
+/// order. Shorter queries have no trigram and scan the worktree's catalog. Parameters: ?1 repo,
+/// ?2 worktree, ?3 query, ?4 limit, ?5 the trigram phrase (NULL, and unused, when scanning).
+pub(crate) fn path_substring_sql(query: &str, exact_first: bool) -> (&'static str, Option<String>) {
+    const SCAN: &str = "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
+         WHERE repo_id=?1 AND worktree_id=?2 AND instr(lower(rel_path),lower(?3))>0 AND ?5 IS NULL
+         ORDER BY rel_path LIMIT ?4";
+    const SCAN_EXACT_FIRST: &str =
+        "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
+         WHERE repo_id=?1 AND worktree_id=?2 AND instr(lower(rel_path),lower(?3))>0 AND ?5 IS NULL
+         ORDER BY CASE WHEN lower(rel_path)=lower(?3) THEN 0 ELSE 1 END,rel_path LIMIT ?4";
+    const TRIGRAM: &str = "SELECT f.id,f.rel_path,f.content_hash,f.indexed_generation
+         FROM code_path_fts p JOIN code_files f ON f.id=p.rowid
+         WHERE code_path_fts MATCH ?5 AND f.repo_id=?1 AND f.worktree_id=?2
+           AND instr(lower(f.rel_path),lower(?3))>0
+         ORDER BY f.rel_path LIMIT ?4";
+    const TRIGRAM_EXACT_FIRST: &str = "SELECT f.id,f.rel_path,f.content_hash,f.indexed_generation
+         FROM code_path_fts p JOIN code_files f ON f.id=p.rowid
+         WHERE code_path_fts MATCH ?5 AND f.repo_id=?1 AND f.worktree_id=?2
+           AND instr(lower(f.rel_path),lower(?3))>0
+         ORDER BY CASE WHEN lower(f.rel_path)=lower(?3) THEN 0 ELSE 1 END,f.rel_path LIMIT ?4";
+    if query.chars().count() < 3 || query.contains('\0') {
+        return (if exact_first { SCAN_EXACT_FIRST } else { SCAN }, None);
+    }
+    let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+    (
+        if exact_first {
+            TRIGRAM_EXACT_FIRST
+        } else {
+            TRIGRAM
+        },
+        Some(phrase),
+    )
+}
+
 /// Files declaring a symbol whose name equals the query, ignoring ASCII case. `COLLATE NOCASE`
 /// on the column lets SQLite search `code_symbols_name` (declared `COLLATE NOCASE`); the earlier
 /// `lower(s.name)=lower(?3)` could not use it and probed every file in the worktree. Both fold
@@ -2079,13 +2117,16 @@ fn indexed_candidates(
             );
         }
         if map.is_empty() {
-            let mut stmt = conn.prepare(
-                "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
-                 WHERE repo_id=?1 AND worktree_id=?2 AND instr(lower(rel_path),lower(?3))>0
-                 ORDER BY rel_path LIMIT ?4",
-            )?;
+            let (sql, trigram) = path_substring_sql(query, false);
+            let mut stmt = conn.prepare_cached(sql)?;
             let rows = stmt.query_map(
-                params![scope.repo_id, scope.worktree_id, query, limit as i64],
+                params![
+                    scope.repo_id,
+                    scope.worktree_id,
+                    query,
+                    limit as i64,
+                    trigram
+                ],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -2112,13 +2153,16 @@ fn indexed_candidates(
         return Ok(map.into_values().collect());
     }
     {
-        let mut stmt = conn.prepare(
-            "SELECT id,rel_path,content_hash,indexed_generation FROM code_files
-             WHERE repo_id=?1 AND worktree_id=?2 AND instr(lower(rel_path),lower(?3))>0
-             ORDER BY CASE WHEN lower(rel_path)=lower(?3) THEN 0 ELSE 1 END,rel_path LIMIT ?4",
-        )?;
+        let (sql, trigram) = path_substring_sql(query, true);
+        let mut stmt = conn.prepare_cached(sql)?;
         let rows = stmt.query_map(
-            params![scope.repo_id, scope.worktree_id, query, limit as i64],
+            params![
+                scope.repo_id,
+                scope.worktree_id,
+                query,
+                limit as i64,
+                trigram
+            ],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,

@@ -748,6 +748,117 @@ fn measure_mcp(bin: &Path, db: &Path, requests: &Path) -> Result<Value> {
     )
 }
 
+/// Deterministic 64-bit LCG (Knuth MMIX constants): reproducible workloads without a RNG crate.
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn words(&mut self, vocabulary: &[&str], count: usize) -> String {
+        (0..count)
+            .map(|_| vocabulary[self.next() as usize % vocabulary.len()])
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Write the `measure-mcp` request files of the rc.7 paired campaign (docs/performance.md,
+/// 2026-11-11 and 2026-11-12) for a fixture repository at `repo`, so the same workloads can be
+/// replayed on another host. Contents depend only on `repo` and the fixed seeds.
+fn rc7_workloads(repo: &Path, output: &Path) -> Result<Value> {
+    std::fs::create_dir_all(output)?;
+    let repo = repo
+        .canonicalize()
+        .with_context(|| format!("resolve {}", repo.display()))?;
+    let repo = repo.to_string_lossy();
+    let vocabulary = [
+        "alpha", "beta", "gamma", "delta", "retry", "budget", "invoice", "cache", "payment",
+        "timeout", "session", "token", "schema", "index", "memory", "policy", "vector", "cluster",
+        "region", "deploy", "rollback", "config", "secret", "audit", "metric", "latency", "queue",
+        "worker", "shard", "replica", "backup", "restore",
+    ];
+    let mut files = serde_json::Map::new();
+    let mut write = |name: &str, requests: Vec<Value>| -> Result<()> {
+        let path = output.join(name);
+        std::fs::write(&path, serde_json::to_string(&requests)? + "\n")?;
+        files.insert(
+            name.into(),
+            json!({"path": path, "requests": requests.len()}),
+        );
+        Ok(())
+    };
+
+    let mut code = Vec::new();
+    for _ in 0..30 {
+        for query in [
+            "filler_01095",
+            "FILLER_04321",
+            "filler_09999",
+            "payload",
+            "seed20261103",
+            "usize",
+            "missing_symbol_zz",
+        ] {
+            code.push(json!({"name":"search_code","arguments":{"repo_path":repo,"query":query,"limit":10,"mode":"lexical"}}));
+        }
+        code.push(json!({"name":"open_range","arguments":{"repo_path":repo,"path":"src/01095.rs","line_start":1,"line_end":3}}));
+        code.push(json!({"name":"list_symbols","arguments":{"repo_path":repo,"name":"filler_0109","limit":20}}));
+        code.push(json!({"name":"index_status","arguments":{"repo_path":repo}}));
+        code.push(json!({"name":"repo_map","arguments":{"repo_path":repo}}));
+    }
+    write("code_lexical.json", code)?;
+
+    let mut rng = Lcg(20261112);
+    let mut seed = Vec::new();
+    let mut n = 0;
+    for _ in 0..20 {
+        let memories = (0..500)
+            .map(|_| {
+                n += 1;
+                json!({"scope":"project:knn","kind":"source","content":format!("note {n}: {}", rng.words(&vocabulary, 12))})
+            })
+            .collect::<Vec<_>>();
+        seed.push(json!({"name":"remember_batch","arguments":{"memories":memories,"embed":false}}));
+    }
+    write("seed_memories.json", seed)?;
+    let memory_knn = (0..60)
+        .map(|i| json!({"name":"recall","arguments":{"scope":"project:knn","query":format!("distinct query {i} {}", rng.words(&vocabulary, 3)),"mode":"semantic","limit":10}}))
+        .collect();
+    write("knn_memory.json", memory_knn)?;
+    let code_knn = (0..60)
+        .map(|i| json!({"name":"search_code","arguments":{"repo_path":repo,"query":format!("semantic question {i} about filler payload"),"mode":"semantic","limit":10}}))
+        .collect();
+    write("knn_code.json", code_knn)?;
+    let mut lexical = Vec::new();
+    for i in 0..100 {
+        lexical.push(json!({"name":"remember","arguments":{"scope":"project:knn","kind":"source","content":format!("lexical op {i} {}", rng.words(&vocabulary, 8)),"embed":false}}));
+        lexical.push(json!({"name":"recall","arguments":{"scope":"project:knn","query":rng.words(&vocabulary, 2),"limit":10}}));
+        lexical
+            .push(json!({"name":"list_memories","arguments":{"scope":"project:knn","limit":20}}));
+    }
+    write("memory_lexical.json", lexical)?;
+    let writes = |embed: bool, rng: &mut Lcg| -> Vec<Value> {
+        (0..100)
+            .map(|i| {
+                let mut args = json!({"scope":"project:w","kind":"source","content":format!("write embed {i} {}", rng.words(&vocabulary, 8))});
+                if !embed {
+                    args["embed"] = json!(false);
+                }
+                json!({"name":"remember","arguments":args})
+            })
+            .collect()
+    };
+    let mut write_rng = Lcg(7);
+    write("remember_embed.json", writes(true, &mut write_rng))?;
+    let mut write_rng = Lcg(7);
+    write("remember_no_embed.json", writes(false, &mut write_rng))?;
+    Ok(json!({"repo": repo, "files": files}))
+}
+
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |n: &str| {
@@ -786,13 +897,14 @@ fn main() -> Result<()> {
             )?
         }
         "retrieval-quality" => retrieval_quality(&binary_path(flag("--binary"))?)?,
+        "rc7-workloads" => rc7_workloads(Path::new(need("--repo")?), Path::new(need("--output")?))?,
         "measure-mcp" => measure_mcp(
             &binary_path(flag("--binary"))?,
             Path::new(need("--db")?),
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B]>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR>"
         ),
     };
     if let Some(p) = flag("--json-output") {

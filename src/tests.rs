@@ -145,7 +145,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -178,7 +178,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "8");
+    assert_eq!(schema, "9");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -234,7 +234,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -312,7 +312,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
@@ -320,7 +320,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "9");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,
@@ -397,7 +397,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 8);
+    assert_eq!(reopened_version, 9);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()
@@ -1923,4 +1923,111 @@ fn exact_symbol_lookup_searches_the_nocase_name_index_and_folds_only_ascii() {
             results[0].match_reason
         );
     }
+}
+
+#[test]
+fn trigram_path_candidates_equal_the_ascii_folding_scan_through_changes() {
+    let base = TempDir::new().unwrap();
+    let repo = new_repo(&base, "paths");
+    let names = [
+        "src/Payments/RetryBudget.rs",
+        "src/payments/retry_budget.rs",
+        "src/ÉLAN/naïve.py",
+        "src/élan/Naïve.ts",
+        "docs/K-kelvin\u{212A}.md",
+        "docs/quote\"name.md",
+        "a/ab.rs",
+        "src/x y/z.rs",
+    ];
+    for name in names {
+        let path = repo.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "pub fn body() {}\n").unwrap();
+    }
+    let database = base.path().join("db.sqlite3");
+    let queries = [
+        "payments",
+        "PAYMENTS",
+        "retry",
+        "Budget",
+        "élan",
+        "ÉLAN",
+        "naïve",
+        "NAÏVE",
+        "kelvin",
+        "\u{212A}",
+        "k\u{212A}",
+        "quote\"n",
+        "\"",
+        "ab",
+        "a",
+        "x y",
+        "src/",
+        ".rs",
+        "nothing-here",
+        "src/payments/retry_budget.rs",
+        "SRC/PAYMENTS/RETRY_BUDGET.RS",
+    ];
+    let check = |label: &str| {
+        let conn = db::open_db(&database).unwrap();
+        let scope = db::repo_scope(&repo).unwrap();
+        let mut all = conn
+            .prepare("SELECT rel_path FROM code_files WHERE repo_id=?1 AND worktree_id=?2")
+            .unwrap()
+            .query_map(rusqlite::params![scope.repo_id, scope.worktree_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        all.sort();
+        for query in queries {
+            for exact_first in [false, true] {
+                let folded = query.to_ascii_lowercase();
+                let mut expected: Vec<&String> = all
+                    .iter()
+                    .filter(|p| p.to_ascii_lowercase().contains(&folded))
+                    .collect();
+                if exact_first {
+                    expected.sort_by_key(|p| (!p.eq_ignore_ascii_case(query), p.as_str()));
+                }
+                expected.truncate(5);
+                let (sql, trigram) = code::path_substring_sql(query, exact_first);
+                let actual = conn
+                    .prepare(sql)
+                    .unwrap()
+                    .query_map(
+                        rusqlite::params![scope.repo_id, scope.worktree_id, query, 5i64, trigram],
+                        |r| r.get::<_, String>(1),
+                    )
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert_eq!(
+                    actual.iter().collect::<Vec<_>>(),
+                    expected,
+                    "{label}: query {query:?} exact_first={exact_first}"
+                );
+            }
+        }
+    };
+    assert!(run_index(&database, &repo).complete);
+    check("initial");
+    fs::remove_file(repo.join("src/payments/retry_budget.rs")).unwrap();
+    fs::rename(
+        repo.join("src/x y/z.rs"),
+        repo.join("src/x y/renamed_budget.rs"),
+    )
+    .unwrap();
+    assert!(run_index(&database, &repo).complete);
+    check("after delete and rename");
+    let conn = db::open_db(&database).unwrap();
+    let stale: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM code_path_fts WHERE code_path_fts MATCH '\"retry_budget\"'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "deleted paths leave the trigram index");
 }

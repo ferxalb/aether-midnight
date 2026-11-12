@@ -1,7 +1,30 @@
-# v0.1.0-rc.6 checklist and stable decision
+# v0.1.0-rc.7 checklist and stable decision
 
-rc.6 is the final planned candidate before deciding whether to release v0.1.0 stable. A passing
-candidate workflow does not automatically authorize or establish stable readiness.
+rc.7 replaces rc.6 as the candidate for the v0.1.0 stable decision: it migrates the database to
+schema 9 and changes the MCP memory contract (default scope, write-time embedding, new tools), so
+those changes need a published prerelease first. A passing candidate workflow does not
+automatically authorize or establish stable readiness. Notes: [rc.7](release-notes/v0.1.0-rc.7.md).
+
+| rc.7 gate | State |
+| --- | --- |
+| Implementation checks (formatting, strict Clippy, `cargo test --locked`) | PASS — on Linux x86_64; one `cli_update` test fails intermittently while spawning a freshly copied binary, also on the rc.6 code |
+| Frozen code and memory quality, identical responses on paired workloads | PASS — [performance](performance.md) sections 2026-11-11 and 2026-11-12 |
+| rc.7 version/installer/notes consistency | PASS — manifest, lockfile, installer pin and `docs/release-notes/v0.1.0-rc.7.md` agree |
+| Schema 7 → 9 migration and refusal by older binaries | PASS — fixture tests; downgrade advice in [installation](installation.md) |
+| Native macOS paired measurements (code workload, KNN, local-model reuse) | OPEN — run the [rc.7 procedure](macos-benchmark-guide.md#rc7-validation) |
+| Large real repository (exact-symbol and path-trigram gains, schema 9 size and index cost) | OPEN — same procedure |
+| Real Claude Code / Codex sessions using default scope, `--with-instructions` and write-time embedding | OPEN — same procedure, last section |
+| Tagged rc.7 workflow, archive, checksums, install and rc.6 → rc.7 update | OPEN — maintainer publication below |
+| Signing/notarization, arm64 runtime, live Rainy, clean-machine install | OPEN — unchanged from rc.6 (below) |
+
+Do not promote rc.7 automatically: review these gates, the open rc.6 gates and
+[platform support](platforms.md), then record the stable decision. No tag or release is created by
+editing this checklist.
+
+## rc.6 campaign
+
+These rc.6 results describe the rc.6 artifact. Gates that rc.7 does not touch (signing, arm64,
+Rainy, clean-machine installation, default cloud hybrid availability) remain open for rc.7.
 
 | rc.6 gate | State |
 | --- | --- |
@@ -18,8 +41,6 @@ candidate workflow does not automatically authorize or establish stable readines
 | Real-repository structural extraction | PARTIAL — valid Rust cfg-attributed pattern in src/main.rs triggers the grammar's error flag; lexical completeness is preserved |
 | Default cloud hybrid availability | OPEN — 10 of 17 authorized full-coverage remote-mode probe calls degraded with generic network/timeout notices; not a production failure-rate estimate |
 
-Do not promote rc.6 automatically: review these gates and [platform support](platforms.md), then
-record the stable decision. No tag or release is created by editing this checklist.
 
 ## Historical local RC campaign
 
@@ -52,22 +73,24 @@ maintainer steps below are done. The binary is unsigned and not notarized (docum
 Detailed commands, evidence and measurements: [v0.1-status.md](v0.1-status.md).
 Installation: [installation.md](installation.md). Signing: [release-signing.md](release-signing.md).
 
-## Publish the v0.1.0-rc.6 prerelease (maintainer)
+## Publish the v0.1.0-rc.7 prerelease (maintainer)
 
-Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.6`, tag `v0.1.0-rc.6`,
-`aether-midnight-0.1.0-rc.6-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
+Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.7`, tag `v0.1.0-rc.7`,
+`aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
 both read the release by that tag, so they only work once it exists. The workflow creates it.
 
 1. Write `docs/release-notes/v<version>.md` (state: unsigned, not notarized, what was and was not
    tested). The workflow appends the archive SHA-256 and fails if the file is missing.
 2. Commit, then tag that exact commit and push the tag:
-   `git tag v0.1.0-rc.6 && git push origin v0.1.0-rc.6`.
+   `git tag v0.1.0-rc.7 && git push origin v0.1.0-rc.7`.
 3. The "macOS release artifacts" workflow runs on the tag: it builds the Universal 2 binary,
    packages it, runs the offline installer smoke test, then a `release` job checks that the tag
    equals `v` + the `Cargo.toml` version, and creates the GitHub Release with the archive, its
    `.sha256` and `install.sh`. A version containing `-` (rc, beta, alpha) is published as a
    prerelease; a plain version is not. It refuses to touch a release that already exists.
 4. Confirm the public URLs with `curl -fsSIL` and run `midnight update --check` from the prior build.
+5. From an installed rc.6, copy the database (`sqlite3 … ".backup …"`), run `midnight update`, then
+   `midnight status` and `midnight memory scopes`: the first rc.7 run migrates to schema 9.
 
 Re-running by hand: "Run workflow" on the tag ref does the same. Run on a branch it only builds and
 uploads the artifact (no release). To fix the notes of a published release use `gh release edit`.
@@ -80,10 +103,10 @@ developers), no Rust, and a fresh user account. Do not change any security setti
 1. Browser path (quarantine): in Safari, download the `.tar.gz` and `install.sh` from the
    release page. Verify the quarantine flag exists:
    `xattr -p com.apple.quarantine ~/Downloads/install.sh` (expected: a value is printed).
-2. `cd ~/Downloads && shasum -a 256 aether-midnight-0.1.0-rc.6-macos-universal2.tar.gz` must equal
+2. `cd ~/Downloads && shasum -a 256 aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz` must equal
    `<SHA256>` from the release notes.
-3. `sh ./install.sh --archive-file aether-midnight-0.1.0-rc.6-macos-universal2.tar.gz --sha256 <SHA256> --no-runtime`.
-   Record the exit code, the `--version` line (`aether-midnight 0.1.0-rc.6`) and the Gatekeeper
+3. `sh ./install.sh --archive-file aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz --sha256 <SHA256> --no-runtime`.
+   Record the exit code, the `--version` line (`aether-midnight 0.1.0-rc.7`) and the Gatekeeper
    assessment. Also run `xattr -l ~/.local/bin/aether-midnight` and record whether a quarantine
    attribute is present (the installer only reports it, never removes it). If macOS blocks it, record that exactly, do not override it, and mark the
    gate FAIL.

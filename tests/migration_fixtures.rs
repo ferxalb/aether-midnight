@@ -62,8 +62,8 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
         );
 
         let init = json(&db, &["init", "--json"]);
-        assert_eq!(init["schema_version"], 8, "{name}");
-        assert_eq!(user_version(&db), 8);
+        assert_eq!(init["schema_version"], 9, "{name}");
+        assert_eq!(user_version(&db), 9);
         let duplicate_index: i64 = Connection::open(&db)
             .unwrap()
             .query_row(
@@ -76,6 +76,22 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
             duplicate_index, 0,
             "{name}: schema 8 drops the duplicate path index"
         );
+        let conn = Connection::open(&db).unwrap();
+        let (files, paths): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM code_files),
+                        (SELECT count(*) FROM code_files f WHERE EXISTS (
+                            SELECT 1 FROM code_path_fts p WHERE p.rowid=f.id
+                              AND code_path_fts MATCH '\"' || replace(f.rel_path,'\"','\"\"') || '\"'))",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            files, paths,
+            "{name}: schema 9 backfills every catalog path"
+        );
+        drop(conn);
 
         // Data written by the old build is intact, namespace-isolated, and the forgotten row stays gone.
         let listed = json(&db, &["memory", "list", "--namespace", "proj:a", "--json"]);
@@ -207,7 +223,7 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
         drop(conn);
 
         // Idempotent re-open.
-        assert_eq!(json(&db, &["init", "--json"])["schema_version"], 8);
+        assert_eq!(json(&db, &["init", "--json"])["schema_version"], 9);
     }
 }
 
@@ -217,10 +233,10 @@ fn database_from_a_newer_schema_is_refused_without_modification() {
     let db = fixture("schema_v5.sqlite3", &temp);
     Connection::open(&db)
         .unwrap()
-        .pragma_update(None, "user_version", 9)
+        .pragma_update(None, "user_version", 10)
         .unwrap();
     let out = run(&db, &["init"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("newer than this binary supports"));
-    assert_eq!(user_version(&db), 9);
+    assert_eq!(user_version(&db), 10);
 }
