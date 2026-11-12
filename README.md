@@ -57,7 +57,6 @@ midnight connect codex --scope user            # writes ~/.codex/config.toml
 
 - `connect` merges into your existing config and keeps a `.midnight.bak` backup.
 - `--dry-run` previews the change, `--read-only` exposes only search and recall tools, and `--remove` takes Midnight out again.
-- `--with-instructions` adds a short managed block to the project's `CLAUDE.md` (Claude Code) or `AGENTS.md` (Codex) telling the agent when to search, recall and remember. Your own text in that file is left alone.
 - Project config files call `midnight` from your `PATH`, so you can commit them.
 
 The agent gets these MCP tools:
@@ -65,7 +64,7 @@ The agent gets these MCP tools:
 | Area | Tools |
 | --- | --- |
 | Code | `index_repository`, `refresh_indexed_file`, `search_code`, `open_range`, `list_symbols`, `repo_map`, `index_status` |
-| Memory | `remember`, `remember_batch`, `recall`, `get_memory`, `list_memories`, `list_scopes`, `forget` |
+| Memory | `remember`, `remember_batch`, `recall`, `list_memories`, `forget` |
 
 For any other MCP client, run `midnight mcp` over stdio:
 
@@ -104,9 +103,6 @@ midnight forget --scope project:payments --id 2
 ```
 
 - Scopes need a prefix, such as `user:alice` or `project:my-app`. Recall never crosses scopes.
-- Over MCP, a memory call without `scope` uses `project:<repository folder name>` of the repository the server runs in. `list_scopes` shows the namespaces that hold memories.
-- With an embedding provider set up, memories an agent saves over MCP are embedded right away, so `recall --mode hybrid` finds them by meaning without running `embed`.
-- `midnight memory export --namespace project:payments --output payments.jsonl` backs a namespace up; `midnight memory import payments.jsonl` restores it (all or nothing).
 - Midnight never captures conversations on its own. It stores only what you or your agent save.
 - `forget` hides a memory immediately. Run `compact` to remove its text from the database file.
 

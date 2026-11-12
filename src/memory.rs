@@ -2,11 +2,10 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::CStr;
 #[cfg(feature = "sqlite-scanstatus")]
 use std::ffi::c_void;
-use std::io::BufRead;
 use std::path::Path;
 use std::ptr;
 use std::time::Instant;
@@ -170,7 +169,7 @@ pub enum CandidateCoverage {
     RowIdSample,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemoryRecord {
     pub id: i64,
     pub scope: String,
@@ -362,12 +361,6 @@ impl MemorySession {
         Ok(Self {
             connection: open_db(db_path)?,
         })
-    }
-
-    /// The session's database connection, shared by read-only code and hybrid search so a
-    /// long-lived MCP session does not reopen and re-migrate the database on every request.
-    pub(crate) fn connection(&self) -> &Connection {
-        &self.connection
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -578,24 +571,6 @@ impl MemorySession {
 
     pub(crate) fn list_memories(&self, scope: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
         list_memories_on(&self.connection, scope, limit)
-    }
-
-    pub(crate) fn list_memories_page(
-        &self,
-        scope: &str,
-        kind: Option<&str>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<MemoryRecord>> {
-        list_memories_page_on(&self.connection, scope, kind, limit, offset)
-    }
-
-    pub(crate) fn get_memory(&self, scope: &str, id: i64) -> Result<Option<MemoryRecord>> {
-        get_memory_on(&self.connection, scope, id)
-    }
-
-    pub(crate) fn list_scopes(&self) -> Result<Vec<ScopeSummary>> {
-        list_scopes_on(&self.connection)
     }
 
     pub(crate) fn forget(&self, scope: &str, id: i64) -> Result<bool> {
@@ -813,9 +788,7 @@ fn validate_input(input: MemoryInputRef<'_>) -> Result<ValidatedMemoryInput<'_>>
         bail!("raw source memories cannot link to another source id");
     }
     if input.kind == "derived" && input.source_id.is_none() && input.source_uri.is_none() {
-        bail!(
-            "derived memories require source_id or source_uri provenance: store the evidence first with kind=source and pass its id as source_id, or cite a source_uri such as a file path or URL"
-        );
+        bail!("derived memories require source_id or source_uri provenance");
     }
     if input.supersedes_id.is_some() && (input.kind != "derived" || valid_from.is_none()) {
         bail!("superseding a fact requires kind=derived and an explicit valid_from");
@@ -918,7 +891,7 @@ pub fn recall(
     recall_on(&conn, scope, query, at, limit)
 }
 
-pub(crate) fn recall_on(
+fn recall_on(
     conn: &Connection,
     scope: &str,
     query: &str,
@@ -2142,100 +2115,33 @@ pub fn list_memories(db_path: &Path, scope: &str, limit: usize) -> Result<Vec<Me
 }
 
 fn list_memories_on(conn: &Connection, scope: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
-    list_memories_page_on(conn, scope, None, limit, 0)
-}
-
-/// Largest `offset` accepted by paged listing; deeper pages should narrow by kind or use export.
-pub const MAX_LIST_OFFSET: usize = 100_000;
-
-/// Newest-first page of active memories in one namespace, optionally restricted to one kind.
-pub fn list_memories_page(
-    db_path: &Path,
-    scope: &str,
-    kind: Option<&str>,
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<MemoryRecord>> {
-    let conn = open_db(db_path)?;
-    list_memories_page_on(&conn, scope, kind, limit, offset)
-}
-
-fn list_memories_page_on(
-    conn: &Connection,
-    scope: &str,
-    kind: Option<&str>,
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<MemoryRecord>> {
     validate_scope(scope)?;
-    if kind.is_some_and(|kind| !matches!(kind, "source" | "derived")) {
-        bail!("kind must be 'source' or 'derived'");
-    }
-    if offset > MAX_LIST_OFFSET {
-        bail!("offset must be at most {MAX_LIST_OFFSET}");
-    }
     let mut stmt = conn.prepare_cached(
         "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
-         FROM memories WHERE scope=?1 AND deleted_at IS NULL AND (?4 IS NULL OR kind=?4)
-         ORDER BY created_at DESC,id DESC LIMIT ?2 OFFSET ?3",
+         FROM memories WHERE scope=?1 AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT ?2",
     )?;
-    let rows = stmt.query_map(
-        params![scope, limit.clamp(1, 1000) as i64, offset as i64, kind],
-        |row| {
-            Ok(MemoryRecord {
-                id: row.get(0)?,
-                scope: row.get(1)?,
-                kind: row.get(2)?,
-                content: row.get(3)?,
-                source_uri: row.get(4)?,
-                source_id: row.get(5)?,
-                supersedes_id: row.get(6)?,
-                created_at: row.get(7)?,
-                observed_at: row.get(8)?,
-                valid_from: row.get(9)?,
-                valid_to: row.get(10)?,
-            })
-        },
-    )?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("list memories")
-}
-
-/// One namespace and its number of active (non-forgotten) memories.
-#[derive(Debug, Clone, Serialize)]
-pub struct ScopeSummary {
-    pub scope: String,
-    pub active_memories: u64,
-}
-
-/// Every namespace with at least one active memory, in byte order. Reads the trigger-maintained
-/// `memory_scope_counts` table, so it never scans memory rows.
-pub fn list_scopes(db_path: &Path) -> Result<Vec<ScopeSummary>> {
-    let conn = open_db(db_path)?;
-    list_scopes_on(&conn)
-}
-
-fn list_scopes_on(conn: &Connection) -> Result<Vec<ScopeSummary>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT scope,active FROM memory_scope_counts WHERE scope<>'' AND active>0 ORDER BY scope",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ScopeSummary {
-            scope: row.get(0)?,
-            active_memories: row.get::<_, i64>(1)?.max(0) as u64,
+    let rows = stmt.query_map(params![scope, limit.clamp(1, 1000) as i64], |row| {
+        Ok(MemoryRecord {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            kind: row.get(2)?,
+            content: row.get(3)?,
+            source_uri: row.get(4)?,
+            source_id: row.get(5)?,
+            supersedes_id: row.get(6)?,
+            created_at: row.get(7)?,
+            observed_at: row.get(8)?,
+            valid_from: row.get(9)?,
+            valid_to: row.get(10)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("list memory scopes")
+        .context("list memories")
 }
 
 /// Fetch one active memory by id, only within its exact namespace.
 pub fn get_memory(db_path: &Path, scope: &str, id: i64) -> Result<Option<MemoryRecord>> {
     let conn = open_db(db_path)?;
-    get_memory_on(&conn, scope, id)
-}
-
-fn get_memory_on(conn: &Connection, scope: &str, id: i64) -> Result<Option<MemoryRecord>> {
     validate_scope(scope)?;
     let mut stmt = conn.prepare_cached(
         "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
@@ -2337,185 +2243,6 @@ pub fn compact(db_path: &Path) -> Result<()> {
     }
     conn.execute_batch("VACUUM;")?;
     Ok(())
-}
-
-/// First line of a memory export. Later lines are one [`MemoryRecord`] each, oldest first.
-pub const EXPORT_FORMAT: &str = "aether-midnight-memory-export";
-pub const EXPORT_FORMAT_VERSION: u32 = 1;
-/// Upper bounds for one import: line length (a 64 KiB memory escapes to well below this) and
-/// record count. The whole import is one transaction.
-const MAX_IMPORT_LINE_BYTES: usize = 1024 * 1024;
-pub const MAX_IMPORT_RECORDS: usize = 1_000_000;
-
-#[derive(Debug, Serialize)]
-pub struct ExportReport {
-    pub scope: String,
-    pub exported: usize,
-}
-
-/// Write every active memory of one namespace as JSON Lines, oldest first, after a header line.
-/// Forgotten memories are not exported. Ids are the source database's ids; [`import_jsonl`]
-/// remaps them, together with `source_id` and `supersedes_id` links.
-pub fn export_jsonl(
-    db_path: &Path,
-    scope: &str,
-    out: &mut dyn std::io::Write,
-) -> Result<ExportReport> {
-    validate_scope(scope)?;
-    let conn = open_db(db_path)?;
-    // One read transaction gives a consistent snapshot even while another process writes.
-    let tx = conn.unchecked_transaction()?;
-    serde_json::to_writer(
-        &mut *out,
-        &serde_json::json!({"format": EXPORT_FORMAT, "version": EXPORT_FORMAT_VERSION, "scope": scope}),
-    )?;
-    out.write_all(b"\n")?;
-    let mut stmt = tx.prepare(
-        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
-         FROM memories WHERE scope=?1 AND deleted_at IS NULL ORDER BY id",
-    )?;
-    let mut rows = stmt.query([scope])?;
-    let mut exported = 0;
-    while let Some(row) = rows.next()? {
-        serde_json::to_writer(&mut *out, &hydrate_memory(row)?)?;
-        out.write_all(b"\n")?;
-        exported += 1;
-    }
-    out.flush()?;
-    Ok(ExportReport {
-        scope: scope.to_string(),
-        exported,
-    })
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct ImportReport {
-    pub imported: usize,
-    pub scopes: BTreeMap<String, usize>,
-    /// Links to a memory that is not in the file (it was forgotten before export) and could be
-    /// dropped because the record keeps other provenance (`source_uri`) or because the link only
-    /// recorded supersession history; the record's own validity window is kept.
-    pub dropped_source_links: usize,
-    pub dropped_supersedes_links: usize,
-}
-
-/// Import a [`export_jsonl`] file atomically: every record is inserted in one transaction, or
-/// none is. `target_scope` places every record in that namespace instead of its exported one.
-/// Records get new ids and `created_at` times; content, kind, provenance URI, observation time
-/// and validity windows are kept, and `source_id`/`supersedes_id` are remapped to the new ids.
-pub fn import_jsonl(
-    db_path: &Path,
-    input: &mut dyn std::io::BufRead,
-    target_scope: Option<&str>,
-) -> Result<ImportReport> {
-    if let Some(scope) = target_scope {
-        validate_scope(scope)?;
-    }
-    let mut conn = open_db(db_path)?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .context("reserve memory import transaction")?;
-    let mut report = ImportReport::default();
-    let mut ids: HashMap<(String, i64), i64> = HashMap::new();
-    let mut line = Vec::new();
-    let mut line_number = 0usize;
-    loop {
-        line.clear();
-        let read = std::io::Read::take(&mut *input, MAX_IMPORT_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)?;
-        if read == 0 {
-            break;
-        }
-        line_number += 1;
-        if line.len() > MAX_IMPORT_LINE_BYTES {
-            bail!("line {line_number} exceeds {MAX_IMPORT_LINE_BYTES} bytes");
-        }
-        let text = std::str::from_utf8(&line)
-            .with_context(|| format!("line {line_number} is not UTF-8"))?
-            .trim();
-        if text.is_empty() {
-            continue;
-        }
-        let value: serde_json::Value = serde_json::from_str(text)
-            .with_context(|| format!("line {line_number} is not valid JSON"))?;
-        if let Some(format) = value.get("format") {
-            if format != EXPORT_FORMAT {
-                bail!("line {line_number}: unknown export format {format}");
-            }
-            let version = value.get("version").and_then(serde_json::Value::as_u64);
-            if version != Some(u64::from(EXPORT_FORMAT_VERSION)) {
-                bail!("line {line_number}: unsupported export version {version:?}");
-            }
-            continue;
-        }
-        if report.imported >= MAX_IMPORT_RECORDS {
-            bail!("import exceeds {MAX_IMPORT_RECORDS} records");
-        }
-        let record: MemoryRecord = serde_json::from_value(value)
-            .with_context(|| format!("line {line_number} is not a memory record"))?;
-        let old_scope = record.scope.clone();
-        let scope = target_scope.map_or_else(|| record.scope.clone(), str::to_string);
-        let map_link =
-            |link: Option<i64>| link.and_then(|old| ids.get(&(old_scope.clone(), old)).copied());
-        let mut source_id = map_link(record.source_id);
-        if record.source_id.is_some() && source_id.is_none() {
-            if record.source_uri.is_none() {
-                bail!(
-                    "line {line_number}: memory {} cites source id {} that is not in the file, and has no source_uri",
-                    record.id,
-                    record.source_id.unwrap_or_default()
-                );
-            }
-            report.dropped_source_links += 1;
-            source_id = None;
-        }
-        let supersedes_id = map_link(record.supersedes_id);
-        if record.supersedes_id.is_some() && supersedes_id.is_none() {
-            report.dropped_supersedes_links += 1;
-        }
-        let input = MemoryInputRef {
-            scope: &scope,
-            kind: &record.kind,
-            content: &record.content,
-            source_uri: record.source_uri.as_deref(),
-            source_id,
-            supersedes_id,
-            observed_at: record.observed_at.as_deref(),
-            valid_from: record.valid_from.as_deref(),
-            valid_to: record.valid_to.as_deref(),
-        };
-        let validated = validate_input(input)
-            .with_context(|| format!("line {line_number}: memory {}", record.id))?;
-        let inserted = insert_memory(&tx, validated)
-            .with_context(|| format!("line {line_number}: memory {}", record.id))?;
-        if ids.insert((old_scope, record.id), inserted.id).is_some() {
-            bail!("line {line_number}: duplicate memory id {}", record.id);
-        }
-        *report.scopes.entry(scope).or_default() += 1;
-        report.imported += 1;
-    }
-    tx.commit()?;
-    Ok(report)
-}
-
-/// The project namespace for a repository root: `project:<directory name>`, with whitespace and
-/// control characters replaced by `-`. MCP uses it when a memory call omits `scope`, and
-/// `connect --with-instructions` names it, so both agree. `None` when no valid name results.
-pub fn project_scope_for(root: &Path) -> Option<String> {
-    let name: String = root
-        .file_name()?
-        .to_string_lossy()
-        .chars()
-        .map(|c| {
-            if c.is_whitespace() || c.is_control() {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let scope = format!("project:{name}");
-    validate_scope(&scope).is_ok().then_some(scope)
 }
 
 pub(crate) fn validate_scope(scope: &str) -> Result<()> {

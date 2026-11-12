@@ -145,7 +145,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 7);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -178,7 +178,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "8");
+    assert_eq!(schema, "7");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -234,7 +234,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 7);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -312,7 +312,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 7);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
@@ -320,7 +320,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "8");
+    assert_eq!(schema_version, "7");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,
@@ -397,7 +397,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 8);
+    assert_eq!(reopened_version, 7);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()
@@ -1870,57 +1870,5 @@ fn search_scope_is_stated_once_per_response_not_per_result() {
         for kept in ["freshness", "index_generation", "index_complete"] {
             assert!(result.get(kept).is_some(), "{kept} stays per result");
         }
-    }
-}
-
-#[test]
-fn exact_symbol_lookup_searches_the_nocase_name_index_and_folds_only_ascii() {
-    let base = TempDir::new().unwrap();
-    let repo = new_repo(&base, "symbol-index");
-    fs::write(
-        repo.join("src/lib.rs"),
-        "pub fn MixedCaseSymbol() {}\npub fn other_symbol() {}\n",
-    )
-    .unwrap();
-    let database = base.path().join("db.sqlite3");
-    assert!(run_index(&database, &repo).complete);
-
-    let conn = db::open_db(&database).unwrap();
-    let plan = conn
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN {}",
-            code::EXACT_SYMBOL_FILES_SQL
-        ))
-        .unwrap()
-        .query_map(rusqlite::params!["r", "w", "x", 10i64], |row| {
-            row.get::<_, String>(3)
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert!(
-        plan.iter()
-            .any(|step| step.contains("USING INDEX code_symbols_name")),
-        "exact symbol lookup must search the name index: {plan:?}"
-    );
-    // The rewrite from lower(name)=lower(?) is equivalent only while both fold ASCII alone.
-    let folded: (String, i64) = conn
-        .query_row(
-            "SELECT lower('ÉÖA'), 'ÉÖA'='éöa' COLLATE NOCASE",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(folded, ("ÉÖa".to_string(), 0));
-    drop(conn);
-
-    for query in ["mixedcasesymbol", "MIXEDCASESYMBOL", "MixedCaseSymbol"] {
-        let results = code::search_code(&database, &repo, query, 5).unwrap();
-        assert_eq!(results[0].path, "src/lib.rs", "{query}");
-        assert!(
-            results[0].match_reason.contains("symbol"),
-            "{query}: {}",
-            results[0].match_reason
-        );
     }
 }

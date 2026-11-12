@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 7;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -115,13 +115,6 @@ const EMBEDDINGS_REUSE_SCHEMA: &str = "DROP TRIGGER IF EXISTS code_files_embeddi
      END;
      UPDATE metadata SET value='7' WHERE key='schema_version';
      PRAGMA user_version=7;";
-
-/// Schema 8: drop `code_files_scope_path`, which indexed exactly the columns, in the same order,
-/// of the `UNIQUE(repo_id, worktree_id, rel_path)` constraint's automatic index. Queries already
-/// used the automatic index; the duplicate only cost a B-tree insert per catalog row and space.
-const DROP_DUPLICATE_PATH_INDEX_SCHEMA: &str = "DROP INDEX IF EXISTS code_files_scope_path;
-     UPDATE metadata SET value='8' WHERE key='schema_version';
-     PRAGMA user_version=8;";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RepoScope {
@@ -271,6 +264,8 @@ fn migrate(connection: &Connection) -> Result<()> {
                          FOREIGN KEY(repo_id, worktree_id)
                            REFERENCES repositories(repo_id, worktree_id) ON DELETE CASCADE
                      );
+                     CREATE INDEX code_files_scope_path
+                         ON code_files(repo_id, worktree_id, rel_path);
                      CREATE INDEX code_files_generation
                          ON code_files(repo_id, worktree_id, indexed_generation);
                      CREATE VIRTUAL TABLE code_fts USING fts5(
@@ -356,10 +351,6 @@ fn migrate(connection: &Connection) -> Result<()> {
             if migrated_version == 6 {
                 connection.execute_batch(EMBEDDINGS_REUSE_SCHEMA)?;
                 migrated_version = 7;
-            }
-            if migrated_version == 7 {
-                connection.execute_batch(DROP_DUPLICATE_PATH_INDEX_SCHEMA)?;
-                migrated_version = 8;
             }
             if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");
