@@ -16,6 +16,7 @@ mod search;
 pub struct Session {
     memory: Option<memory::MemorySession>,
     search: search::QueryCache,
+    local: search::LocalModel,
 }
 
 /// Newest protocol revision this server implements; offered when the client asks for an unknown one.
@@ -62,10 +63,13 @@ const CODE_TOOLS: [&str; 7] = [
     "repo_map",
     "index_status",
 ];
-const MEMORY_TOOLS: [&str; 5] = [
+/// Tools that name exactly one memory scope (or one per batch item). `list_scopes` is not one:
+/// it names none, and its result is filtered by the same policy.
+const MEMORY_TOOLS: [&str; 6] = [
     "remember",
     "remember_batch",
     "recall",
+    "get_memory",
     "list_memories",
     "forget",
 ];
@@ -103,6 +107,25 @@ impl Policy {
         repo_root_above(&cwd, home.as_deref().map(Path::new))
     }
 
+    /// Namespace used when a memory tool omits `scope` and the policy pins none:
+    /// `project:<name of the default repository's directory>`. `None` outside a repository, or
+    /// when the policy's scope list would not allow it.
+    pub(crate) fn default_memory_scope(&self) -> Option<String> {
+        let scope = memory::project_scope_for(&self.default_repo()?)?;
+        self.scope_allowed(&scope).then_some(scope)
+    }
+
+    fn scope_allowed(&self, scope: &str) -> bool {
+        self.memory_scopes.as_ref().is_none_or(|scopes| {
+            scopes
+                .iter()
+                .any(|allowed| match allowed.strip_suffix('*') {
+                    Some(prefix) => scope.starts_with(prefix),
+                    None => allowed == scope,
+                })
+        })
+    }
+
     fn tool_allowed(&self, name: &str) -> bool {
         self.allowed_tools
             .as_ref()
@@ -118,14 +141,15 @@ impl Policy {
         if !self.tool_allowed(name) {
             bail!("permission denied: tool {name} is not enabled for this server");
         }
-        if let Some(scopes) = &self.memory_scopes
-            && MEMORY_TOOLS.contains(&name)
-        {
-            let pinned = match scopes.as_slice() {
-                [only] if !only.ends_with('*') => Some(only.clone()),
+        if MEMORY_TOOLS.contains(&name) {
+            // A pinned scope always wins; otherwise a missing scope falls back to the default
+            // project namespace. An explicit scope is never replaced.
+            let pinned = match self.memory_scopes.as_deref() {
+                Some([only]) if !only.ends_with('*') => Some(only.clone()),
                 _ => None,
             };
-            if let (Some(pinned), Some(map)) = (&pinned, args.as_object_mut()) {
+            let fallback = pinned.or_else(|| self.default_memory_scope());
+            if let (Some(pinned), Some(map)) = (&fallback, args.as_object_mut()) {
                 if name == "remember_batch" {
                     if let Some(items) = map.get_mut("memories").and_then(Value::as_array_mut) {
                         for item in items {
@@ -134,10 +158,17 @@ impl Policy {
                             }
                         }
                     }
-                } else {
-                    map.entry("scope").or_insert_with(|| json!(pinned));
+                } else if map
+                    .get("scope")
+                    .is_none_or(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()))
+                {
+                    map.insert("scope".into(), json!(pinned));
                 }
             }
+        }
+        if let Some(scopes) = &self.memory_scopes
+            && MEMORY_TOOLS.contains(&name)
+        {
             let scope = required_str(&args, "scope").ok();
             let batch: Vec<&str> = args
                 .get("memories")
@@ -208,7 +239,7 @@ pub fn handle_message(
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     Some(match method {
-        "initialize" => initialize(id, &params),
+        "initialize" => initialize(id, &params, policy),
         "ping" => ok_response(id, json!({})),
         "tools/list" => {
             let visible: Vec<Value> = tools()
@@ -355,15 +386,39 @@ fn read_bounded_line<R: BufRead>(
     }
 }
 
-fn initialize(id: Value, params: &Value) -> Value {
+fn initialize(id: Value, params: &Value, policy: &Policy) -> Value {
     ok_response(
         id,
         json!({
             "protocolVersion":negotiated_version(params),
             "capabilities":{"tools":{"listChanged":false}},
             "serverInfo":{"name":"aether-midnight","version":VERSION},
-            "instructions":"Repository retrieval and explicitly scoped agent memory. search_code defaults to lexical unless an embedding provider is configured and permitted, then hybrid. Explicit lexical never sends queries. Remote modes use only the user's saved provider and consent. repo_path is optional inside a Git repository or with one policy root. Memory scopes are required unless pinned; recall defaults to lexical."
+            "instructions":instructions(policy)
         }),
+    )
+}
+
+/// Server instructions: what the tools are for, when to use memory, and the scope this
+/// connection uses when a memory call omits one.
+fn instructions(policy: &Policy) -> String {
+    let pinned = match policy.memory_scopes.as_deref() {
+        Some([only]) if !only.ends_with('*') => Some(only.clone()),
+        _ => None,
+    };
+    let scope = match (pinned, policy.default_memory_scope()) {
+        (Some(pinned), _) => format!(
+            "Memory calls in this connection always use scope {pinned:?} (pinned by policy)."
+        ),
+        (None, Some(default)) => format!(
+            "Memory calls that omit scope use {default:?}; pass scope (for example user:<name>) for other namespaces. list_scopes shows existing ones."
+        ),
+        (None, None) => "Memory calls need a scope such as project:<repo> or user:<name>; list_scopes shows existing ones.".to_string(),
+    };
+    format!(
+        "Local code retrieval and explicit, namespaced agent memory.\n\
+         Code: use search_code to find files, symbols and phrases (repo_path is optional inside a Git repository or with one policy root), open_range to read exact current lines, list_symbols and repo_map to orient. Results carry freshness; run index_repository when the index is missing or stale.\n\
+         Memory: at the start of a task, recall what is already known about it. When you learn something worth keeping (a decision, a user preference, a fact about this project), remember it: store the evidence with kind=source, then the conclusion with kind=derived and source_id set to that source's id (or source_uri for a file or URL). When a fact changes, store the new one with supersedes_id and valid_from instead of forgetting the old one. Memories are never captured automatically; only what you store is kept. {scope}\n\
+         Retrieval modes: search_code defaults to lexical unless an embedding provider is configured and permitted, then hybrid; recall defaults to lexical. Explicit lexical never contacts a provider. Remote modes use only the user's saved provider and consent."
     )
 }
 
@@ -406,28 +461,38 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "remember",
-            "Persist a source or derived fact in a required namespace such as user:alice or project:repo-name. Derived records must cite a source id or URI; superseding a fact preserves history and closes its prior validity interval.",
-            json!({"type":"object","properties":{"operation_key":{"type":"string","maxLength":256},"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["scope","kind","content"]}),
+            "Persist one memory in a namespace such as project:repo-name or user:alice (scope defaults to this repository's project namespace). kind=source stores raw evidence (a quote, a decision as stated, a log line). kind=derived stores a conclusion and must cite source_id (a source memory's id) or source_uri (a file path or URL). Typical flow: remember {kind:source, content:'User: always use pnpm'} -> id 7; remember {kind:derived, content:'Package manager is pnpm', source_id:7}. To change a fact, store the new derived fact with supersedes_id and valid_from; history is kept and the old validity interval closes. With a configured, consented and permitted embedding provider the memory is also embedded for semantic recall (embed=false skips it); the response then carries embedding or embedding_notice.",
+            json!({"type":"object","properties":{"operation_key":{"type":"string","maxLength":256,"description":"Retry key: repeating a call with the same key and payload returns the first result instead of storing a duplicate."},"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string","maxLength":65536},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string","description":"RFC 3339 time the evidence was observed."},"valid_from":{"type":"string","description":"RFC 3339; required with supersedes_id."},"valid_to":{"type":"string"},"embed":{"type":"boolean","description":"Default true. false stores the memory without embedding it now."}},"required":["kind","content"]}),
         ),
         tool(
             "remember_batch",
-            "Atomically persist 1 to 512 explicit source or derived memories. A failed record rolls back the entire batch; larger imports should be split into caller-managed batches.",
-            json!({"type":"object","properties":{"memories":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["scope","kind","content"]}}},"required":["memories"]}),
+            "Atomically persist 1 to 512 explicit source or derived memories (same fields and rules as remember; scope defaults per item). A failed record rolls back the entire batch; larger imports should be split into caller-managed batches. With a configured provider the stored memories are embedded afterwards; an embedding failure never undoes the batch and recall reports partial semantic coverage.",
+            json!({"type":"object","properties":{"memories":{"type":"array","minItems":1,"maxItems":512,"items":{"type":"object","properties":{"scope":{"type":"string"},"kind":{"type":"string","enum":["source","derived"]},"content":{"type":"string"},"source_uri":{"type":"string"},"source_id":{"type":"integer"},"supersedes_id":{"type":"integer"},"observed_at":{"type":"string"},"valid_from":{"type":"string"},"valid_to":{"type":"string"}},"required":["kind","content"]}},"embed":{"type":"boolean"}},"required":["memories"]}),
         ),
         tool(
             "recall",
             "Search active memories in exactly one namespace and time; repository code is never included. Results carry candidate_coverage: complete, exact_top_k (exact under the documented ordering), bm25_top_k (bounded window for queries with more than four informative terms), or recency_window (only when broad_terms is recent).",
-            json!({"type":"object","properties":{"scope":{"type":"string"},"query":{"type":"string"},"at":{"type":"string"},"limit":{"type":"integer"},"broad_terms":{"type":"string","enum":["exact","recent"],"description":"Default exact BM25 ranking. recent opts a single query term found in at least half of the namespace into a fast newest-first window that can omit older evidence."}},"required":["scope","query"]}),
+            json!({"type":"object","properties":{"scope":{"type":"string"},"query":{"type":"string"},"at":{"type":"string"},"limit":{"type":"integer"},"broad_terms":{"type":"string","enum":["exact","recent"],"description":"Default exact BM25 ranking. recent opts a single query term found in at least half of the namespace into a fast newest-first window that can omit older evidence."}},"required":["query"]}),
+        ),
+        tool(
+            "get_memory",
+            "Fetch one active memory by id within exactly one namespace, for example the source a derived fact cites.",
+            json!({"type":"object","properties":{"scope":{"type":"string"},"id":{"type":"integer"}},"required":["id"]}),
         ),
         tool(
             "list_memories",
-            "List non-forgotten source and derived records in exactly one memory namespace.",
-            json!({"type":"object","properties":{"scope":{"type":"string"},"limit":{"type":"integer"}},"required":["scope"]}),
+            "List non-forgotten source and derived records in exactly one memory namespace, newest first. Page with offset; filter with kind.",
+            json!({"type":"object","properties":{"scope":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000},"offset":{"type":"integer","minimum":0,"maximum":100000},"kind":{"type":"string","enum":["source","derived"]}}}),
+        ),
+        tool(
+            "list_scopes",
+            "List memory namespaces that hold active memories, with their counts. Only namespaces this server's policy allows are shown.",
+            json!({"type":"object","properties":{}}),
         ),
         tool(
             "forget",
             "Immediately suppress one memory and remove it from the memory search index.",
-            json!({"type":"object","properties":{"scope":{"type":"string"},"id":{"type":"integer"}},"required":["scope","id"]}),
+            json!({"type":"object","properties":{"scope":{"type":"string"},"id":{"type":"integer"}},"required":["id"]}),
         ),
     ];
     for tool in &mut tools {
@@ -441,11 +506,21 @@ pub fn tools() -> Vec<Value> {
     tools
 }
 
+/// Tools whose configured behavior can contact an embedding provider.
+const OPEN_WORLD_TOOLS: [&str; 5] = [
+    "index_repository",
+    "search_code",
+    "recall",
+    "remember",
+    "remember_batch",
+];
+
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     // Search may contact a configured provider. Hints describe capability, not authority;
     // policy and saved consent are enforced before any remote request.
     let read_only = !WRITE_TOOLS.contains(&name);
-    let mut annotations = json!({"readOnlyHint":read_only,"openWorldHint":matches!(name, "index_repository" | "search_code" | "recall")});
+    let mut annotations =
+        json!({"readOnlyHint":read_only,"openWorldHint":OPEN_WORLD_TOOLS.contains(&name)});
     if !read_only {
         annotations["destructiveHint"] = json!(name == "forget");
         if matches!(name, "index_repository" | "refresh_indexed_file" | "forget") {
@@ -528,20 +603,20 @@ fn call_tool(
             let repo = path_arg(&args, "repo_path")?;
             let (mode, settings) = search::resolve(&args, Some(&repo), policy, false)?;
             if mode != crate::embed::SearchMode::Lexical {
-                let cache = memory_session
-                    .get_or_insert_with(Session::default)
-                    .search
-                    .clone();
+                let session = memory_session.get_or_insert_with(Session::default);
                 let mut loader = search::loader(
                     settings,
                     policy.allow_remote_embeddings,
-                    cache,
+                    session.search.clone(),
+                    session.local.clone(),
                     repo.to_string_lossy().into_owned(),
                 );
-                return Ok(serde_json::to_value(crate::embed::search_code(
-                    db_path,
-                    &repo,
-                    required_str(&args, "query")?,
+                let query = required_str(&args, "query")?;
+                let scope = crate::db::repo_scope(&repo)?;
+                return Ok(serde_json::to_value(crate::embed::search_code_on(
+                    session_connection(db_path, memory_session)?,
+                    &scope,
+                    query,
                     mode,
                     args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
                     args.get("token_budget")
@@ -553,10 +628,12 @@ fn call_tool(
                     &mut loader,
                 )?)?);
             }
-            let result = code::search_code_with_context(
-                db_path,
-                &repo,
-                required_str(&args, "query")?,
+            let query = required_str(&args, "query")?;
+            let scope = crate::db::repo_scope(&repo)?;
+            let result = code::search_code_scoped(
+                session_connection(db_path, memory_session)?,
+                &scope,
+                query,
                 args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
                 args.get("token_budget")
                     .and_then(Value::as_u64)
@@ -569,9 +646,10 @@ fn call_tool(
         }
         "open_range" => {
             let repo = path_arg(&args, "repo_path")?;
-            let result = code::open_range(
-                db_path,
-                &repo,
+            let scope = crate::db::repo_scope(&repo)?;
+            let result = code::open_range_scoped(
+                session_connection(db_path, memory_session)?,
+                &scope,
                 required_str(&args, "path")?,
                 required_u32(&args, "line_start")?,
                 required_u32(&args, "line_end")?,
@@ -581,41 +659,55 @@ fn call_tool(
         "list_symbols" => {
             let repo = path_arg(&args, "repo_path")?;
             let name = args.get("name").and_then(Value::as_str);
-            Ok(serde_json::to_value(code::list_symbols(
-                db_path,
-                &repo,
+            let scope = crate::db::repo_scope(&repo)?;
+            Ok(serde_json::to_value(code::list_symbols_scoped(
+                session_connection(db_path, memory_session)?,
+                &scope,
                 name,
                 args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
             )?)?)
         }
         "repo_map" => {
             let repo = path_arg(&args, "repo_path")?;
-            Ok(serde_json::to_value(code::repo_map(db_path, &repo)?)?)
+            let scope = crate::db::repo_scope(&repo)?;
+            Ok(serde_json::to_value(code::repo_map_scoped(
+                session_connection(db_path, memory_session)?,
+                scope,
+            )?)?)
         }
         "index_status" => {
             let repo = path_arg(&args, "repo_path")?;
-            Ok(serde_json::to_value(code::index_status(db_path, &repo)?)?)
+            let scope = crate::db::repo_scope(&repo)?;
+            Ok(serde_json::to_value(code::index_status_scoped(
+                session_connection(db_path, memory_session)?,
+                scope,
+            )?)?)
         }
         "remember" => {
-            if let Some(key) = optional_str(&args, "operation_key") {
+            let record = if let Some(key) = optional_str(&args, "operation_key") {
                 let input: memory::MemoryInput = serde_json::from_value(args.clone())?;
-                let session = ensure_memory_session(db_path, memory_session)?;
-                return Ok(serde_json::to_value(
-                    session.remember_idempotent(key, &input)?,
-                )?);
+                ensure_memory_session(db_path, memory_session)?.remember_idempotent(key, &input)?
+            } else {
+                ensure_memory_session(db_path, memory_session)?.remember(
+                    required_str(&args, "scope")?,
+                    required_str(&args, "kind")?,
+                    required_str(&args, "content")?,
+                    optional_str(&args, "source_uri"),
+                    args.get("source_id").and_then(Value::as_i64),
+                    args.get("supersedes_id").and_then(Value::as_i64),
+                    optional_str(&args, "observed_at"),
+                    optional_str(&args, "valid_from"),
+                    optional_str(&args, "valid_to"),
+                )?
+            };
+            let mut result = serde_json::to_value(&record)?;
+            if wants_embedding(&args)? {
+                annotate_embedding(
+                    &mut result,
+                    embed_stored(db_path, policy, memory_session, &record.scope, &[record.id]),
+                );
             }
-            let result = ensure_memory_session(db_path, memory_session)?.remember(
-                required_str(&args, "scope")?,
-                required_str(&args, "kind")?,
-                required_str(&args, "content")?,
-                optional_str(&args, "source_uri"),
-                args.get("source_id").and_then(Value::as_i64),
-                args.get("supersedes_id").and_then(Value::as_i64),
-                optional_str(&args, "observed_at"),
-                optional_str(&args, "valid_from"),
-                optional_str(&args, "valid_to"),
-            )?;
-            Ok(serde_json::to_value(result)?)
+            Ok(result)
         }
         "remember_batch" => {
             let inputs: Vec<memory::MemoryInput> = serde_json::from_value(
@@ -623,8 +715,25 @@ fn call_tool(
                     .cloned()
                     .context("missing memories array")?,
             )?;
-            let result = ensure_memory_session(db_path, memory_session)?.remember_batch(&inputs)?;
-            Ok(serde_json::to_value(result)?)
+            let embed = wants_embedding(&args)?;
+            let records =
+                ensure_memory_session(db_path, memory_session)?.remember_batch(&inputs)?;
+            if embed {
+                // The response stays the stored records; a failure here shows up as partial
+                // semantic coverage in recall and is completed by `embed --namespace`.
+                let mut by_scope: std::collections::BTreeMap<&str, Vec<i64>> = Default::default();
+                for record in &records {
+                    by_scope.entry(&record.scope).or_default().push(record.id);
+                }
+                for (scope, ids) in by_scope {
+                    if let Some(Err(error)) =
+                        embed_stored(db_path, policy, memory_session, scope, &ids)
+                    {
+                        eprintln!("midnight: memory embedding skipped for {scope}: {error:#}");
+                    }
+                }
+            }
+            Ok(serde_json::to_value(records)?)
         }
         "recall" => {
             let (mode, settings) = search::resolve(&args, None, policy, true)?;
@@ -637,20 +746,19 @@ fn call_tool(
                     );
                 }
                 let scope = required_str(&args, "scope")?;
-                let cache = memory_session
-                    .get_or_insert_with(Session::default)
-                    .search
-                    .clone();
+                let query = required_str(&args, "query")?;
+                let session = memory_session.get_or_insert_with(Session::default);
                 let mut loader = search::loader(
                     settings,
                     policy.allow_remote_embeddings,
-                    cache,
+                    session.search.clone(),
+                    session.local.clone(),
                     format!("memory:{scope}"),
                 );
-                return Ok(serde_json::to_value(crate::embed::search_memory(
-                    db_path,
+                return Ok(serde_json::to_value(crate::embed::search_memory_on(
+                    session_connection(db_path, memory_session)?,
                     scope,
-                    required_str(&args, "query")?,
+                    query,
                     mode,
                     args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
                     &mut loader,
@@ -670,12 +778,50 @@ fn call_tool(
                 )?,
             )?)
         }
-        "list_memories" => Ok(serde_json::to_value(
-            ensure_memory_session(db_path, memory_session)?.list_memories(
-                required_str(&args, "scope")?,
-                args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
-            )?,
-        )?),
+        "get_memory" => {
+            let id = args
+                .get("id")
+                .and_then(Value::as_i64)
+                .context("missing integer id")?;
+            let scope = required_str(&args, "scope")?;
+            match ensure_memory_session(db_path, memory_session)?.get_memory(scope, id)? {
+                Some(record) => Ok(serde_json::to_value(record)?),
+                None => bail!("no active memory {id} in scope {scope:?}"),
+            }
+        }
+        "list_memories" => {
+            let kind = optional_str(&args, "kind");
+            let offset = match args.get("offset") {
+                None | Some(Value::Null) => 0,
+                Some(value) => value
+                    .as_u64()
+                    .context("offset must be a non-negative integer")?
+                    .min(memory::MAX_LIST_OFFSET as u64 + 1)
+                    as usize,
+            };
+            Ok(serde_json::to_value(
+                ensure_memory_session(db_path, memory_session)?.list_memories_page(
+                    required_str(&args, "scope")?,
+                    kind,
+                    args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
+                    offset,
+                )?,
+            )?)
+        }
+        "list_scopes" => {
+            let scopes = ensure_memory_session(db_path, memory_session)?
+                .list_scopes()?
+                .into_iter()
+                .filter(|summary| policy.scope_allowed(&summary.scope))
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "scopes": scopes,
+                "default_scope": match policy.memory_scopes.as_deref() {
+                    Some([only]) if !only.ends_with('*') => Some(only.clone()),
+                    _ => policy.default_memory_scope(),
+                },
+            }))
+        }
         "forget" => Ok(
             json!({"forgotten":ensure_memory_session(db_path,memory_session)?.forget(
             required_str(&args,"scope")?,args.get("id").and_then(Value::as_i64).context("missing integer id")?
@@ -683,6 +829,58 @@ fn call_tool(
         ),
         _ => bail!("unknown tool {name}"),
     }
+}
+
+/// `embed` defaults to true; only an explicit boolean false opts out.
+fn wants_embedding(args: &Value) -> Result<bool> {
+    match args.get("embed") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => bail!("embed must be a boolean"),
+    }
+}
+
+/// Embed memories that were just stored, with the connection's provider rules. `None` when no
+/// provider is configured. The memory itself is already committed whatever this returns.
+fn embed_stored(
+    db_path: &Path,
+    policy: &Policy,
+    memory_session: &mut Option<Session>,
+    scope: &str,
+    ids: &[i64],
+) -> Option<Result<crate::embed::EmbedReport>> {
+    let session = memory_session.get_or_insert_with(Session::default);
+    let mut embedder = match search::memory_write_embedder(policy, &session.local) {
+        Ok(None) => return None,
+        Ok(Some(embedder)) => embedder,
+        Err(error) => return Some(Err(error)),
+    };
+    Some(
+        session_connection(db_path, memory_session)
+            .and_then(|conn| crate::embed::embed_memory_ids(conn, scope, ids, embedder.as_mut())),
+    )
+}
+
+fn annotate_embedding(result: &mut Value, outcome: Option<Result<crate::embed::EmbedReport>>) {
+    match outcome {
+        None => {}
+        Some(Ok(report)) => {
+            result["embedding"] = serde_json::to_value(report).unwrap_or(Value::Null);
+        }
+        Some(Err(error)) => {
+            result["embedding_notice"] = json!(format!(
+                "{error:#}; the memory is stored; run `midnight embed --namespace <scope>` to embed it later"
+            ));
+        }
+    }
+}
+
+/// The session's shared connection, opened (and migrated) once per MCP session.
+fn session_connection<'a>(
+    db_path: &Path,
+    session: &'a mut Option<Session>,
+) -> Result<&'a rusqlite::Connection> {
+    Ok(ensure_memory_session(db_path, session)?.connection())
 }
 
 fn ensure_memory_session<'a>(
@@ -749,7 +947,11 @@ mod tests {
 
     #[test]
     fn initialize_offers_the_newest_version_for_an_unknown_request() {
-        let response = initialize(json!(1), &json!({"protocolVersion":"2099-01-01"}));
+        let response = initialize(
+            json!(1),
+            &json!({"protocolVersion":"2099-01-01"}),
+            &Policy::default(),
+        );
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert!(response.get("error").is_none());
     }
@@ -779,7 +981,11 @@ mod tests {
     #[test]
     fn initialize_echoes_a_supported_older_version() {
         for version in ["2025-06-18", "2025-03-26", "2024-11-05"] {
-            let response = initialize(json!(1), &json!({"protocolVersion":version}));
+            let response = initialize(
+                json!(1),
+                &json!({"protocolVersion":version}),
+                &Policy::default(),
+            );
             assert_eq!(response["result"]["protocolVersion"], version);
         }
     }
@@ -791,7 +997,10 @@ mod tests {
             let hints = &tool["annotations"];
             assert_eq!(
                 hints["openWorldHint"],
-                matches!(name, "index_repository" | "search_code" | "recall"),
+                matches!(
+                    name,
+                    "index_repository" | "search_code" | "recall" | "remember" | "remember_batch"
+                ),
                 "{name}"
             );
             let writes = super::WRITE_TOOLS.contains(&name);
@@ -835,6 +1044,89 @@ mod tests {
                 .authorize("list_memories", &json!({"scope":"project:x"}))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn memory_tools_default_to_the_repository_project_scope_within_policy() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("my app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let rooted = Policy {
+            repo_roots: Some(vec![repo.clone()]),
+            ..Policy::default()
+        };
+        assert_eq!(
+            rooted.default_memory_scope().as_deref(),
+            Some("project:my-app")
+        );
+        let args = rooted
+            .authorize("remember", &json!({"kind":"source","content":"x"}))
+            .unwrap();
+        assert_eq!(args["scope"], "project:my-app");
+        let args = rooted
+            .authorize("recall", &json!({"query":"x","scope":"user:alice"}))
+            .unwrap();
+        assert_eq!(
+            args["scope"], "user:alice",
+            "an explicit scope is never replaced"
+        );
+        let args = rooted
+            .authorize(
+                "remember_batch",
+                &json!({"memories":[{"kind":"source","content":"a"},{"kind":"source","content":"b","scope":"user:b"}]}),
+            )
+            .unwrap();
+        assert_eq!(args["memories"][0]["scope"], "project:my-app");
+        assert_eq!(args["memories"][1]["scope"], "user:b");
+        // list_scopes names no scope and is not rewritten.
+        assert!(
+            rooted
+                .authorize("list_scopes", &json!({}))
+                .unwrap()
+                .get("scope")
+                .is_none()
+        );
+
+        // A scope list that does not cover the default gives no default and still requires one.
+        let users_only = Policy {
+            repo_roots: Some(vec![repo.clone()]),
+            memory_scopes: Some(vec!["user:*".into()]),
+            ..Policy::default()
+        };
+        assert_eq!(users_only.default_memory_scope(), None);
+        assert!(
+            users_only
+                .authorize("recall", &json!({"query":"x"}))
+                .is_err()
+        );
+        // A prefix that covers it keeps the default.
+        let projects = Policy {
+            repo_roots: Some(vec![repo.clone()]),
+            memory_scopes: Some(vec!["project:*".into()]),
+            ..Policy::default()
+        };
+        assert_eq!(
+            projects.authorize("recall", &json!({"query":"x"})).unwrap()["scope"],
+            "project:my-app"
+        );
+        // A pinned scope wins over the default; a different explicit scope is refused.
+        let pinned = Policy {
+            repo_roots: Some(vec![repo]),
+            memory_scopes: Some(vec!["user:alice".into()]),
+            ..Policy::default()
+        };
+        assert_eq!(
+            pinned.authorize("recall", &json!({"query":"x"})).unwrap()["scope"],
+            "user:alice"
+        );
+        assert!(
+            pinned
+                .authorize("recall", &json!({"query":"x","scope":"project:my-app"}))
+                .is_err()
+        );
+        let text = super::instructions(&rooted);
+        assert!(text.contains("\"project:my-app\""), "{text}");
+        assert!(super::instructions(&pinned).contains("pinned by policy"));
     }
 
     #[test]

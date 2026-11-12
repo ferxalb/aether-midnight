@@ -27,6 +27,34 @@ struct Entry {
 #[derive(Clone, Default)]
 pub(super) struct QueryCache(Rc<RefCell<VecDeque<Entry>>>);
 
+/// The installed local model, loaded at most once per MCP connection. Loading reads and hashes
+/// the pinned weights and initializes ONNX Runtime (seconds), so reloading it for every uncached
+/// query or stored memory dominated local semantic latency. Never shared across connections.
+#[derive(Clone, Default)]
+pub(super) struct LocalModel(Rc<RefCell<Option<embed::FastEmbedder>>>);
+
+impl LocalModel {
+    fn embed(&self, kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut slot = self.0.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(embed::FastEmbedder::load_installed().map_err(|e| {
+                e.context("local embeddings are configured but unavailable (see `midnight status`)")
+            })?);
+        }
+        slot.as_mut()
+            .expect("local model loaded above")
+            .embed(kind, texts)
+    }
+}
+
+fn local_identity() -> ModelIdentity {
+    ModelIdentity {
+        name: embed::MODEL_NAME.into(),
+        revision: embed::MODEL_REVISION.into(),
+        dimensions: embed::MODEL_DIMS,
+    }
+}
+
 pub(super) fn resolve(
     args: &Value,
     repo: Option<&Path>,
@@ -72,6 +100,7 @@ pub(super) fn loader(
     settings: Option<Settings>,
     remote_allowed: bool,
     cache: QueryCache,
+    local: LocalModel,
     scope: String,
 ) -> impl FnMut() -> Result<Box<dyn TextEmbedder>> {
     move || {
@@ -91,18 +120,59 @@ pub(super) fn loader(
             }
             settings.cloud_config()?.identity()
         } else {
-            ModelIdentity {
-                name: embed::MODEL_NAME.into(),
-                revision: embed::MODEL_REVISION.into(),
-                dimensions: embed::MODEL_DIMS,
-            }
+            local_identity()
         };
         Ok(Box::new(CachedEmbedder {
             settings: settings.clone(),
             identity,
             cache: cache.clone(),
+            local: local.clone(),
             scope: scope.clone(),
         }) as Box<dyn TextEmbedder>)
+    }
+}
+
+/// Embedder for memories an agent just stored, under the same rules as `index_repository`:
+/// a configured provider, the project's opt-out, the policy's remote grant and saved
+/// provider-bound upload consent. `Ok(None)` means no provider is configured (nothing to do);
+/// an error is reported to the caller as a notice and never undoes the stored memory.
+pub(super) fn memory_write_embedder(
+    policy: &Policy,
+    local: &LocalModel,
+) -> Result<Option<Box<dyn TextEmbedder>>> {
+    let repo = policy.default_repo();
+    let (_, settings) = resolve(&serde_json::json!({}), repo.as_deref(), policy, false)?;
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    if settings.provider.is_remote() {
+        if !policy.allow_remote_embeddings {
+            bail!("remote embeddings are not permitted by this MCP policy");
+        }
+        if !settings.upload_consented() {
+            bail!("memory uploads require saved provider-bound consent; run `midnight setup`");
+        }
+        // Interactive budget (one attempt, five-second timeout): a store must not hang on retries.
+        return Ok(Some(Box::new(config::cloud_query_embedder(&settings)?)));
+    }
+    Ok(Some(Box::new(LocalPassageEmbedder {
+        identity: local_identity(),
+        local: local.clone(),
+    })))
+}
+
+struct LocalPassageEmbedder {
+    identity: ModelIdentity,
+    local: LocalModel,
+}
+
+impl TextEmbedder for LocalPassageEmbedder {
+    fn identity(&self) -> &ModelIdentity {
+        &self.identity
+    }
+
+    fn embed(&mut self, kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.local.embed(kind, texts)
     }
 }
 
@@ -129,6 +199,7 @@ struct CachedEmbedder {
     settings: Settings,
     identity: ModelIdentity,
     cache: QueryCache,
+    local: LocalModel,
     scope: String,
 }
 
@@ -151,13 +222,11 @@ impl TextEmbedder for CachedEmbedder {
                 return Ok(vec![entry.vector.clone()]);
             }
         }
-        let mut embedder: Box<dyn TextEmbedder> = if self.settings.provider.is_remote() {
-            Box::new(config::cloud_query_embedder(&self.settings)?)
-        } else {
-            crate::ux::consented_embedder_for(&self.settings)?
-                .ok_or_else(|| anyhow::anyhow!("no embedding provider configured"))?
+        let vectors = match self.settings.provider {
+            config::Choice::Lexical => bail!("no embedding provider configured"),
+            config::Choice::Local => self.local.embed(kind, texts)?,
+            _ => config::cloud_query_embedder(&self.settings)?.embed(kind, texts)?,
         };
-        let vectors = embedder.embed(kind, texts)?;
         if vectors.len() == 1
             && vectors[0].len() == self.identity.dimensions
             && vectors[0].iter().all(|v| v.is_finite())
@@ -202,6 +271,7 @@ mod tests {
             settings: Settings::lexical(),
             identity,
             cache: cache.clone(),
+            local: LocalModel::default(),
             scope: "repo:a".into(),
         };
         assert_eq!(

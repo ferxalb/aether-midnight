@@ -62,8 +62,20 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
         );
 
         let init = json(&db, &["init", "--json"]);
-        assert_eq!(init["schema_version"], 7, "{name}");
-        assert_eq!(user_version(&db), 7);
+        assert_eq!(init["schema_version"], 8, "{name}");
+        assert_eq!(user_version(&db), 8);
+        let duplicate_index: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='code_files_scope_path'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate_index, 0,
+            "{name}: schema 8 drops the duplicate path index"
+        );
 
         // Data written by the old build is intact, namespace-isolated, and the forgotten row stays gone.
         let listed = json(&db, &["memory", "list", "--namespace", "proj:a", "--json"]);
@@ -195,7 +207,7 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
         drop(conn);
 
         // Idempotent re-open.
-        assert_eq!(json(&db, &["init", "--json"])["schema_version"], 7);
+        assert_eq!(json(&db, &["init", "--json"])["schema_version"], 8);
     }
 }
 
@@ -205,10 +217,10 @@ fn database_from_a_newer_schema_is_refused_without_modification() {
     let db = fixture("schema_v5.sqlite3", &temp);
     Connection::open(&db)
         .unwrap()
-        .pragma_update(None, "user_version", 8)
+        .pragma_update(None, "user_version", 9)
         .unwrap();
     let out = run(&db, &["init"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("newer than this binary supports"));
-    assert_eq!(user_version(&db), 8);
+    assert_eq!(user_version(&db), 9);
 }

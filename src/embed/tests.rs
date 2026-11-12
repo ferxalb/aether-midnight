@@ -145,7 +145,7 @@ fn schema_v6_creates_embeddings_table_with_identity_columns() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 7);
+    assert_eq!(v, 8);
     for column in [
         "model",
         "revision",
@@ -743,4 +743,20 @@ fn chunking_splits_long_files_and_preserves_line_ranges() {
     }
     assert!(chunks.iter().all(|c| c.text.len() <= CHUNK_MAX_BYTES + 16));
     assert!(chunk_text("\n\n  \n").0.is_empty());
+}
+
+#[test]
+fn partial_top_k_matches_full_sort_and_truncate_including_ties() {
+    // Many equal similarities around the cut make the tie-break decide membership.
+    let base: Vec<(i64, f32)> = (0..500)
+        .map(|i| (((i * 7919) % 1000) as i64, ((i % 13) as f32) / 13.0))
+        .collect();
+    for k in [0, 1, 5, 20, 50, 499, 500, 800] {
+        let mut expected = base.clone();
+        sort_hits(&mut expected, |a, b| a.cmp(b));
+        expected.truncate(k);
+        let mut actual = base.clone();
+        top_k_hits(&mut actual, k, |a, b| a.cmp(b));
+        assert_eq!(actual, expected, "k={k}");
+    }
 }
