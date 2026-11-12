@@ -16,6 +16,40 @@
 
 This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
+## 2026-11-12: path trigram index (schema 9)
+
+Profiling the code workload of the 2026-11-11 section showed that every lexical `search_code`
+spent about 2.5 ms (10,000 catalog rows) in the path-substring candidate query, which evaluates
+`instr(lower(rel_path), lower(?))` on every row of the worktree, even for queries with no match.
+For terms present in every file (`payload`, `usize`) another ~6 ms is FTS5 BM25 scoring of all
+10,000 postings; FTS5 has no top-k pruning, so that part is inherent to exact BM25 ordering and is
+unchanged. Schema 9 adds a contentless FTS5 trigram index of `rel_path`; queries of three or more
+characters take candidate rows from it and keep the original predicate and ordering.
+
+Paired release binaries of the parent commit (`9c38cb2`, schema 8) and this change, same Linux
+x86_64 cloud container, generated 10,000-file fixture indexed once by the parent binary and copied
+(the change's copy migrated before measuring), `measure-mcp` with the 330-request
+`code_lexical.json` of `midnight-harness rc7-workloads`, six runs per binary, interleaved. All
+3,960 responses are byte-identical to the first parent run.
+
+| Request class (n=180 each) | Parent p50 / p95 ms | Change p50 / p95 ms |
+| --- | ---: | ---: |
+| `search_code`, exact symbol (3 queries; range across queries) | 3.69–4.23 / 5.29–5.63 | 1.10–1.32 / 1.62–2.20 |
+| `search_code`, no symbol match (2 queries) | 3.13–3.15 / 4.31–4.43 | 0.50–0.55 / 0.71–0.75 |
+| `search_code`, term in every file (2 queries) | 9.15–9.41 / 12.72–13.34 | 6.57–6.67 / 9.38–9.44 |
+| `open_range`, `list_symbols`, `index_status`, `repo_map` | 0.28 / 4.28 / 5.27 / 6.69 (p50) | 0.25 / 4.32 / 5.46 / 6.73 (p50) |
+
+All 330 requests: p50 4.248 → 1.437 ms, p95 9.644 → 7.420 ms; median process CPU per run 1.616 →
+1.080 s. The other tools do not use path candidates and stay within noise.
+
+Costs, five fresh full indexes per binary, interleaved: database 16,965,632 → 17,461,248 bytes
+(+2.9%, identical in every run); wall 1.43–1.74 s (median 1.49) → 1.54–1.75 s (median 1.68); CPU
+2.46–2.98 s (median 2.51) → 2.58–2.96 s (median 2.71), about 7–8% more indexing work for the
+trigram postings. Peak RSS stayed within 2 MB. The frozen `retrieval-quality` suite and the three
+frozen memory suites in both insertion orders produce identical non-timing output. Queries
+shorter than three characters still scan the catalog; repositories with more files should gain
+more, which is not measured here.
+
 ## 2026-11-12: memory usability, partial top-k KNN and schema 8
 
 Paired release binaries of the parent commit (`fd0fe48`) and of this change, same Linux x86_64

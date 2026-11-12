@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -122,6 +122,32 @@ const EMBEDDINGS_REUSE_SCHEMA: &str = "DROP TRIGGER IF EXISTS code_files_embeddi
 const DROP_DUPLICATE_PATH_INDEX_SCHEMA: &str = "DROP INDEX IF EXISTS code_files_scope_path;
      UPDATE metadata SET value='8' WHERE key='schema_version';
      PRAGMA user_version=8;";
+
+/// Schema 9: a trigram index over repository-relative paths, kept in step with `code_files` by
+/// triggers (rowid = `code_files.id`). Path-substring candidates read it to find the files whose
+/// path can contain the query instead of scanning the worktree's whole catalog on every search;
+/// the original `instr(lower(rel_path), lower(?))` predicate still decides membership, so results
+/// are unchanged. The trigram tokenizer folds case more widely than SQLite's ASCII-only `lower()`,
+/// which only makes it a superset filter. Contentless: the path text lives only in `code_files`.
+const CODE_PATH_INDEX_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS code_path_fts USING fts5(
+         rel_path,
+         content='',
+         contentless_delete=1,
+         tokenize='trigram'
+     );
+     CREATE TRIGGER IF NOT EXISTS code_files_path_insert AFTER INSERT ON code_files BEGIN
+         INSERT INTO code_path_fts(rowid,rel_path) VALUES(new.id,new.rel_path);
+     END;
+     CREATE TRIGGER IF NOT EXISTS code_files_path_delete AFTER DELETE ON code_files BEGIN
+         DELETE FROM code_path_fts WHERE rowid=old.id;
+     END;
+     CREATE TRIGGER IF NOT EXISTS code_files_path_update AFTER UPDATE OF rel_path ON code_files
+     WHEN old.rel_path IS NOT new.rel_path BEGIN
+         DELETE FROM code_path_fts WHERE rowid=old.id;
+         INSERT INTO code_path_fts(rowid,rel_path) VALUES(new.id,new.rel_path);
+     END;
+     UPDATE metadata SET value='9' WHERE key='schema_version';
+     PRAGMA user_version=9;";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RepoScope {
@@ -360,6 +386,24 @@ fn migrate(connection: &Connection) -> Result<()> {
             if migrated_version == 7 {
                 connection.execute_batch(DROP_DUPLICATE_PATH_INDEX_SCHEMA)?;
                 migrated_version = 8;
+            }
+            if migrated_version == 8 {
+                connection.execute_batch(CODE_PATH_INDEX_SCHEMA)?;
+                // Every real catalog has `rel_path`; minimal legacy catalogs that never did are
+                // cleared by the format migration and have nothing to backfill.
+                let has_paths: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('code_files') WHERE name='rel_path')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if has_paths {
+                    // Rebuild from the catalog so a re-run (or a partly built index) ends exact.
+                    connection.execute_batch(
+                        "INSERT INTO code_path_fts(code_path_fts) VALUES('delete-all');
+                         INSERT INTO code_path_fts(rowid,rel_path) SELECT id,rel_path FROM code_files;",
+                    )?;
+                }
+                migrated_version = 9;
             }
             if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");

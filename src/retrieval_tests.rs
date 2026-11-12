@@ -1361,7 +1361,7 @@ fn schema_three_database_migrates_to_scope_counts_and_keeps_every_memory() {
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let after: i64 = migrated
         .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
         .unwrap();
