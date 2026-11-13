@@ -29,6 +29,7 @@ fn start(db: &std::path::Path, extra: &[&str]) -> Server {
         .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(db)
+        .env("MIDNIGHT_DAEMON", "0")
         .arg("serve-http")
         .args(extra)
         .stdout(Stdio::piped())
@@ -324,6 +325,7 @@ fn http_refuses_non_loopback_bind() {
         .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(temp.path().join("m.sqlite3"))
+        .env("MIDNIGHT_DAEMON", "0")
         .args(["serve-http", "--bind", "0.0.0.0:0"])
         .output()
         .unwrap();

@@ -18,6 +18,7 @@ impl Client {
         let mut child = Command::new(binary)
             .arg("--db")
             .arg(path)
+            .env("MIDNIGHT_DAEMON", "0")
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

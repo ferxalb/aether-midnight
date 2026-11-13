@@ -108,6 +108,7 @@ impl Mcp {
     fn start_with_env(bin: &Path, db: &Path, envs: &[(&str, &str)]) -> Result<Self> {
         let started = Instant::now();
         let mut child = Command::new(bin)
+            .env("MIDNIGHT_DAEMON", "0")
             .envs(envs.iter().copied())
             .arg("--db")
             .arg(db)

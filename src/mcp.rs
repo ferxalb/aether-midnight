@@ -38,6 +38,22 @@ fn negotiated_version(params: &Value) -> &'static str {
 }
 const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 
+thread_local! {
+    /// Working directory of the client that owns this connection thread (daemon only). The daemon's
+    /// own working directory says nothing about the repository a client is in.
+    static CONNECTION_CWD: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Set the client working directory for default-repository lookup and relative `repo_path`
+/// arguments on the current connection thread.
+pub fn set_connection_cwd(cwd: Option<PathBuf>) {
+    CONNECTION_CWD.with(|c| *c.borrow_mut() = cwd);
+}
+
+fn connection_cwd() -> Option<PathBuf> {
+    CONNECTION_CWD.with(|c| c.borrow().clone())
+}
+
 /// Least-privilege limits applied to every tool call on any transport.
 /// The default permits local tools; remote embeddings require a separate grant. The stdio CLI
 /// grants remote capability unless --local-only is set, but saved upload consent is still required.
@@ -104,7 +120,7 @@ impl Policy {
         {
             return Some(only.clone());
         }
-        let cwd = std::env::current_dir().ok()?;
+        let cwd = connection_cwd().or_else(|| std::env::current_dir().ok())?;
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
         repo_root_above(&cwd, home.as_deref().map(Path::new))
     }
@@ -295,14 +311,26 @@ pub fn run_stdio(db_path: &Path, policy: &Policy, cancellation: Arc<AtomicBool>)
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut stdout = std::io::stdout().lock();
+    run_session(&mut input, &mut stdout, db_path, policy, &cancellation)
+}
+
+/// The newline-delimited JSON-RPC loop over any reader/writer pair: stdio in-process, or a daemon
+/// connection. One request at a time, 1 MiB per message.
+pub fn run_session<R: BufRead, W: Write>(
+    input: &mut R,
+    stdout: &mut W,
+    db_path: &Path,
+    policy: &Policy,
+    cancellation: &AtomicBool,
+) -> Result<()> {
     let mut memory_session = None;
     loop {
-        let Some((bytes, too_long)) = read_bounded_line(&mut input, MAX_MCP_MESSAGE_BYTES)? else {
+        let Some((bytes, too_long)) = read_bounded_line(input, MAX_MCP_MESSAGE_BYTES)? else {
             break;
         };
         if too_long {
             write_json(
-                &mut stdout,
+                &mut *stdout,
                 &json!({
                     "jsonrpc":"2.0","id":null,
                     "error":{"code":-32600,"message":"MCP message exceeds the 1 MiB limit"}
@@ -314,7 +342,7 @@ pub fn run_stdio(db_path: &Path, policy: &Policy, cancellation: Arc<AtomicBool>)
             Ok(line) => line,
             Err(error) => {
                 write_json(
-                    &mut stdout,
+                    &mut *stdout,
                     &json!({
                         "jsonrpc":"2.0","id":null,
                         "error":{"code":-32700,"message":format!("parse error: {error}")}
@@ -330,7 +358,7 @@ pub fn run_stdio(db_path: &Path, policy: &Policy, cancellation: Arc<AtomicBool>)
             Ok(value) => value,
             Err(error) => {
                 write_json(
-                    &mut stdout,
+                    &mut *stdout,
                     &json!({
                         "jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("parse error: {error}")}
                     }),
@@ -344,14 +372,10 @@ pub fn run_stdio(db_path: &Path, policy: &Policy, cancellation: Arc<AtomicBool>)
             }
             continue;
         }
-        if let Some(response) = handle_message(
-            db_path,
-            policy,
-            &mut memory_session,
-            &request,
-            &cancellation,
-        ) {
-            write_json(&mut stdout, &response)?;
+        if let Some(response) =
+            handle_message(db_path, policy, &mut memory_session, &request, cancellation)
+        {
+            write_json(&mut *stdout, &response)?;
         }
     }
     Ok(())
@@ -422,10 +446,12 @@ fn instructions(policy: &Policy) -> String {
         ),
         (None, None) => "Memory calls need a scope such as project:<repo> or user:<name>; list_scopes shows existing ones.".to_string(),
     };
+    let mode = crate::daemon::mode();
     format!(
         "Local code retrieval and explicit, namespaced agent memory.\n\
          Code: use search_code to find files, symbols and phrases (repo_path is optional inside a Git repository or with one policy root), open_range to read exact current lines, list_symbols and repo_map to orient. Results carry freshness; run index_repository when the index is missing or stale.\n\
          Memory: at the start of a task, recall what is already known about it. When you learn something worth keeping (a decision, a user preference, a fact about this project), remember it: store the evidence with kind=source, then the conclusion with kind=derived and source_id set to that source's id (or source_uri for a file or URL). When a fact changes, store the new one with supersedes_id and valid_from instead of forgetting the old one. Memories are never captured automatically; only what you store is kept. {scope}\n\
+         Server mode: {mode}.\n\
          Retrieval modes: search_code defaults to lexical unless an embedding provider is configured and permitted, then hybrid; recall defaults to lexical. Explicit lexical never contacts a provider. Remote modes use only the user's saved provider and consent."
     )
 }
@@ -546,6 +572,10 @@ fn call_tool(
     cancellation: &AtomicBool,
 ) -> Result<Value> {
     let name = required_str(params, "name")?;
+    // Inside the daemon every writer takes the FIFO write gate, so two clients can never contend
+    // for SQLite's write lock. A no-op everywhere else.
+    let _write_gate = (crate::daemon::gate_active() && WRITE_TOOLS.contains(&name))
+        .then(|| crate::daemon::write_gate().acquire());
     let args = params
         .get("arguments")
         .filter(|v| v.is_object())
@@ -569,8 +599,9 @@ fn call_tool(
                 verify_hashes,
                 cancellation,
             )?;
+            let finished_complete = result.complete && !result.cancelled;
             let mut result = serde_json::to_value(result)?;
-            crate::watch::ensure(db_path, &repo);
+            crate::watch::ensure_after_index(db_path, &repo, finished_complete);
             if !cancellation.load(std::sync::atomic::Ordering::Relaxed) {
                 let embedded = (|| -> Result<Option<crate::embed::EmbedReport>> {
                     let Some(settings) = search::index_settings(&repo, policy)? else {
@@ -990,7 +1021,11 @@ fn repo_root_above(dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn path_arg(args: &Value, key: &str) -> Result<PathBuf> {
-    Ok(PathBuf::from(required_str(args, key)?))
+    let path = PathBuf::from(required_str(args, key)?);
+    Ok(match connection_cwd() {
+        Some(cwd) if path.is_relative() => cwd.join(path),
+        _ => path,
+    })
 }
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value

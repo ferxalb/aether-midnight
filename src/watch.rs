@@ -271,9 +271,11 @@ impl IndexSink {
 
 impl WatchSink for IndexSink {
     fn refresh(&self, rel_path: &str) -> Result<()> {
+        let _gate = crate::daemon::gate_active().then(|| crate::daemon::write_gate().acquire());
         code::refresh_watched_file(&self.db_path, &self.root, rel_path, &self.cancel).map(|_| ())
     }
     fn reconcile(&self, _reason: &str) -> Result<()> {
+        let _gate = crate::daemon::gate_active().then(|| crate::daemon::write_gate().acquire());
         code::index_repository(&self.db_path, &self.root, false, false, &self.cancel).map(|_| ())
     }
 }
@@ -677,6 +679,16 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, RepoWatcher>> {
 /// Start (once) a watcher for an indexed repository root when watching is enabled. A repository
 /// without an index is skipped: there is nothing to keep fresh yet.
 pub fn ensure(db_path: &Path, root: &Path) {
+    ensure_inner(db_path, root, true);
+}
+
+/// Like [`ensure`] right after a complete `index_repository`: the scan that just finished is the
+/// catch-up, so the watcher does not repeat it.
+pub fn ensure_after_index(db_path: &Path, root: &Path, complete: bool) {
+    ensure_inner(db_path, root, !complete);
+}
+
+fn ensure_inner(db_path: &Path, root: &Path, catch_up: bool) {
     if !enabled() {
         return;
     }
@@ -702,7 +714,7 @@ pub fn ensure(db_path: &Path, root: &Path) {
     if !indexed {
         return;
     }
-    let watcher = RepoWatcher::start(&key, IndexSink::new(db_path, &key), true);
+    let watcher = RepoWatcher::start(&key, IndexSink::new(db_path, &key), catch_up);
     map.insert(key, watcher);
 }
 

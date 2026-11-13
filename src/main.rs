@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_midnight::{
-    auth, benchmark, cloud, code, config, connect, db, embed, mcp, mcp_http, memory, progress,
-    project, runtime, uninstall, update, ux,
+    auth, benchmark, cloud, code, config, connect, daemon, db, embed, mcp, mcp_http, memory,
+    progress, project, runtime, uninstall, update, ux,
 };
 
 #[derive(Parser)]
@@ -392,6 +392,14 @@ enum Commands {
     Mcp {
         #[command(flatten)]
         policy: PolicyArgs,
+        /// Serve in this process instead of through the single-writer daemon.
+        #[arg(long)]
+        no_daemon: bool,
+    },
+    /// Manage the single-writer daemon that serves one database (autostarted by `mcp`).
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
     },
     /// Serve MCP over loopback-only Streamable HTTP (for clients such as AETHER Dots).
     ServeHttp {
@@ -404,6 +412,19 @@ enum Commands {
         #[command(subcommand)]
         action: TokenAction,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon for this database (if none runs) and print its status.
+    Start,
+    /// Stop the daemon after in-flight work, checkpointing the WAL.
+    Stop,
+    /// Report whether a daemon runs for this database.
+    Status,
+    /// Run the daemon in the foreground (used by autostart).
+    #[command(hide = true)]
+    Run,
 }
 
 #[derive(Subcommand)]
@@ -1395,7 +1416,16 @@ pub fn main() -> Result<()> {
         } => {
             print_json(&benchmark::evaluate_fts5(&repo, &manifest, samples)?)?;
         }
-        Commands::Mcp { mut policy } => {
+        Commands::Daemon { action } => match action {
+            DaemonAction::Start => print_json(&daemon::command_start(&db_path)?)?,
+            DaemonAction::Stop => print_json(&daemon::command_stop(&db_path)?)?,
+            DaemonAction::Status => print_json(&daemon::command_status(&db_path)?)?,
+            DaemonAction::Run => daemon::serve(&db_path, cancellation)?,
+        },
+        Commands::Mcp {
+            mut policy,
+            no_daemon,
+        } => {
             // A project file may only narrow what flags left open.
             if let Some(cfg) = std::env::current_dir()
                 .ok()
@@ -1408,7 +1438,7 @@ pub fn main() -> Result<()> {
                     policy.memory_scopes = cfg.mcp.memory_scopes;
                 }
             }
-            mcp::run_stdio(&db_path, &policy.into_policy(), cancellation)?
+            daemon::run_mcp(&db_path, &policy.into_policy(), cancellation, !no_daemon)?
         }
         Commands::Token { action } => token_command(&db_path, action)?,
         Commands::ServeHttp { bind } => mcp_http::serve(&db_path, bind, cancellation)?,

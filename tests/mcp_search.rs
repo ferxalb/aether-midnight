@@ -96,6 +96,7 @@ impl Fixture {
         let mut child = self
             .command()
             .current_dir(dir)
+            .env("MIDNIGHT_DAEMON", "0")
             .arg("mcp")
             .args(extra)
             .stdin(Stdio::piped())
@@ -377,6 +378,7 @@ fn http_tokens_require_their_own_remote_grant_in_addition_to_saved_consent() {
     let remote = mint(true);
     let mut child = f
         .command()
+        .env("MIDNIGHT_DAEMON", "0")
         .arg("serve-http")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

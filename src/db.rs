@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 9;
+/// Schema version this binary reads and writes.
+pub const SCHEMA_VERSION: i64 = 9;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,

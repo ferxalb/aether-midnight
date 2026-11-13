@@ -7,6 +7,7 @@ pub mod code;
 pub mod config;
 pub mod connect;
 pub mod context;
+pub mod daemon;
 pub mod db;
 pub mod embed;
 pub mod mcp;

@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (5) — v0.2 Phase 3: single-writer daemon
+
+- New `src/daemon.rs`: one daemon per database (advisory `flock`, stale-file recovery, Unix socket in a `0700` directory with a `0600` socket and a hashed short path, `Transport` trait so named pipes can follow), JSON line framing with a `hello` handshake (protocol and schema must match; an idle mismatching daemon is restarted once, a busy one is an error, never a second writer), per-connection `Policy` and client working directory, a FIFO write gate around writer tools and the watcher sink, idle shutdown (`MIDNIGHT_DAEMON_IDLE_SECS`, default 600), graceful shutdown with WAL checkpoint. `midnight mcp` and `serve-http` proxy to it with an explicit, reported in-process fallback; `midnight daemon start|stop|status`, `mcp --no-daemon`, `MIDNIGHT_DAEMON=0`. The watcher is on by default inside the daemon. Design rationale (why a single writer beats `busy_timeout`/IMMEDIATE-only): `docs/design/v0.2-daemon.md`; contract: `docs/api.md`.
+- Not done, stated in the docs: one-shot CLI commands still run in-process; no Windows transport; no worktree row sharing (needs schema 10, deferred to Part 2); embedding calls still run under the write gate.
+- Tests written, **not run**: `tests/daemon.rs` and unit tests; existing `mcp`/`serve-http` test spawns now set `MIDNIGHT_DAEMON=0`. `cargo check --locked --all-targets` passes. No measurement exists yet.
+
 ## 2026-11-12 (4) — v0.2 Phase 2: native file watcher (opt-in until the daemon)
 
 - New `src/watch.rs` on `notify` 8.2.2 (`default-features = false`, `macos_fsevent`); this is the only dependency change of Part 1 and the only `Cargo.lock` change (`cargo add`, one network resolve; later commands keep `--locked`). Native OS events only, no `PollWatcher`, no tick thread: the debounce thread blocks on its channel while idle. Per-path coalescing (40 ms quiet, 200 ms max wait), bounded queue (4,096 events, 512 pending paths) and one incremental reconciliation for storms, branch/index changes, rescan notices, ignore-rule edits, removed directories and backend errors. `.git` stays excluded from indexing; `HEAD`, `index`, `packed-refs` and `refs/heads/**` (also for linked worktrees) signal branch changes. Linux registers per-directory watches after an ignore-aware count and refuses to start (state `degraded`, reason names `fs.inotify.max_user_watches`) instead of half-registering.
