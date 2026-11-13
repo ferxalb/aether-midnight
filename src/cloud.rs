@@ -542,9 +542,20 @@ impl CloudEmbedder {
             .into_reader()
             .take(8 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|_| CloudError {
-                kind: CloudErrorKind::Network,
-                message: "failed reading provider response".into(),
+            .map_err(|error| {
+                let timeout = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                );
+                hint.retryable = self.interactive && timeout;
+                CloudError {
+                    kind: if timeout {
+                        CloudErrorKind::Timeout
+                    } else {
+                        CloudErrorKind::Network
+                    },
+                    message: "failed reading provider response".into(),
+                }
             })?;
         let response: WireResponse = if bytes.len() > 8 * 1024 * 1024 {
             None

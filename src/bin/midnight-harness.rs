@@ -746,7 +746,8 @@ fn semantic_code_quality(bin: &Path, split: &str, local: bool) -> Result<Value> 
     Ok(Value::Object(report))
 }
 
-fn retrieval_quality(bin: &Path) -> Result<Value> {
+fn retrieval_quality(bin: &Path, limit: usize) -> Result<Value> {
+    let limit_arg = limit.to_string();
     let queries = read_json(&Path::new(ROOT).join("benchmark/retrieval_queries.json"))?["queries"]
         .as_array()
         .unwrap()
@@ -784,7 +785,7 @@ fn retrieval_quality(bin: &Path) -> Result<Value> {
                     "--query",
                     q["query"].as_str().unwrap(),
                     "--limit",
-                    "5",
+                    &limit_arg,
                 ],
                 &envs,
             )?;
@@ -815,13 +816,14 @@ fn retrieval_quality(bin: &Path) -> Result<Value> {
             } else {
                 pos += 1;
                 (
-                    ranks.len() as f64 / relevant.len() as f64,
+                    ranks.iter().filter(|rank| **rank <= 5).count() as f64 / relevant.len() as f64,
                     ranks.iter().min().map_or(0.0, |x| 1.0 / *x as f64),
                 )
             };
             recall += r;
             rr += m;
-            rows.push(json!({"id":q["id"],"kind":q["kind"],"top5":paths,"recall_at_5":r,"reciprocal_rank":m}));
+            let top_key = format!("top{limit}");
+            rows.push(json!({"id":q["id"],"kind":q["kind"],(top_key):paths,"recall_at_5":r,"reciprocal_rank":m}));
         }
         let (diag, _) = run_cli(bin, &["--db", db_s, "diagnose"], &envs)?;
         strategies.insert(
@@ -1416,7 +1418,13 @@ fn main() -> Result<()> {
             flag("--split").unwrap_or("all"),
             a.iter().any(|arg| arg == "--local"),
         )?,
-        "retrieval-quality" => retrieval_quality(&binary_path(flag("--binary"))?)?,
+        "retrieval-quality" => {
+            let limit = flag("--limit").unwrap_or("5").parse::<usize>()?;
+            if !matches!(limit, 5 | 10) {
+                bail!("retrieval-quality --limit must be 5 or 10");
+            }
+            retrieval_quality(&binary_path(flag("--binary"))?, limit)?
+        }
         "token-report" => token_report(
             &binary_path(flag("--binary"))?,
             flag("--limit").map_or(5, |v| v.parse().unwrap()),
@@ -1450,7 +1458,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | semantic-code-quality [--split dev|heldout|all --local --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N] | daemon-measure [--clients N --writes N --requests N]>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | semantic-code-quality [--split dev|heldout|all --local --binary B] | retrieval-quality [--limit 5|10 --binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N] | daemon-measure [--clients N --writes N --requests N]>"
         ),
     };
     if let Some(p) = flag("--json-output") {
