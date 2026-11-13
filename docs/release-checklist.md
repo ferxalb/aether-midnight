@@ -14,14 +14,16 @@ re-opened below; its record follows in the archived table.
 | Token report vs the published rc.7 binary (paths/order identical, tokens and bytes) | OPEN — `midnight-harness token-report` / `token-compare` |
 | Watcher one-file visibility p95 ≤ 150 ms and idle CPU | OPEN — `watch-latency`, `watch-idle` |
 | Daemon: N concurrent writers without `database is locked`, cold start, per-request overhead, RSS by daemon PID | OPEN — `daemon-measure` |
-| Schema 9 → 10 migration, rollback test, refusal by rc.7 | OPEN — fixture tests exist, not run on the final tree |
+| Schema 9 → 10 migration, rollback, rc.7 refusal and JSONL compatibility | OPEN — supply a real rc.7 binary via `MIDNIGHT_RC7_BINARY` |
+| Memory v3 recall, duplicate detection, trust and layer isolation | OPEN — report dev and held-out separately |
+| Semantic code v1, symbol chunk reuse and classified cloud retries | OPEN — local pinned E5 and loopback cloud tests |
 | Local-model reuse and RSS | OPEN — needs the pinned ONNX Runtime on the build host |
 | Real Claude Code / Codex sessions with the compact shape, daemon and refs | OPEN |
 | Linux, Windows, npm builds and smoke tests | NOT RUN — experimental |
 | Tagged rc.8 workflow, archive, checksums, install and rc.7 → rc.8 update | OPEN — maintainer publication below |
 | Signing/notarization, arm64 runtime, live Rainy, clean-machine install | OPEN — unchanged |
 
-Do not promote rc.8 automatically. No tag or release is created by editing this checklist.
+The [validation report](part2-validation.md) lists the pending commands. Stable promotion requires a separate decision.
 
 ## rc.7 record (archived)
 

@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (10) — Close rc.8 Part 2 follow-up and document remaining gates
+
+- Aligned explicit global recall with global reference lookup and added a real rc.7 migration, export and refusal test. Added cloud timeout classification and frozen top-ten reporting. Native npm package jobs now produce tarballs and record verified binary hashes.
+- `cargo fmt` and `nice -n 19 cargo check --locked -j2` passed. Release tests and measurements remain open. Linux, Windows, npm and signing are NOT RUN. See `docs/part2-validation.md` for the pending commands.
+
 ## 2026-11-12 (9) — Close Part 1 and prepare 0.1.0-rc.8 (one release for the v0.2 line)
 
 - Decision: Part 1 and Part 2 ship together as `0.1.0-rc.8` (schema 10); no rc.9. Version bumped in `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README, CHANGELOG, `docs/installation.md`, `docs/release-checklist.md` and the `docs/v0.1-status.md` banner; new `docs/release-notes/v0.1.0-rc.8.md` (unsigned, not notarized, schema 10 so rc.7 and older cannot open a migrated database, tested and untested lists, Linux/Windows/npm NOT RUN, archive SHA left to the workflow). Historical rc.7 mentions (release notes, performance and benchmark-guide procedures, `rc7-workloads`, earlier history entries) are unchanged on purpose.
