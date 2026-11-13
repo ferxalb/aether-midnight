@@ -154,7 +154,7 @@ pub(super) fn memory_write_embedder(
             bail!("memory uploads require saved provider-bound consent; run `midnight setup`");
         }
         // Interactive budget (one attempt, five-second timeout): a store must not hang on retries.
-        return Ok(Some(Box::new(config::cloud_query_embedder(&settings)?)));
+        return Ok(Some(Box::new(config::cloud_write_embedder(&settings)?)));
     }
     Ok(Some(Box::new(LocalPassageEmbedder {
         identity: local_identity(),

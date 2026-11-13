@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (7) — v0.2 Phase B symbol-aware embedding chunks and query transport
+
+- Code embeddings use existing Tree-sitter symbol ends when rebuilding chunks and retain unchanged vectors. Cloud queries get bounded timeout configuration, classified failures and a same-provider retry.
+- Added a frozen semantic code fixture and harness command. Model selection, quantization and measurement gates are in `docs/design/v0.2-semantic.md`.
+
 ## 2026-11-12 (6) — v0.2 Phase A memory provenance and layered recall
 
 - Schema 10 records origin and normalized-text digests, adds duplicate suggestions, and shares the daemon's lazy model slot across connections. MCP recall adds policy-checked layers, eligible-vector gating, and optional budget packing.

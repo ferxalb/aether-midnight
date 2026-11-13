@@ -212,6 +212,8 @@ pub enum CloudErrorKind {
     Server,
     Timeout,
     Network,
+    Dns,
+    Tls,
     Rejected,
     Malformed,
     Dimensions,
@@ -226,7 +228,21 @@ pub struct CloudError {
 
 impl fmt::Display for CloudError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(
+            f,
+            "{}: {}",
+            match self.kind {
+                CloudErrorKind::Dns => "dns",
+                CloudErrorKind::Tls => "tls",
+                CloudErrorKind::Timeout => "timeout",
+                CloudErrorKind::Malformed => "malformed_response",
+                CloudErrorKind::Network => "network",
+                CloudErrorKind::Dimensions => "dimensions",
+                CloudErrorKind::Config => "config",
+                _ => "http_status",
+            },
+            self.message
+        )
     }
 }
 
@@ -274,6 +290,7 @@ pub struct CloudEmbedder {
     concurrency: usize,
     retry_backoff: std::time::Duration,
     max_retries: usize,
+    interactive: bool,
 }
 
 impl CloudEmbedder {
@@ -352,6 +369,7 @@ impl CloudEmbedder {
             concurrency,
             retry_backoff: std::time::Duration::from_millis(1000),
             max_retries: REMOTE_RETRIES,
+            interactive: false,
         })
     }
 
@@ -364,6 +382,18 @@ impl CloudEmbedder {
     pub(crate) fn without_retries(mut self) -> Self {
         self.max_retries = 0;
         self
+    }
+
+    pub(crate) fn interactive_queries(mut self, timeout_ms: u64) -> Result<Self> {
+        self.agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .user_agent(concat!("aether-midnight/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_millis(timeout_ms))
+            .tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()?))
+            .build();
+        self.interactive = true;
+        self.max_retries = usize::from(timeout_ms <= 4500);
+        Ok(self)
     }
 
     fn request(&self, batch: &[String]) -> EmbeddingsRequest {
@@ -407,12 +437,27 @@ impl CloudEmbedder {
                     if hint.rate_limited {
                         gate.on_rate_limit();
                     }
-                    if !hint.retryable || attempt >= self.max_retries {
+                    if !hint.retryable
+                        || attempt >= self.max_retries
+                        || (self.interactive && e.kind == CloudErrorKind::Payment)
+                    {
                         return Err(e);
                     }
                     attempt += 1;
                     if !self.retry_backoff.is_zero() {
-                        std::thread::sleep(retry_delay(&hint, self.retry_backoff, attempt));
+                        let delay = retry_delay(&hint, self.retry_backoff, attempt);
+                        if self.interactive
+                            && hint
+                                .delay
+                                .is_some_and(|d| d > std::time::Duration::from_secs(1))
+                        {
+                            return Err(e);
+                        }
+                        std::thread::sleep(if self.interactive {
+                            delay.min(std::time::Duration::from_secs(1))
+                        } else {
+                            delay
+                        });
                     }
                 }
             }
@@ -441,11 +486,20 @@ impl CloudEmbedder {
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(error)) => {
-                let timeout = error.kind() == ureq::ErrorKind::Io
-                    && error.to_string().to_lowercase().contains("timed out");
+                let kind = if error.kind() == ureq::ErrorKind::Dns {
+                    CloudErrorKind::Dns
+                } else if error.to_string().to_ascii_lowercase().contains("timed out") {
+                    CloudErrorKind::Timeout
+                } else if error.message() == Some("native_tls connect failed") {
+                    CloudErrorKind::Tls
+                } else {
+                    CloudErrorKind::Network
+                };
+                hint.retryable = self.interactive && kind == CloudErrorKind::Timeout;
                 return Err(CloudError {
-                    kind: if timeout { CloudErrorKind::Timeout } else { CloudErrorKind::Network },
-                    message: "provider request failed or timed out; check connectivity and --timeout-secs".into(),
+                    kind,
+                    message: "provider connection failed; check connectivity and query timeout"
+                        .into(),
                 });
             }
         };

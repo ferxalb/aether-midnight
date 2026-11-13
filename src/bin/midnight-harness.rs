@@ -651,6 +651,94 @@ fn memory_quality(
 }
 
 // ---------- code-retrieval oracle (CLI) ----------
+fn semantic_code_quality(bin: &Path, split: &str, local: bool) -> Result<Value> {
+    let suite = Path::new(ROOT).join("benchmark/semantic_code_v1");
+    let queries = read_json(&suite.join("queries.json"))?;
+    let queries = queries["queries"]
+        .as_array()
+        .context("missing semantic queries")?;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    copy_dir(&suite.join("fixture"), &repo)?;
+    let db = temp.path().join("code.sqlite3");
+    let db = db.to_str().context("database path is not UTF-8")?;
+    let repo = repo.to_str().context("fixture path is not UTF-8")?;
+    run_cli(
+        bin,
+        &["--db", db, "index", "--repo", repo, "--no-embed"],
+        &[],
+    )?;
+    if local {
+        run_cli(
+            bin,
+            &["--db", db, "embed", "--repo", repo, "--provider", "local"],
+            &[],
+        )?;
+    }
+    let mut report = serde_json::Map::new();
+    for mode in ["lexical", "semantic", "hybrid"] {
+        if !local && mode != "lexical" {
+            continue;
+        }
+        let mut rows = Vec::new();
+        let mut cold = None;
+        for query in queries
+            .iter()
+            .filter(|q| split == "all" || q["split"] == split)
+        {
+            let mut args = vec![
+                "--db",
+                db,
+                "search",
+                "--repo",
+                repo,
+                "--mode",
+                mode,
+                "--limit",
+                "10",
+                "--query",
+                query["query"].as_str().context("missing query text")?,
+            ];
+            if mode != "lexical" {
+                args.extend(["--provider", "local"]);
+            }
+            let (result, usage) = run_cli(bin, &args, &[])?;
+            if mode != "lexical" && result["mode_used"] != mode {
+                bail!("semantic fixture did not run {mode}: {}", result["notice"]);
+            }
+            cold.get_or_insert_with(|| usage.json());
+            let paths = result["results"]
+                .as_array()
+                .context("missing code results")?
+                .iter()
+                .map(|r| &r["path"])
+                .collect::<Vec<_>>();
+            let rank = paths
+                .iter()
+                .position(|path| **path == query["path"])
+                .map(|i| i + 1);
+            rows.push(json!({"id":query["id"],"rank":rank,"top10":paths,"protected":query["protected"]==true}));
+        }
+        let denom = rows.len().max(1) as f64;
+        let count = |predicate: fn(u64) -> bool| {
+            rows.iter()
+                .filter(|row| row["rank"].as_u64().is_some_and(predicate))
+                .count() as f64
+        };
+        let mrr = rows
+            .iter()
+            .filter_map(|row| row["rank"].as_u64())
+            .map(|rank| 1.0 / rank as f64)
+            .sum::<f64>()
+            / denom;
+        report.insert(mode.into(), json!({"queries":rows,"mrr":mrr,
+            "recall_at_1":count(|r| r == 1) / denom,"recall_at_10":count(|r| r <= 10) / denom,
+            "protected_rank_failures":rows.iter().filter(|row| row["protected"]==true && row["rank"]!=1).count(),
+            "first_search_process":cold}));
+    }
+    Ok(Value::Object(report))
+}
+
 fn retrieval_quality(bin: &Path) -> Result<Value> {
     let queries = read_json(&Path::new(ROOT).join("benchmark/retrieval_queries.json"))?["queries"]
         .as_array()
@@ -1196,6 +1284,11 @@ fn main() -> Result<()> {
                 &tmp.path().join("memory.sqlite3"),
             )?
         }
+        "semantic-code-quality" => semantic_code_quality(
+            &binary_path(flag("--binary"))?,
+            flag("--split").unwrap_or("all"),
+            a.iter().any(|arg| arg == "--local"),
+        )?,
         "retrieval-quality" => retrieval_quality(&binary_path(flag("--binary"))?)?,
         "token-report" => token_report(
             &binary_path(flag("--binary"))?,
@@ -1224,7 +1317,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N]>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | semantic-code-quality [--split dev|heldout|all --local --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N]>"
         ),
     };
     if let Some(p) = flag("--json-output") {

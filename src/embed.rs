@@ -585,9 +585,6 @@ struct Chunk {
     text: String,
 }
 
-/// One stored chunk row: index, line range, source hash, vector bytes.
-type StoredChunk = (i64, Option<u32>, Option<u32>, String, Vec<u8>);
-
 struct PendingCodeFile {
     file_id: i64,
     chunks: Vec<Chunk>,
@@ -596,7 +593,54 @@ struct PendingCodeFile {
     reused: Vec<Option<Vec<u8>>>,
 }
 
-fn chunk_text(text: &str) -> (Vec<Chunk>, bool) {
+fn chunk_text(text: &str, symbol_ends: &[usize]) -> (Vec<Chunk>, bool) {
+    let lines: Vec<_> = text.lines().collect();
+    let mut offset = 0;
+    let mut chunks = Vec::new();
+    while offset < lines.len() && chunks.len() < MAX_CHUNKS_PER_FILE {
+        let mut end = offset;
+        let mut bytes = 0;
+        while end < lines.len() && end - offset < CHUNK_MAX_LINES {
+            let size = lines[end].len().min(CHUNK_MAX_BYTES) + 1;
+            if end > offset && bytes + size > CHUNK_MAX_BYTES {
+                break;
+            }
+            bytes += size;
+            end += 1;
+        }
+        // Prefer a boundary within the window; ignore tiny candidates that would multiply
+        // chunks and leave fewer indexed lines under the existing per-file cap.
+        if end < lines.len() {
+            let boundary = symbol_ends.partition_point(|candidate| *candidate <= end);
+            if let Some(&preferred) = symbol_ends.get(..boundary).and_then(|ends| ends.last())
+                && preferred > offset
+                && preferred - offset >= (end - offset).div_ceil(2)
+            {
+                end = preferred;
+            }
+        }
+        let mut body = String::new();
+        for mut line in lines[offset..end].iter().copied() {
+            if line.len() > CHUNK_MAX_BYTES {
+                line = &line[..line.floor_char_boundary(CHUNK_MAX_BYTES)];
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        if !body.trim().is_empty() {
+            chunks.push(Chunk {
+                index: chunks.len(),
+                line_start: offset as u32 + 1,
+                line_end: end as u32,
+                text: body,
+            });
+        }
+        offset = end;
+    }
+    (chunks, offset < lines.len())
+}
+
+fn fixed_chunks(text: &str) -> (Vec<Chunk>, bool) {
     let mut chunks = Vec::new();
     let mut buffer = String::new();
     let mut start = 0usize;
@@ -780,13 +824,13 @@ pub fn embed_code_with_progress(
            (SELECT id FROM code_files WHERE repo_id=?2 AND worktree_id=?3)",
         params![key, scope.repo_id, scope.worktree_id],
     )?;
-    let files: Vec<(i64, String, String)> = {
+    let files: Vec<(i64, String, String, bool)> = {
         let mut stmt = conn.prepare(
-            "SELECT id,rel_path,content_hash FROM code_files
+            "SELECT id,rel_path,content_hash,parse_error FROM code_files
              WHERE repo_id=?1 AND worktree_id=?2 ORDER BY rel_path",
         )?;
         stmt.query_map(params![scope.repo_id, scope.worktree_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
         .collect::<rusqlite::Result<_>>()?
     };
@@ -803,7 +847,7 @@ pub fn embed_code_with_progress(
     let mut pending_files = Vec::new();
     let mut pending_chunks = 0usize;
     let mut done_files = 0u64;
-    for (file_id, rel_path, file_hash) in files {
+    for (file_id, rel_path, file_hash, parse_error) in files {
         // Keep the old initial/periodic progress cadence while counting only fully handled files.
         notify(done_files, &report);
         if cancel.load(Ordering::Relaxed) {
@@ -826,7 +870,35 @@ pub fn embed_code_with_progress(
                 continue;
             }
         };
-        let (chunks, truncated) = chunk_text(&text);
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM embeddings WHERE kind='code' AND owner_id=?1
+             AND model=?2 AND revision=?3 AND dims=?4",
+            params![file_id, id.name, id.revision, id.dimensions as i64],
+            |row| row.get(0),
+        )?;
+        // The catalog's update trigger parks all current rows whenever the file hash changes.
+        if count > 0 {
+            report.unchanged += count as usize;
+            done_files += 1;
+            notify(done_files, &report);
+            continue;
+        }
+        let symbol_ends = if parse_error {
+            Vec::new()
+        } else {
+            let mut stmt = conn.prepare_cached(
+                "SELECT DISTINCT line_end FROM code_symbols WHERE file_id=?1 ORDER BY line_end",
+            )?;
+            stmt.query_map([file_id], |row| {
+                row.get::<_, u32>(0).map(|line| line as usize)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let (chunks, truncated) = if symbol_ends.is_empty() {
+            fixed_chunks(&text)
+        } else {
+            chunk_text(&text, &symbol_ends)
+        };
         if truncated {
             report.truncated_files += 1;
         }
@@ -834,34 +906,6 @@ pub fn embed_code_with_progress(
             .iter()
             .map(|c| hash_bytes(c.text.as_bytes()))
             .collect();
-        // Stored rows of this file, by chunk index, with their vectors for content-based reuse.
-        let existing: Vec<StoredChunk> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT chunk,line_start,line_end,source_hash,vector FROM embeddings
-                 WHERE kind='code' AND owner_id=?1 ORDER BY chunk",
-            )?;
-            stmt.query_map([file_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })?
-            .collect::<rusqlite::Result<_>>()?
-        };
-        let current_match = existing.len() == chunks.len()
-            && chunks
-                .iter()
-                .zip(&hashes)
-                .zip(&existing)
-                .all(|((c, h), e)| {
-                    e.0 == c.index as i64
-                        && e.3 == *h
-                        && e.1 == Some(c.line_start)
-                        && e.2 == Some(c.line_end)
-                });
-        if current_match {
-            report.unchanged += chunks.len();
-            done_files += 1;
-            notify(done_files, &report);
-            continue;
-        }
         // Reuse any stored vector whose chunk text is identical, wherever it moved in the file.
         // Vectors parked by the schema trigger when the file's content changed are candidates too.
         let parked: Vec<(String, Vec<u8>)> = {
@@ -876,9 +920,6 @@ pub fn embed_code_with_progress(
             .collect::<rusqlite::Result<_>>()?
         };
         let mut by_hash: HashMap<&str, &Vec<u8>> = HashMap::new();
-        for e in &existing {
-            by_hash.entry(e.3.as_str()).or_insert(&e.4);
-        }
         for (hash, blob) in &parked {
             by_hash.entry(hash.as_str()).or_insert(blob);
         }

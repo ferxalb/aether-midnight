@@ -463,7 +463,7 @@ fn project_opt_out_blocks_implicit_and_explicit_remote_calls() {
 }
 
 #[test]
-fn local_only_stdio_and_transient_provider_outages_do_not_upload_or_retry() {
+fn local_only_stdio_blocks_upload_and_interactive_outages_retry_once() {
     let mock = Mock::start(|n, req| {
         if n == 0 {
             ok_response(req, DIMS)
@@ -494,8 +494,8 @@ fn local_only_stdio_and_transient_provider_outages_do_not_upload_or_retry() {
     assert_eq!(degraded["results"][0]["path"], "Products.tsx");
     assert_eq!(
         mock.count(),
-        seeded + 1,
-        "interactive queries must not retry a 503"
+        seeded + 2,
+        "interactive queries retry a 503 once"
     );
 }
 

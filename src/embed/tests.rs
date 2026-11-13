@@ -760,3 +760,18 @@ fn partial_top_k_matches_full_sort_and_truncate_including_ties() {
         assert_eq!(actual, expected, "k={k}");
     }
 }
+
+#[test]
+fn bounded_chunks_prefer_a_tree_sitter_boundary_inside_the_window() {
+    let text = "line of text\n".repeat(65);
+    let (chunks, truncated) = chunk_text(&text, &[30, 65]);
+    assert!(!truncated);
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| (chunk.line_start, chunk.line_end))
+            .collect::<Vec<_>>(),
+        [(1, 30), (31, 65)]
+    );
+    assert_eq!(fixed_chunks(&text).0[0].line_end, 40);
+}
