@@ -2343,6 +2343,9 @@ fn update_command(
     force: bool,
     json: bool,
 ) -> Result<()> {
+    if update::npm_managed() {
+        anyhow::bail!("this installation is managed by npm; use npm update");
+    }
     let current = update::current_version();
     let want = match &to {
         Some(text) => update::Want::Exact(

@@ -118,3 +118,13 @@ developers), no Rust, and a fresh user account. Do not change any security setti
    `http://` URL (expect exit 2).
 6. Record macOS version, CPU, results and any Gatekeeper dialog text. Do not remove
    quarantine, use `spctl --master-disable` or alter any system setting.
+
+## v0.2 Part 2 gates
+
+| Gate | Status |
+| --- | --- |
+| Additional ORT archive and member digests | PASS |
+| Native Linux and Windows CI and installed runtime smoke | NOT RUN |
+| Windows private ACLs and daemon named pipes | OPEN |
+| npm trusted publishing setup and real registry publish | OPEN / NOT RUN |
+| Apple notarization and Authenticode | NOT RUN |

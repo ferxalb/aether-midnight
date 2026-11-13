@@ -395,6 +395,7 @@ fn two_server_processes_share_one_database_without_losing_acknowledged_writes() 
     assert_eq!(rows.len(), 100);
 }
 
+#[cfg(unix)]
 #[test]
 fn http_scoped_replays_survive_concurrent_reads_maintenance_and_restart() {
     let temp = TempDir::new().unwrap();

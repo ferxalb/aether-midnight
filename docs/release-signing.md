@@ -54,3 +54,17 @@ Maintainer procedure, only after explicit authorization and a valid identity:
 
 This document prepares instructions only. The current candidate is **NO-GO for public
 binary distribution** until signature, notarization and hardened dynamic loading pass.
+
+## Part 2 signing gates
+
+- **OPEN** Apple Developer ID Application with hardened runtime and a secure timestamp,
+  followed by `xcrun notarytool` on a ZIP or installer container. Test the signed binary
+  loading the vendor ORT dylib before enabling the workflow. [Apple notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+- **OPEN** Windows Authenticode using Azure Artifact Signing with a federated GitHub identity.
+  The action requires an x64 Windows signing runner, including when signing the ARM64
+  artifact. Verify the timestamp and signature before computing release hashes.
+  [Azure Artifact Signing action](https://github.com/Azure/artifact-signing-action)
+- **NOT RUN** Signing and notarization. Future environment placeholders include
+  `APPLE_DEVELOPER_ID_P12`, `APPLE_DEVELOPER_ID_PASSWORD`, `APPLE_NOTARY_KEY`,
+  `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER`. Azure needs a federated client and tenant,
+  a signing account and profile, and the signing role. Workflow integration remains open.

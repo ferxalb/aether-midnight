@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (8) — v0.2 Phase C experimental native distribution
+
+- Added native CI and release matrices, checksum-gated npm package assembly, glibc Linux installer and updater selection, extra ORT archive pins and Windows handle-based source reads.
+- Linux and Windows native runs remain pending. Windows ACLs, daemon transport and signing workflow integration are open in `docs/design/v0.2-platforms.md` and `docs/release-checklist.md`.
+
 ## 2026-11-12 (7) — v0.2 Phase B symbol-aware embedding chunks and query transport
 
 - Code embeddings use existing Tree-sitter symbol ends when rebuilding chunks and retain unchanged vectors. Cloud queries get bounded timeout configuration, classified failures and a same-provider retry.

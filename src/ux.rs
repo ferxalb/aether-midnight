@@ -17,12 +17,10 @@ use crate::embed::{self, TextEmbedder, TextKind};
 use crate::runtime;
 
 pub fn stdin_is_tty() -> bool {
-    // SAFETY: isatty only inspects a file descriptor.
-    unsafe { libc::isatty(0) == 1 }
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 pub fn stdout_is_tty() -> bool {
-    // SAFETY: as above.
-    unsafe { libc::isatty(1) == 1 }
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
 /// Line reader shared by every prompt of one command, so piped answers are consumed in order.
@@ -80,8 +78,16 @@ impl Prompter {
     pub fn secret(&mut self, question: &str) -> Result<String> {
         eprint!("{question}: ");
         std::io::stderr().flush().ok();
+        #[cfg(not(unix))]
+        if stdin_is_tty() {
+            bail!(
+                "interactive hidden credential entry is unavailable; use the provider environment variable"
+            );
+        }
+        #[cfg(unix)]
         let tty = stdin_is_tty();
         // SAFETY: termios calls on fd 0 with a zero-initialised struct that tcgetattr fills.
+        #[cfg(unix)]
         let saved = unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if tty && libc::tcgetattr(0, &mut t) == 0 {
@@ -94,6 +100,7 @@ impl Prompter {
             }
         };
         let result = self.line();
+        #[cfg(unix)]
         if let Some(saved) = saved {
             // SAFETY: restores the attributes captured above.
             unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };

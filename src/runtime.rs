@@ -17,7 +17,9 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::ffi::{CStr, CString, c_char, c_void};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::{CStr, c_char, c_void};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -41,19 +43,86 @@ pub struct PinnedRuntime {
 
 /// Platforms with a pinned runtime. A platform that is not listed is *unsupported by
 /// `runtime install`*; it may still work through `ORT_DYLIB_PATH`, but that is not claimed.
-pub const PINNED: &[PinnedRuntime] = &[PinnedRuntime {
-    platform: "macos-x86_64",
-    version: "1.23.2",
-    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz",
-    archive_size: 11_676_322,
-    archive_sha256: "d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6",
-    library_member: "onnxruntime-osx-x86_64-1.23.2/lib/libonnxruntime.1.23.2.dylib",
-    library_sha256: "8c9c78de65ea3786f987c0d980e9c1b13a3a5fbc6b3e2965ba05b450e6e4c054",
-    notice_members: &[
-        "onnxruntime-osx-x86_64-1.23.2/LICENSE",
-        "onnxruntime-osx-x86_64-1.23.2/ThirdPartyNotices.txt",
-    ],
-}];
+pub const PINNED: &[PinnedRuntime] = &[
+    PinnedRuntime {
+        platform: "macos-x86_64",
+        version: "1.23.2",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz",
+        archive_size: 11_676_322,
+        archive_sha256: "d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6",
+        library_member: "onnxruntime-osx-x86_64-1.23.2/lib/libonnxruntime.1.23.2.dylib",
+        library_sha256: "8c9c78de65ea3786f987c0d980e9c1b13a3a5fbc6b3e2965ba05b450e6e4c054",
+        notice_members: &[
+            "onnxruntime-osx-x86_64-1.23.2/LICENSE",
+            "onnxruntime-osx-x86_64-1.23.2/ThirdPartyNotices.txt",
+        ],
+    },
+    PinnedRuntime {
+        platform: "linux-aarch64",
+        version: "1.23.2",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-aarch64-1.23.2.tgz",
+        archive_size: 7254068,
+        archive_sha256: "7c63c73560ed76b1fac6cff8204ffe34fe180e70d6582b5332ec094810241e5c",
+        library_member: "onnxruntime-linux-aarch64-1.23.2/lib/libonnxruntime.so.1.23.2",
+        library_sha256: "648ffa64fbe027ae27139109410900cf776a030dec2dbbac51053318cc44c286",
+        notice_members: &[
+            "onnxruntime-linux-aarch64-1.23.2/LICENSE",
+            "onnxruntime-linux-aarch64-1.23.2/ThirdPartyNotices.txt",
+        ],
+    },
+    PinnedRuntime {
+        platform: "linux-x86_64",
+        version: "1.23.2",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz",
+        archive_size: 8309231,
+        archive_sha256: "1fa4dcaef22f6f7d5cd81b28c2800414350c10116f5fdd46a2160082551c5f9b",
+        library_member: "onnxruntime-linux-x64-1.23.2/lib/libonnxruntime.so.1.23.2",
+        library_sha256: "13ab8084954fa4a47c777880180b90810d6020f021441395712b48a75b74c68b",
+        notice_members: &[
+            "onnxruntime-linux-x64-1.23.2/LICENSE",
+            "onnxruntime-linux-x64-1.23.2/ThirdPartyNotices.txt",
+        ],
+    },
+    PinnedRuntime {
+        platform: "macos-aarch64",
+        version: "1.23.2",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz",
+        archive_size: 9999931,
+        archive_sha256: "b4d513ab2b26f088c66891dbbc1408166708773d7cc4163de7bdca0e9bbb7856",
+        library_member: "onnxruntime-osx-arm64-1.23.2/lib/libonnxruntime.1.23.2.dylib",
+        library_sha256: "d306d2bc768540766c7ed8a1e0ff05d2870c77a934ebeee4a7bafa1b732ef299",
+        notice_members: &[
+            "onnxruntime-osx-arm64-1.23.2/LICENSE",
+            "onnxruntime-osx-arm64-1.23.2/ThirdPartyNotices.txt",
+        ],
+    },
+    PinnedRuntime {
+        platform: "windows-aarch64",
+        version: "1.23.2",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-arm64-1.23.2.zip",
+        archive_size: 78932411,
+        archive_sha256: "1cfe88b6435df3b5fb0e9f6bd7d6f5df1e887b6174de7f6e2a47bab956f3f168",
+        library_member: "onnxruntime-win-arm64-1.23.2/lib/onnxruntime.dll",
+        library_sha256: "99a11bb077f723a81d100fd98099f332e4178bbb7025ac10fd40699a0b82c2f0",
+        notice_members: &[
+            "onnxruntime-win-arm64-1.23.2/LICENSE",
+            "onnxruntime-win-arm64-1.23.2/ThirdPartyNotices.txt",
+        ],
+    },
+    PinnedRuntime {
+        platform: "windows-x86_64",
+        version: "1.23.2",
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip",
+        archive_size: 78127794,
+        archive_sha256: "0b38df9af21834e41e73d602d90db5cb06dbd1ca618948b8f1d66d607ac9f3cd",
+        library_member: "onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll",
+        library_sha256: "dec964ab1ee36cc9b0ae247d13b376627992fc57dec0454354017ab8fd84f1ea",
+        notice_members: &[
+            "onnxruntime-win-x64-1.23.2/LICENSE",
+            "onnxruntime-win-x64-1.23.2/ThirdPartyNotices.txt",
+        ],
+    },
+];
 
 pub fn host_platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
@@ -129,12 +198,13 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 #[repr(C)]
 struct OrtApiBase {
-    get_api: unsafe extern "C" fn(u32) -> *const c_void,
-    get_version_string: unsafe extern "C" fn() -> *const c_char,
+    get_api: unsafe extern "system" fn(u32) -> *const c_void,
+    get_version_string: unsafe extern "system" fn() -> *const c_char,
 }
 
 /// Load `path` and return its ONNX Runtime version string. All failures are descriptive strings
 /// (architecture mismatch, missing symbol, unreadable file), never panics.
+#[cfg(unix)]
 pub fn probe_version(path: &Path) -> std::result::Result<String, String> {
     if !path.is_file() {
         return Err(format!(
@@ -177,6 +247,77 @@ pub fn probe_version(path: &Path) -> std::result::Result<String, String> {
         libc::dlclose(handle);
         result
     }
+}
+
+#[cfg(windows)]
+pub fn probe_version(path: &Path) -> std::result::Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetProcAddress, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        LoadLibraryExW,
+    };
+    let absolute = path.canonicalize().map_err(|error| error.to_string())?;
+    let wide: Vec<_> = absolute.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: the path buffer is NUL-terminated, and the DLL stays loaded while its API is read.
+    unsafe {
+        let handle = LoadLibraryExW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        );
+        if handle.is_null() {
+            return Err(format!(
+                "cannot load library: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let result = (|| {
+            let symbol = GetProcAddress(handle, c"OrtGetApiBase".as_ptr().cast())
+                .ok_or_else(|| "library does not export OrtGetApiBase".to_owned())?;
+            let get_base: unsafe extern "system" fn() -> *const OrtApiBase =
+                std::mem::transmute(symbol);
+            let base = get_base()
+                .as_ref()
+                .ok_or_else(|| "OrtGetApiBase returned null".to_owned())?;
+            let version = (base.get_version_string)();
+            if version.is_null() {
+                return Err("runtime reported no version".into());
+            }
+            Ok(CStr::from_ptr(version).to_string_lossy().into_owned())
+        })();
+        FreeLibrary(handle);
+        result
+    }
+}
+
+fn extract_zip_members(archive: &[u8], wanted: &[&str]) -> Result<Vec<(String, Vec<u8>)>> {
+    use std::io::Write;
+    let mut input = tempfile::NamedTempFile::new()?;
+    input.write_all(archive)?;
+    let executable = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("SystemRoot").context("locate Windows inbox tar.exe")?)
+            .join("System32")
+            .join("tar.exe")
+    } else {
+        PathBuf::from("tar")
+    };
+    wanted
+        .iter()
+        .map(|member| {
+            let output = std::process::Command::new(&executable)
+                .arg("-xOf")
+                .arg(input.path())
+                .arg("--")
+                .arg(member)
+                .output()
+                .context("extract verified ONNX Runtime ZIP member")?;
+            if !output.status.success() || output.stdout.is_empty() {
+                bail!("ONNX Runtime ZIP is missing {member}");
+            }
+            Ok(((*member).to_owned(), output.stdout))
+        })
+        .collect()
 }
 
 fn parse_version(version: &str) -> Option<(u32, u32)> {
@@ -436,14 +577,18 @@ pub fn install_pinned(models: &Path, pin: &PinnedRuntime, url: &str) -> Result<I
             pin.archive_sha256
         );
     }
-    let mut tar = Vec::new();
-    flate2::read::GzDecoder::new(&archive[..])
-        .take(512 * 1024 * 1024)
-        .read_to_end(&mut tar)
-        .context("decompress ONNX Runtime archive")?;
     let mut wanted = vec![pin.library_member];
     wanted.extend_from_slice(pin.notice_members);
-    let members = extract_members(&tar, &wanted)?;
+    let members = if pin.url.ends_with(".zip") {
+        extract_zip_members(&archive, &wanted)?
+    } else {
+        let mut tar = Vec::new();
+        flate2::read::GzDecoder::new(&archive[..])
+            .take(512 * 1024 * 1024)
+            .read_to_end(&mut tar)
+            .context("decompress ONNX Runtime archive")?;
+        extract_members(&tar, &wanted)?
+    };
     let lib_bytes = members
         .iter()
         .find(|(n, _)| n == pin.library_member)

@@ -2,7 +2,7 @@
 //! stands in for the GitHub API; the "installed" program is a copy of the test binary in a
 //! temporary directory, so nothing outside the sandbox is read or changed. Behaviour against the
 //! real GitHub Releases is not covered here.
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};

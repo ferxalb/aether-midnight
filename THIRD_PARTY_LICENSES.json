@@ -2806,7 +2806,7 @@
       "version": "0.60.2"
     },
     {
-      "direct_dependency": false,
+      "direct_dependency": true,
       "license": "MIT OR Apache-2.0",
       "license_file": null,
       "name": "windows-sys",

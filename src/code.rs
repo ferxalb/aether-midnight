@@ -3277,11 +3277,114 @@ fn read_limited_from_root(
         let file = unsafe { File::from_raw_fd(descriptor) };
         read_bounded(file, limit, cancellation, stage_hook)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let file = open_windows_source(root, relative)?;
+        read_bounded(file, limit, cancellation, stage_hook)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (root, relative, limit, cancellation, stage_hook);
         bail!("safe repository-relative file access requires Unix openat support on this build")
     }
+}
+
+#[cfg(windows)]
+fn open_windows_source(root: &Path, relative: &Path) -> Result<File> {
+    use std::os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW,
+    };
+
+    let open = |path: &Path| -> Result<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("repository path contains a reparse point");
+        }
+        Ok(file)
+    };
+    let final_path = |file: &File| -> Result<PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        let mut buffer = vec![0u16; 32_768];
+        // SAFETY: the handle remains open, and the buffer is valid for its reported length.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        } as usize;
+        if len == 0 {
+            return Err(std::io::Error::last_os_error()).context("resolve Windows source handle");
+        }
+        if len >= buffer.len() {
+            bail!("Windows source handle path exceeds the supported length");
+        }
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])))
+    };
+
+    let mut pinned = vec![open(root)?];
+    let root = final_path(&pinned[0])?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            bail!("source path must stay beneath repository root");
+        };
+        let name_text = name.to_string_lossy();
+        let stem = name_text
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_ascii_uppercase();
+        if name_text.contains(':')
+            || name_text.ends_with(['.', ' '])
+            || matches!(
+                stem.as_str(),
+                "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+            )
+            || ["COM", "LPT"].iter().any(|prefix| {
+                stem.strip_prefix(prefix).is_some_and(|suffix| {
+                    matches!(
+                        suffix,
+                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                    )
+                })
+            })
+        {
+            bail!("source path contains a Windows device or stream name");
+        }
+        if pinned.len() > 128 {
+            bail!("source path has excessive directory depth");
+        }
+        current.push(name);
+        let handle = open(&current)?;
+        let final_name = final_path(&handle)?;
+        // The OS returns canonical spelling for both open handles. Use a component comparison
+        // so case-sensitive Windows directories cannot alias a different root.
+        if !final_name.starts_with(&root) || final_name == root {
+            bail!("Windows source handle escaped the repository root");
+        }
+        current = final_name;
+        pinned.push(handle);
+    }
+    if pinned.len() == 1 {
+        bail!("source path is empty");
+    }
+    let file = pinned.pop().expect("source handle was opened");
+    if !file.metadata()?.is_file() {
+        bail!("source path is not a regular file");
+    }
+    Ok(file)
 }
 
 fn read_bounded(

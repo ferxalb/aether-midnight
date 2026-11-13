@@ -148,3 +148,10 @@ order, ownership, mode, UTC timestamps and gzip metadata, and remaps build-user 
 in Rust diagnostics. Two runs with identical inputs
 must hash identically. This guarantees archive reproducibility from the same binary,
 not cross-toolchain or cross-directory bit-for-bit compilation.
+
+## Experimental glibc Linux and npm
+
+The installer and self-update select Linux glibc archives by CPU when those artifacts exist.
+Linux native installation remains **NOT RUN**. npm package assembly uses per-platform optional
+dependencies and no install script. The scope `@SCOPE` is a placeholder. Package publishing is
+**OPEN** and registry installation is **NOT RUN**. Use `npm update` for npm-managed installs.

@@ -30,10 +30,11 @@ impl Usage {
     }
 }
 
-fn reap(pid: u32) -> Result<(i32, Usage)> {
+#[cfg(unix)]
+fn reap(child: &mut Child) -> Result<(i32, Usage)> {
     let mut status = 0;
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::wait4(pid as i32, &mut status, 0, &mut ru) } < 0 {
+    if unsafe { libc::wait4(child.id() as i32, &mut status, 0, &mut ru) } < 0 {
         bail!("wait4 failed: {}", std::io::Error::last_os_error());
     }
     let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
@@ -47,6 +48,12 @@ fn reap(pid: u32) -> Result<(i32, Usage)> {
             peak_rss_bytes: rss,
         },
     ))
+}
+
+#[cfg(not(unix))]
+fn reap(child: &mut Child) -> Result<(i32, Usage)> {
+    let _ = child.wait()?;
+    bail!("process CPU and peak RSS measurement requires wait4 support")
 }
 
 fn binary_path(arg: Option<&str>) -> Result<PathBuf> {
@@ -80,7 +87,7 @@ fn run_cli(bin: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<(Value, U
     });
     let mut text = String::new();
     std::io::Read::read_to_string(&mut out, &mut text)?;
-    let (code, mut usage) = reap(child.id())?;
+    let (code, mut usage) = reap(&mut child)?;
     usage.wall_s = started.elapsed().as_secs_f64();
     let stderr = t.join().unwrap_or_default();
     if code != 0 {
@@ -165,7 +172,7 @@ impl Mcp {
         if let Some(mut i) = self.input.take() {
             let _ = writeln!(i, r#"{{"jsonrpc":"2.0","method":"exit"}}"#);
         }
-        let (code, mut usage) = reap(self.child.id())?;
+        let (code, mut usage) = reap(&mut self.child)?;
         usage.wall_s = self.started.elapsed().as_secs_f64();
         if code != 0 {
             bail!("MCP server returned {code}");
