@@ -1018,6 +1018,28 @@ fn identity_has_vectors(
     )?)
 }
 
+pub(crate) fn has_eligible_memory_vectors(
+    conn: &Connection,
+    scope: &str,
+    id: &ModelIdentity,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM embeddings e JOIN memories m ON m.id=e.owner_id
+         WHERE e.kind='memory' AND e.scope=?1 AND m.scope=?1 AND e.model=?2
+           AND e.revision=?3 AND e.dims=?4 AND m.deleted_at IS NULL
+           AND (m.valid_from IS NULL OR m.valid_from<=?5)
+           AND (m.valid_to IS NULL OR m.valid_to>?5))",
+        params![
+            scope,
+            id.name,
+            id.revision,
+            id.dimensions as i64,
+            crate::db::now_utc()
+        ],
+        |row| row.get(0),
+    )?)
+}
+
 fn stored_identities(conn: &Connection, kind: &str, scope: &str) -> String {
     let rows: Vec<String> = conn
         .prepare(
@@ -1105,7 +1127,7 @@ fn degrade(info: &mut SearchInfo, reason: String) {
     ));
 }
 
-const MEMORY_COLUMNS: &str = "m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to";
+const MEMORY_COLUMNS: &str = "m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin";
 
 fn memory_knn(
     conn: &Connection,
@@ -1153,6 +1175,50 @@ fn memory_knn(
             embedded,
         },
     ))
+}
+
+/// Compare the newly stored vector with older active memories in exactly the same embedding space.
+pub(crate) fn possible_memory_duplicate(
+    conn: &Connection,
+    memory: &MemoryRecord,
+) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT prior.id, candidate.vector, current.vector FROM embeddings current
+         JOIN embeddings candidate ON candidate.kind='memory' AND candidate.scope=current.scope
+          AND candidate.model=current.model AND candidate.revision=current.revision AND candidate.dims=current.dims
+         JOIN memories prior ON prior.id=candidate.owner_id AND prior.scope=candidate.scope
+         WHERE current.kind='memory' AND current.scope=?1 AND current.owner_id=?2
+          AND prior.id<?2 AND prior.kind=?3 AND prior.deleted_at IS NULL
+          AND (prior.valid_to IS NULL OR ?4 IS NULL OR prior.valid_to>?4)
+          AND (?5 IS NULL OR prior.valid_from IS NULL OR prior.valid_from<?5)
+         ORDER BY prior.id DESC",
+    )?;
+    let mut rows = stmt.query(params![
+        memory.scope,
+        memory.id,
+        memory.kind,
+        memory.valid_from,
+        memory.valid_to
+    ])?;
+    let mut best = None;
+    let mut current = Vec::new();
+    while let Some(row) = rows.next()? {
+        if current.is_empty() {
+            current.extend(
+                row.get_ref(2)?
+                    .as_blob()?
+                    .chunks_exact(4)
+                    .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four bytes"))),
+            );
+        }
+        let Some(score) = dot_with_blob(row.get_ref(1)?.as_blob()?, &current) else {
+            continue;
+        };
+        if score >= 0.92 && best.is_none_or(|(_, prior)| score > prior) {
+            best = Some((row.get(0)?, score));
+        }
+    }
+    Ok(best.map(|(id, _)| id))
 }
 
 fn fetch_memory(conn: &Connection, scope: &str, id: i64) -> Result<Option<MemoryRecord>> {

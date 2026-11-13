@@ -118,7 +118,7 @@ New (default):
 * Hoisted to the response: `generation`, `complete` (formerly per-result `index_generation`, `index_complete`). Removed from each result unless `explain: true` (which adds `score` and `score_breakdown`): `line_start`, `line_end`, `snippet`, `snippet_truncated`, `estimated_tokens`, `index_generation`, `index_complete`, `score`, `score_breakdown`. Kept: `path`, `freshness`, `match_reason`.
 * `ranges` (at most 2 per result, adjacent ones merged) are bounded by the innermost indexed symbol: the symbol's signature line(s) plus a `context_lines` window at the match; without a symbol, the plain window. Text lines are numbered and capped at 200 characters as before.
 * `ref` is a stateless handle `path#start-end@hash12` (first 12 hex characters of the file's content hash). `open_range` accepts `{"ref": ...}` instead of `path`/`line_start`/`line_end` and expands the range (up to 200 lines). If the file changed since the ref was issued, `open_range` returns `stale_handle: true`, `freshness: "stale"`, the current `content_hash` and **no content**; a stale ref is never served as fresh.
-* Budget: `estimated_tokens` of the whole compact response is at most `token_budget` (a heuristic estimate of the serialized JSON). When the budget is short, bodies are reduced in this order — `detail: "signature"` (signature plus the matching line), then `detail: "reference"` (only `lines` and `ref`) — starting with the lowest evidence class and the lowest score per estimated token; the tail is dropped only when even references do not fit. Order is never changed; `truncated` is true whenever anything was reduced or dropped, the index is incomplete, or the result limit was reached.
+* Budget: `estimated_tokens` (a heuristic estimate of the serialized `results` array; the small fixed header — scope, generation, labels — is not charged, as before) is at most `token_budget`. When the budget is short, bodies are reduced in this order — `detail: "signature"` (signature plus the matching line), then `detail: "reference"` (only `lines` and `ref`) — starting with the lowest evidence class and the lowest score per estimated token; the tail is dropped only when even references do not fit. Order is never changed; `truncated` is true whenever anything was reduced or dropped, the index is incomplete, or the result limit was reached.
 * Connection history: a range already sent on this connection with the same content hash is returned as `{"lines","ref","delivered":true}` without text. `fresh_context: true` forces text, the history is cleared on `initialize`, holds at most 512 range hashes, never stores query text, and is lost on restart (the next response simply carries text again).
 * `repo_map` keeps its previous fields and adds a deterministic, ranked, budgeted `files` list (`ln(1+symbols) - 0.1*depth`, plus a bias for `query`; `token_budget` default 1024) with `files_total`, `files_estimated_tokens`, `files_truncated`. Fan-in centrality is not implemented yet.
 * Hybrid and semantic responses keep their `SearchInfo` fields (`mode_used`, `degraded`, `notice`, ...) next to the compact fields.
@@ -154,3 +154,13 @@ export AETHER_REPO="$PWD"
 ```
 
 `examples/go` contains a small Go module and JSON-RPC stdio client. It uses the same optional environment variables as the Node example. Go runtime verification is pending (not run) in the latest benchmark run. Both clients require the Rust executable to be built or installed separately.
+
+### Schema 10 memory recall
+
+An explicit MCP `recall` scope searches a single exact namespace. Omitted scope in a trusted
+project can add `global:user` when allowed by policy, returning a `results` array and `layers`
+with per-layer search information. The project wins ties within lexical evidence classes.
+Records carry `origin`; writes can return `possible_duplicate_of` and `duplicate_evidence`
+without merging observations. Current-time recall can use the configured provider when
+compatible active vectors exist and saved consent allows it. An explicit lexical mode stays
+offline. Pass `token_budget` to request a packed response with previews or ID references.

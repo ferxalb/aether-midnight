@@ -320,6 +320,7 @@ fn send(stream: &mut dyn Write, value: &Value) -> io::Result<()> {
 // ---------- server ----------
 
 struct Shared {
+    local: mcp::LocalModel,
     state: Mutex<ServerState>,
     changed: Condvar,
     started: Instant,
@@ -362,6 +363,7 @@ pub fn serve(db_path: &Path, cancellation: Arc<AtomicBool>) -> Result<()> {
     });
     fs::write(&paths.info, serde_json::to_vec_pretty(&info)?)?;
     let shared = Arc::new(Shared {
+        local: mcp::LocalModel::default(),
         state: Mutex::new(ServerState {
             connections: 0,
             idle_since: Instant::now(),
@@ -555,7 +557,14 @@ fn handle_connection(
                 &json!({"midnight":"ready","protocol":PROTOCOL,"daemon_version":VERSION,"pid":std::process::id()}),
             )?;
             reader.get_ref().set_read_timeout(None).ok();
-            mcp::run_session(&mut reader, &mut writer, db_path, &policy, cancel)
+            mcp::run_session_with_model(
+                &mut reader,
+                &mut writer,
+                db_path,
+                &policy,
+                cancel,
+                shared.local.clone(),
+            )
         }
         other => {
             send(

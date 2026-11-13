@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -27,15 +28,16 @@ struct Entry {
 #[derive(Clone, Default)]
 pub(super) struct QueryCache(Rc<RefCell<VecDeque<Entry>>>);
 
-/// The installed local model, loaded at most once per MCP connection. Loading reads and hashes
-/// the pinned weights and initializes ONNX Runtime (seconds), so reloading it for every uncached
-/// query or stored memory dominated local semantic latency. Never shared across connections.
+/// Lazily loaded pinned local model. The daemon shares the slot across its connections.
 #[derive(Clone, Default)]
-pub(super) struct LocalModel(Rc<RefCell<Option<embed::FastEmbedder>>>);
+pub(crate) struct LocalModel(Arc<Mutex<Option<embed::FastEmbedder>>>);
 
 impl LocalModel {
     fn embed(&self, kind: TextKind, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let mut slot = self.0.borrow_mut();
+        let mut slot = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local model lock is poisoned"))?;
         if slot.is_none() {
             *slot = Some(embed::FastEmbedder::load_installed().map_err(|e| {
                 e.context("local embeddings are configured but unavailable (see `midnight status`)")
@@ -59,7 +61,6 @@ pub(super) fn resolve(
     args: &Value,
     repo: Option<&Path>,
     policy: &Policy,
-    memory: bool,
 ) -> Result<(SearchMode, Option<Settings>)> {
     let requested = match args.get("mode") {
         None => None,
@@ -72,7 +73,7 @@ pub(super) fn resolve(
         Some(_) => bail!("mode must be lexical, semantic or hybrid"),
     };
     // Explicit lexical bypasses configuration, credentials, model loading and the cache.
-    if requested == Some(SearchMode::Lexical) || (memory && requested.is_none()) {
+    if requested == Some(SearchMode::Lexical) {
         return Ok((SearchMode::Lexical, None));
     }
     let disabled = repo
@@ -141,7 +142,7 @@ pub(super) fn memory_write_embedder(
     local: &LocalModel,
 ) -> Result<Option<Box<dyn TextEmbedder>>> {
     let repo = policy.default_repo();
-    let (_, settings) = resolve(&serde_json::json!({}), repo.as_deref(), policy, false)?;
+    let (_, settings) = resolve(&serde_json::json!({}), repo.as_deref(), policy)?;
     let Some(settings) = settings else {
         return Ok(None);
     };
@@ -177,7 +178,7 @@ impl TextEmbedder for LocalPassageEmbedder {
 }
 
 pub(super) fn index_settings(repo: &Path, policy: &Policy) -> Result<Option<Settings>> {
-    let (_, settings) = resolve(&serde_json::json!({}), Some(repo), policy, false)?;
+    let (_, settings) = resolve(&serde_json::json!({}), Some(repo), policy)?;
     if let Some(settings) = &settings
         && settings.provider.is_remote()
     {

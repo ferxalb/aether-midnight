@@ -62,8 +62,8 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
         );
 
         let init = json(&db, &["init", "--json"]);
-        assert_eq!(init["schema_version"], 9, "{name}");
-        assert_eq!(user_version(&db), 9);
+        assert_eq!(init["schema_version"], 10, "{name}");
+        assert_eq!(user_version(&db), 10);
         let duplicate_index: i64 = Connection::open(&db)
             .unwrap()
             .query_row(
@@ -223,7 +223,7 @@ fn databases_from_real_schema_v3_v4_v5_builds_migrate_and_keep_their_data() {
         drop(conn);
 
         // Idempotent re-open.
-        assert_eq!(json(&db, &["init", "--json"])["schema_version"], 9);
+        assert_eq!(json(&db, &["init", "--json"])["schema_version"], 10);
     }
 }
 
@@ -233,10 +233,10 @@ fn database_from_a_newer_schema_is_refused_without_modification() {
     let db = fixture("schema_v5.sqlite3", &temp);
     Connection::open(&db)
         .unwrap()
-        .pragma_update(None, "user_version", 10)
+        .pragma_update(None, "user_version", 11)
         .unwrap();
     let out = run(&db, &["init"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("newer than this binary supports"));
-    assert_eq!(user_version(&db), 10);
+    assert_eq!(user_version(&db), 11);
 }

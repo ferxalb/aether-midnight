@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (6) — v0.2 Phase A memory provenance and layered recall
+
+- Schema 10 records origin and normalized-text digests, adds duplicate suggestions, and shares the daemon's lazy model slot across connections. MCP recall adds policy-checked layers, eligible-vector gating, and optional budget packing.
+- Decision records and remaining queue, CLI and quality gates are in `docs/design/v0.2-memory.md`. No release measurements at this checkpoint.
+
 ## 2026-11-12 (5) — v0.2 Phase 3: single-writer daemon
 
 - New `src/daemon.rs`: one daemon per database (advisory `flock`, stale-file recovery, Unix socket in a `0700` directory with a `0600` socket and a hashed short path, `Transport` trait so named pipes can follow), JSON line framing with a `hello` handshake (protocol and schema must match; an idle mismatching daemon is restarted once, a busy one is an error, never a second writer), per-connection `Policy` and client working directory, a FIFO write gate around writer tools and the watcher sink, idle shutdown (`MIDNIGHT_DAEMON_IDLE_SECS`, default 600), graceful shutdown with WAL checkpoint. `midnight mcp` and `serve-http` proxy to it with an explicit, reported in-process fallback; `midnight daemon start|stop|status`, `mcp --no-daemon`, `MIDNIGHT_DAEMON=0`. The watcher is on by default inside the daemon. Design rationale (why a single writer beats `busy_timeout`/IMMEDIATE-only): `docs/design/v0.2-daemon.md`; contract: `docs/api.md`.

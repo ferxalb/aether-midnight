@@ -178,7 +178,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "9");
+    assert_eq!(schema, "10");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -320,7 +320,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,

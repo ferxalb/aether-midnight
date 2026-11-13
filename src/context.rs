@@ -524,7 +524,9 @@ pub fn compact_search(
     let baseline_truncated = !complete || at_limit || cold;
     let mut changed = false;
     let estimate = |items: &[Item], truncated: bool| -> usize {
-        estimate_tokens(&assemble(&header, items, truncated).to_string())
+        // Like the legacy packer, the budget covers the result entries; the fixed header
+        // (scope, generation, labels) is not charged.
+        estimate_tokens(&assemble(&header, items, truncated)["results"].to_string())
     };
     while estimate(&items, baseline_truncated || changed) > budget {
         // Demote the cheapest-to-lose body first: lowest evidence class, then lowest score per
@@ -553,7 +555,7 @@ pub fn compact_search(
     }
     let truncated = baseline_truncated || changed;
     let mut value = assemble(&header, &items, truncated);
-    let final_estimate = estimate_tokens(&value.to_string());
+    let final_estimate = estimate_tokens(&value["results"].to_string());
     value["estimated_tokens"] = json!(final_estimate);
     for item in &items {
         if item.level == 0 {

@@ -471,6 +471,8 @@ fn memory_quality(
         HashMap::<String, String>::new(),
     );
     let mut remember_ms = vec![];
+    let mut duplicate_counts = [0u64; 3]; // correct, predicted, labeled
+    let v3 = fx["schema_version"] == 3;
     for r in records {
         let mut args = serde_json::Map::new();
         for k in [
@@ -481,6 +483,7 @@ fn memory_quality(
             "observed_at",
             "valid_from",
             "valid_to",
+            "origin",
         ] {
             if let Some(v) = r.get(k) {
                 args.insert(k.into(), v.clone());
@@ -494,6 +497,15 @@ fn memory_quality(
         }
         let (ms, mem) = mcp.call("remember", Value::Object(args))?;
         remember_ms.push(ms);
+        if v3 {
+            let expected = r["duplicate_of"]
+                .as_str()
+                .and_then(|key| key_to_id.get(key));
+            let actual = mem.get("possible_duplicate_of");
+            duplicate_counts[0] += u64::from(expected.is_some() && expected == actual);
+            duplicate_counts[1] += u64::from(actual.is_some());
+            duplicate_counts[2] += u64::from(expected.is_some());
+        }
         let id = mem["id"].to_string();
         key_to_id.insert(r["key"].as_str().unwrap().to_string(), mem["id"].clone());
         id_to_key.insert(id, r["key"].as_str().unwrap().to_string());
@@ -523,7 +535,11 @@ fn memory_quality(
             recall_ms.push(ms);
             last = res;
         }
-        let results = last.as_array().cloned().unwrap_or_default();
+        let results = last
+            .as_array()
+            .or_else(|| last["results"].as_array())
+            .cloned()
+            .unwrap_or_default();
         let actual: Vec<String> = results
             .iter()
             .map(|i| {
@@ -610,8 +626,7 @@ fn memory_quality(
         .iter()
         .filter(|r| !r["temporal_correct_at_10"].is_null())
         .collect();
-    Ok(
-        json!({"schema_version":2,"suite":split,"fixture":fixture,"insertion_order":if reverse{"reverse"}else{"forward"},
+    let mut report = json!({"schema_version":2,"suite":split,"fixture":fixture,"insertion_order":if reverse{"reverse"}else{"forward"},
         "query_count":queries.len(),"memory_count":key_to_id.len(),
         "measurement":{"scope":"whole aether-midnight mcp process, one request in flight; setup remember calls included in the session",
             "mcp_request_count":usage,"process":proc_usage.json()},
@@ -623,8 +638,16 @@ fn memory_quality(
             "temporal_invalid_result_count":rows.iter().map(|r| r["invalid_temporal_results"].as_u64().unwrap()).sum::<u64>(),
             "temporal_accuracy_at_10":tem.iter().filter(|r| r["temporal_correct_at_10"]==true).count() as f64/tem.len().max(1) as f64,
             "namespace_leak_count":rows.iter().map(|r| r["namespace_leaks"].as_u64().unwrap()).sum::<u64>(),
-            "queries":rows}}),
-    )
+            "queries":rows}});
+    if v3 {
+        let [correct, predicted, labeled] = duplicate_counts;
+        report["duplicate_detection"] = json!({
+            "correct":correct,"predicted":predicted,"labeled":labeled,
+            "precision":(predicted != 0).then(|| correct as f64 / predicted as f64),
+            "recall":(labeled != 0).then(|| correct as f64 / labeled as f64)
+        });
+    }
+    Ok(report)
 }
 
 // ---------- code-retrieval oracle (CLI) ----------

@@ -34,7 +34,7 @@ const BROAD_TERM_PROBE_MATCHES: usize = 2048;
 /// that lose, and equal scores resolve to the most recently remembered row, independent of
 /// content. Winners are then `LEFT JOIN`ed for namespace, deletion, and validity filters; an
 /// ineligible winner yields NULL columns so the caller can tell filtering from exhaustion.
-const MEMORY_RANKED_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,f.rank
+const MEMORY_RANKED_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin,f.rank
          FROM (SELECT rowid AS rid,rank FROM memory_fts
                WHERE memory_fts MATCH ?1 AND rank MATCH 'bm25(0.0,1.0)'
                ORDER BY rank,rowid DESC LIMIT ?4) f
@@ -45,7 +45,7 @@ const MEMORY_RANKED_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_u
 // Diagnostic-only alternative: scan newest first before the exact top-k sort. LIMIT -1 prevents flattening
 // without truncating any match. On broad single terms, ties no longer replace the top-k heap
 // on every row. Multi-term stages retain the direct scan: the coroutine costs more there.
-const MEMORY_RANKED_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,f.rank
+const MEMORY_RANKED_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin,f.rank
          FROM (SELECT rid,rank FROM (
                    SELECT rowid AS rid,rank FROM memory_fts
                    WHERE memory_fts MATCH ?1 AND rank MATCH 'bm25(0.0,1.0)'
@@ -55,28 +55,28 @@ const MEMORY_RANKED_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.sou
               AND (m.valid_from IS NULL OR m.valid_from<=?3)
               AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY f.rank,f.rid DESC";
-const MEMORY_RECENCY_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,-CAST(m.id AS REAL)
+const MEMORY_RECENCY_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin,-CAST(m.id AS REAL)
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1
            AND m.scope=?2 AND m.deleted_at IS NULL
            AND (m.valid_from IS NULL OR m.valid_from<=?3)
            AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY memory_fts.rowid DESC LIMIT ?4";
-const MEMORY_RECALL_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
+const MEMORY_RECALL_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin,memory_fts.rank
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
            AND m.scope=?2 AND m.deleted_at IS NULL
            AND (m.valid_from IS NULL OR m.valid_from<=?3)
            AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY memory_fts.rank LIMIT ?4";
-const MEMORY_RECALL_ROWID_ASC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
+const MEMORY_RECALL_ROWID_ASC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin,memory_fts.rank
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
            AND m.scope=?2 AND m.deleted_at IS NULL
            AND (m.valid_from IS NULL OR m.valid_from<=?3)
            AND (m.valid_to IS NULL OR m.valid_to>?3)
          ORDER BY memory_fts.rowid ASC LIMIT ?4";
-const MEMORY_RECALL_ROWID_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,memory_fts.rank
+const MEMORY_RECALL_ROWID_DESC_SQL: &str = "SELECT m.id,m.scope,m.kind,m.content,m.source_uri,m.source_id,m.supersedes_id,m.created_at,m.observed_at,m.valid_from,m.valid_to,m.origin,memory_fts.rank
          FROM memory_fts JOIN memories m ON m.id=memory_fts.rowid
          WHERE memory_fts MATCH ?1 AND memory_fts.rank MATCH 'bm25(0.0,1.0)'
            AND m.scope=?2 AND m.deleted_at IS NULL
@@ -170,8 +170,42 @@ pub enum CandidateCoverage {
     RowIdSample,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOrigin {
+    User,
+    #[default]
+    Agent,
+    Repo,
+}
+
+impl MemoryOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Repo => "repo",
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for MemoryOrigin {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "user" => Ok(Self::User),
+            "agent" => Ok(Self::Agent),
+            "repo" => Ok(Self::Repo),
+            _ => Err(rusqlite::types::FromSqlError::Other(
+                "invalid stored memory origin".into(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
+    #[serde(default)]
+    pub origin: MemoryOrigin,
     pub id: i64,
     pub scope: String,
     pub kind: String,
@@ -319,6 +353,7 @@ pub struct MemoryInput {
 
 #[derive(Debug, Clone, Copy)]
 struct MemoryInputRef<'a> {
+    origin: MemoryOrigin,
     scope: &'a str,
     kind: &'a str,
     content: &'a str,
@@ -340,6 +375,7 @@ struct ValidatedMemoryInput<'a> {
 impl<'a> From<&'a MemoryInput> for MemoryInputRef<'a> {
     fn from(input: &'a MemoryInput) -> Self {
         Self {
+            origin: MemoryOrigin::User,
             scope: &input.scope,
             kind: &input.kind,
             content: &input.content,
@@ -386,6 +422,7 @@ impl MemorySession {
         remember_on(
             &mut self.connection,
             MemoryInputRef {
+                origin: MemoryOrigin::Agent,
                 scope,
                 kind,
                 content,
@@ -404,13 +441,19 @@ impl MemorySession {
         key: &str,
         input: &MemoryInput,
     ) -> Result<MemoryRecord> {
-        remember_idempotent_on(&mut self.connection, key, input)
+        remember_idempotent_on(&mut self.connection, key, input, MemoryOrigin::Agent)
     }
 
     pub(crate) fn remember_batch(&mut self, inputs: &[MemoryInput]) -> Result<Vec<MemoryRecord>> {
         remember_batch_on(
             &mut self.connection,
-            &inputs.iter().map(MemoryInputRef::from).collect::<Vec<_>>(),
+            &inputs
+                .iter()
+                .map(|input| MemoryInputRef {
+                    origin: MemoryOrigin::Agent,
+                    ..input.into()
+                })
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -673,6 +716,7 @@ pub fn remember(
     remember_on(
         &mut connection,
         MemoryInputRef {
+            origin: MemoryOrigin::User,
             scope,
             kind,
             content,
@@ -694,18 +738,22 @@ pub fn remember_idempotent(
     input: &MemoryInput,
 ) -> Result<MemoryRecord> {
     let mut conn = open_db(db_path)?;
-    remember_idempotent_on(&mut conn, operation_key, input)
+    remember_idempotent_on(&mut conn, operation_key, input, MemoryOrigin::User)
 }
 
 fn remember_idempotent_on(
     conn: &mut Connection,
     key: &str,
     input: &MemoryInput,
+    origin: MemoryOrigin,
 ) -> Result<MemoryRecord> {
     if key.is_empty() || key.len() > 256 || key.contains('\0') {
         bail!("operation_key must contain 1 to 256 bytes without NUL");
     }
-    let validated = validate_input(MemoryInputRef::from(input))?;
+    let validated = validate_input(MemoryInputRef {
+        origin,
+        ..input.into()
+    })?;
     let digest = Sha256::digest(serde_json::to_vec(input)?).to_vec();
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let prior: Option<(Vec<u8>, i64)> = tx.query_row(
@@ -717,7 +765,7 @@ fn remember_idempotent_on(
                 "operation_key already used with a different payload; use a new key for a new observation"
             );
         }
-        tx.query_row("SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to FROM memories WHERE id=?1 AND deleted_at IS NULL", [id], hydrate_memory)
+        tx.query_row("SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to,origin FROM memories WHERE id=?1 AND deleted_at IS NULL", [id], hydrate_memory)
             .optional()?.context("operation completed but memory was forgotten; retry cannot restore it")?
     } else {
         let record = insert_memory(&tx, validated)?;
@@ -772,6 +820,41 @@ fn remember_batch_on(
     }
     tx.commit()?;
     Ok(records)
+}
+
+/// Ordered normalized text preserves word order, polarity, and repeated terms.
+pub(crate) fn normalized_duplicate_key(content: &str) -> String {
+    content
+        .nfc()
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn duplicate_digest(content: &str) -> String {
+    crate::db::hash_bytes(normalized_duplicate_key(content).as_bytes())
+}
+
+pub(crate) fn exact_duplicate_on(conn: &Connection, memory: &MemoryRecord) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM memories WHERE scope=?1 AND dedup_key=?2 AND id<?3 AND kind=?4
+           AND deleted_at IS NULL AND (valid_to IS NULL OR ?5 IS NULL OR valid_to>?5)
+           AND (?6 IS NULL OR valid_from IS NULL OR valid_from<?6)
+         ORDER BY id DESC LIMIT 1",
+            params![
+                memory.scope,
+                duplicate_digest(&memory.content),
+                memory.id,
+                memory.kind,
+                memory.valid_from,
+                memory.valid_to
+            ],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 fn validate_batch(inputs: &[MemoryInputRef<'_>]) -> Result<()> {
@@ -872,8 +955,8 @@ fn insert_memory(
     let created_at = now_utc();
     let id: i64 = tx
         .prepare_cached(
-            "INSERT INTO memories(scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) RETURNING id",
+            "INSERT INTO memories(scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to,origin,dedup_key)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) RETURNING id",
         )?
         .query_row(
             params![
@@ -886,13 +969,16 @@ fn insert_memory(
                 created_at,
                 observed_at,
                 valid_from,
-                valid_to
+                valid_to,
+                input.origin.as_str(),
+                duplicate_digest(input.content),
             ],
             |row| row.get(0),
         )?;
     tx.prepare_cached("INSERT INTO memory_fts(rowid,scope_token,content) VALUES(?1,?2,?3)")?
         .execute(params![id, memory_scope_token(input.scope), input.content])?;
     Ok(MemoryRecord {
+        origin: input.origin,
         id,
         scope: input.scope.to_string(),
         kind: input.kind.to_string(),
@@ -916,6 +1002,26 @@ pub fn recall(
 ) -> Result<Vec<MemorySearchResult>> {
     let conn = open_db(db_path)?;
     recall_on(&conn, scope, query, at, limit)
+}
+
+pub(crate) fn recall_with_policy_on(
+    connection: &Connection,
+    scope: &str,
+    query: &str,
+    at: Option<&str>,
+    limit: usize,
+    broad_terms: BroadTermPolicy,
+) -> Result<Vec<MemorySearchResult>> {
+    recall_on_profiled(
+        connection,
+        scope,
+        query,
+        at,
+        limit,
+        None,
+        configured_candidate_order(),
+        broad_terms,
+    )
 }
 
 pub(crate) fn recall_on(
@@ -1167,8 +1273,9 @@ fn recall_on_profiled_inner(
                     observed_at: row.get(8)?,
                     valid_from: row.get(9)?,
                     valid_to: row.get(10)?,
+                    origin: row.get(11)?,
                 };
-                let rank: f64 = row.get(11)?;
+                let rank: f64 = row.get(12)?;
                 Ok(Some((
                     MemorySearchResult {
                         memory,
@@ -1478,6 +1585,7 @@ pub(crate) fn hydrate_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory
         observed_at: row.get(8)?,
         valid_from: row.get(9)?,
         valid_to: row.get(10)?,
+        origin: row.get(11)?,
     })
 }
 
@@ -1581,7 +1689,7 @@ fn run_ranked_stage(
             #[cfg(feature = "retrieval-experiments")]
             crate::kernel_diagnostic::work(|t| t.classified += 1);
             let classification = classify_candidate(content, query_terms, full_terms);
-            let rank: f64 = row.get(11)?;
+            let rank: f64 = row.get(12)?;
             match classification {
                 Some(classification) => accepted.push(stage_candidate(
                     match eager {
@@ -1676,7 +1784,7 @@ fn run_recency_stage(
                 continue;
             }
             let memory = hydrate_memory(row)?;
-            let rank: f64 = row.get(11)?;
+            let rank: f64 = row.get(12)?;
             match classify_candidate(&memory.content, query_terms, full_terms) {
                 Some(classification) => accepted.push(stage_candidate(
                     memory,
@@ -2175,7 +2283,7 @@ fn list_memories_page_on(
         bail!("offset must be at most {MAX_LIST_OFFSET}");
     }
     let mut stmt = conn.prepare_cached(
-        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
+        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to,origin
          FROM memories WHERE scope=?1 AND deleted_at IS NULL AND (?4 IS NULL OR kind=?4)
          ORDER BY created_at DESC,id DESC LIMIT ?2 OFFSET ?3",
     )?;
@@ -2194,6 +2302,7 @@ fn list_memories_page_on(
                 observed_at: row.get(8)?,
                 valid_from: row.get(9)?,
                 valid_to: row.get(10)?,
+                origin: row.get(11)?,
             })
         },
     )?;
@@ -2238,7 +2347,7 @@ pub fn get_memory(db_path: &Path, scope: &str, id: i64) -> Result<Option<MemoryR
 fn get_memory_on(conn: &Connection, scope: &str, id: i64) -> Result<Option<MemoryRecord>> {
     validate_scope(scope)?;
     let mut stmt = conn.prepare_cached(
-        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
+        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to,origin
          FROM memories WHERE id=?1 AND scope=?2 AND deleted_at IS NULL",
     )?;
     let mut rows = stmt.query_map(params![id, scope], |row| {
@@ -2254,6 +2363,7 @@ fn get_memory_on(conn: &Connection, scope: &str, id: i64) -> Result<Option<Memor
             observed_at: row.get(8)?,
             valid_from: row.get(9)?,
             valid_to: row.get(10)?,
+            origin: row.get(11)?,
         })
     })?;
     rows.next().transpose().context("get memory")
@@ -2282,7 +2392,7 @@ pub fn maintain(db_path: &Path, max_records: usize) -> Result<usize> {
     }
     let mut conn = open_db(db_path)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let scrubbed = tx.execute("UPDATE memories SET content='',source_uri=NULL WHERE id IN
+    let scrubbed = tx.execute("UPDATE memories SET content='',source_uri=NULL,dedup_key=NULL WHERE id IN
         (SELECT id FROM memories WHERE deleted_at IS NOT NULL AND (content<>'' OR source_uri IS NOT NULL) LIMIT ?1)", [max_records as i64])?;
     tx.execute_batch(
         "INSERT INTO memory_fts(memory_fts,rank) VALUES('merge',16);
@@ -2325,7 +2435,7 @@ pub fn verify_integrity(db_path: &Path) -> Result<()> {
 pub fn compact(db_path: &Path) -> Result<()> {
     let conn = open_db(db_path)?;
     conn.execute(
-        "UPDATE memories SET content='',source_uri=NULL WHERE deleted_at IS NOT NULL",
+        "UPDATE memories SET content='',source_uri=NULL,dedup_key=NULL WHERE deleted_at IS NOT NULL",
         [],
     )?;
     conn.execute_batch("INSERT INTO code_fts(code_fts) VALUES('optimize'); INSERT INTO memory_fts(memory_fts) VALUES('optimize');")?;
@@ -2371,7 +2481,7 @@ pub fn export_jsonl(
     )?;
     out.write_all(b"\n")?;
     let mut stmt = tx.prepare(
-        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to
+        "SELECT id,scope,kind,content,source_uri,source_id,supersedes_id,created_at,observed_at,valid_from,valid_to,origin
          FROM memories WHERE scope=?1 AND deleted_at IS NULL ORDER BY id",
     )?;
     let mut rows = stmt.query([scope])?;
@@ -2474,6 +2584,7 @@ pub fn import_jsonl(
             report.dropped_supersedes_links += 1;
         }
         let input = MemoryInputRef {
+            origin: record.origin,
             scope: &scope,
             kind: &record.kind,
             content: &record.content,
