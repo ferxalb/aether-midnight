@@ -83,22 +83,29 @@ pub(super) fn call(
             .collect::<Result<Vec<_>, _>>()?;
         Ok((results, None))
     };
-    let (mut results, metadata) = run_layer(conn, scope)?;
-    let global =
-        if default_scope && scope.starts_with("project:") && policy.scope_allowed(GLOBAL_SCOPE) {
-            global_path(db_path, repo.as_deref())
-        } else {
-            None
-        };
-    let layered = global.is_some();
-    if let Some(path) = global {
-        let other = if path != db_path && path.is_file() {
-            Some(crate::db::open_db(&path).context("open global memory database")?)
-        } else {
-            None
-        };
-        let (mut fallback, fallback_meta) = if path == db_path || other.is_some() {
-            run_layer(other.as_ref().unwrap_or(conn), GLOBAL_SCOPE)?
+    let global_db = (scope == GLOBAL_SCOPE
+        || (default_scope && scope.starts_with("project:") && policy.scope_allowed(GLOBAL_SCOPE)))
+    .then(|| global_path(db_path, repo.as_deref()))
+    .flatten();
+    let separate_global = global_db.as_ref().filter(|path| path.as_path() != db_path);
+    let other = separate_global
+        .filter(|path| path.is_file())
+        .map(|path| crate::db::open_db(path).context("open global memory database"))
+        .transpose()?;
+    let (mut results, metadata) = if scope == GLOBAL_SCOPE && separate_global.is_some() {
+        match &other {
+            Some(global) => run_layer(global, scope)?,
+            None => (Vec::new(), None),
+        }
+    } else {
+        run_layer(conn, scope)?
+    };
+    let layered = scope != GLOBAL_SCOPE && global_db.is_some();
+    if layered {
+        let (mut fallback, fallback_meta) = if let Some(global) = other.as_ref() {
+            run_layer(global, GLOBAL_SCOPE)?
+        } else if separate_global.is_none() {
+            run_layer(conn, GLOBAL_SCOPE)?
         } else {
             (Vec::new(), None)
         };

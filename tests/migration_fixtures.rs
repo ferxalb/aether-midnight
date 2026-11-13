@@ -240,3 +240,67 @@ fn database_from_a_newer_schema_is_refused_without_modification() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("newer than this binary supports"));
     assert_eq!(user_version(&db), 11);
 }
+
+#[test]
+fn rc7_database_and_export_upgrade_and_rc7_refuses_schema_ten() {
+    let Some(rc7) = std::env::var_os("MIDNIGHT_RC7_BINARY") else {
+        eprintln!("set MIDNIGHT_RC7_BINARY to run the real rc.7 upgrade test");
+        return;
+    };
+    let temp = TempDir::new().unwrap();
+    let db = temp.path().join("rc7.sqlite3");
+    let export = temp.path().join("rc7.jsonl");
+    let run_rc7 = |args: &[&str]| {
+        Command::new(&rc7)
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .env("AETHER_MIDNIGHT_CONFIG_DIR", temp.path().join("config"))
+            .output()
+            .unwrap()
+    };
+    let stored = run_rc7(&[
+        "remember",
+        "--scope",
+        "project:fixture",
+        "--content",
+        "retained rc7 record",
+        "--json",
+    ]);
+    assert!(
+        stored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+    assert_eq!(user_version(&db), 9);
+    let exported = run_rc7(&[
+        "memory",
+        "export",
+        "--namespace",
+        "project:fixture",
+        "--output",
+        export.to_str().unwrap(),
+    ]);
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+
+    assert_eq!(json(&db, &["init", "--json"])["schema_version"], 10);
+    let rejected = run_rc7(&["init"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("schema 10 is newer"));
+    assert_eq!(user_version(&db), 10);
+    let list = ["memory", "list", "--namespace", "project:fixture", "--json"];
+    assert_eq!(json(&db, &list)[0]["content"], "retained rc7 record");
+    let imported = temp.path().join("imported.sqlite3");
+    assert_eq!(
+        json(
+            &imported,
+            &["memory", "import", export.to_str().unwrap(), "--json"]
+        )["imported"],
+        1
+    );
+    assert_eq!(json(&imported, &list)[0]["origin"], "agent");
+}
