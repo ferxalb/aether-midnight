@@ -1254,6 +1254,126 @@ fn watch_idle(bin: &Path, seconds: u64) -> Result<Value> {
     )
 }
 
+// ---------- daemon measurements (v0.2) ----------
+/// RSS (KiB) and CPU seconds of a process we did not spawn, by PID, from `ps`. `ps` reports CPU
+/// time at 10 ms resolution (`M:SS.hh`); RSS is the current value, not a high-water mark.
+fn ps_pid(pid: u64) -> Result<(u64, f64)> {
+    let out = Command::new("ps")
+        .args(["-o", "rss=,time=", "-p", &pid.to_string()])
+        .output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.split_whitespace();
+    let rss: u64 = parts.next().context("ps rss")?.parse()?;
+    let time = parts.next().context("ps time")?;
+    let cpu = time
+        .split(':')
+        .try_fold(0.0, |acc, p| p.parse::<f64>().map(|v| acc * 60.0 + v))?;
+    Ok((rss, cpu))
+}
+
+/// N concurrent MCP clients each issue `writes` `remember` calls against one database; returns the
+/// error texts. With `daemon` the clients proxy to one daemon, otherwise each is its own writer.
+fn concurrent_writers(
+    bin: &Path,
+    db: &Path,
+    envs: &[(&str, &str)],
+    clients: usize,
+    writes: usize,
+    daemon: bool,
+) -> Result<Value> {
+    let mode = if daemon { "1" } else { "0" };
+    let started = Instant::now();
+    let errors: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..clients)
+            .map(|c| {
+                let mut all = envs.to_vec();
+                all.push(("MIDNIGHT_DAEMON", mode));
+                scope.spawn(move || -> Vec<String> {
+                    let mut errors = vec![];
+                    let mut mcp = match Mcp::start_with_env(bin, db, &all) {
+                        Ok(m) => m,
+                        Err(e) => return vec![format!("start: {e:#}")],
+                    };
+                    for n in 0..writes {
+                        let args = json!({"scope":"project:load","kind":"source",
+                            "content":format!("client {c} write {n} concurrent load"),"embed":false});
+                        if let Err(e) = mcp.call("remember", args) {
+                            errors.push(format!("{e:#}"));
+                        }
+                    }
+                    let _ = mcp.close();
+                    errors
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let locked = errors
+        .iter()
+        .filter(|e| e.contains("database is locked") || e.contains("locked"))
+        .count();
+    Ok(
+        json!({"clients":clients,"writes_per_client":writes,"daemon":daemon,
+        "wall_seconds":started.elapsed().as_secs_f64(),"error_count":errors.len(),
+        "database_is_locked_count":locked,"first_errors":errors.iter().take(3).collect::<Vec<_>>()}),
+    )
+}
+
+/// Daemon cold start, per-request overhead against in-process, concurrent-writer behavior with
+/// and without the daemon, and the daemon's own RSS and CPU (by PID, not the proxy's).
+fn daemon_measure(bin: &Path, clients: usize, writes: usize, requests: usize) -> Result<Value> {
+    let (tmp, repo, db) = watch_fixture(bin)?;
+    let run_dir = tmp.path().join("run");
+    let config = tmp.path().join("config");
+    let (run_s, config_s) = (
+        run_dir.to_string_lossy().into_owned(),
+        config.to_string_lossy().into_owned(),
+    );
+    let envs: Vec<(&str, &str)> = vec![
+        ("MIDNIGHT_RUN_DIR", &run_s),
+        ("AETHER_MIDNIGHT_CONFIG_DIR", &config_s),
+        ("MIDNIGHT_DAEMON_IDLE_SECS", "300"),
+    ];
+    let db_s = db.to_str().unwrap();
+    let query = json!({"repo_path":repo,"query":"benchmark_target","limit":5,"mode":"lexical"});
+    let overhead = |daemon: bool| -> Result<Value> {
+        let mut all = envs.clone();
+        all.push(("MIDNIGHT_DAEMON", if daemon { "1" } else { "0" }));
+        let mut mcp = Mcp::start_with_env(bin, &db, &all)?;
+        let mut ms = vec![];
+        for _ in 0..requests {
+            ms.push(mcp.call("search_code", query.clone())?.0);
+        }
+        mcp.close()?;
+        Ok(distribution(&ms))
+    };
+    let in_process_overhead = overhead(false)?;
+    let in_process_writers = concurrent_writers(bin, &db, &envs, clients, writes, false)?;
+    // Cold start: the first `daemon start` spawns the daemon and returns once it answers.
+    let mut start_env = envs.clone();
+    start_env.push(("MIDNIGHT_DAEMON", "1"));
+    let (started, usage) = run_cli(bin, &["--db", db_s, "daemon", "start"], &start_env)?;
+    let pid = started["pid"].as_u64().context("daemon pid")?;
+    let (rss_idle, cpu_before) = ps_pid(pid)?;
+    let daemon_overhead = overhead(true)?;
+    let daemon_writers = concurrent_writers(bin, &db, &envs, clients, writes, true)?;
+    let (rss_after, cpu_after) = ps_pid(pid)?;
+    let (stopped, _) = run_cli(bin, &["--db", db_s, "daemon", "stop"], &start_env)?;
+    Ok(json!({
+        "clients":clients,"requests":requests,
+        "cold_start":{"wall_seconds":usage.wall_s,"note":"spawn to first status answer, includes the database open"},
+        "per_request_search_code":{"in_process":in_process_overhead,"via_daemon":daemon_overhead},
+        "concurrent_writers":{"in_process_processes":in_process_writers,"via_daemon":daemon_writers},
+        "daemon_process":{"pid_measured":pid,"rss_kib_after_start":rss_idle,"rss_kib_after_load":rss_after,
+            "cpu_seconds_over_load":cpu_after - cpu_before,"resolution":"ps: 10 ms CPU, current (not peak) RSS"},
+        "stopped":stopped,
+        "not_measured":["local-model RSS (needs the pinned ONNX runtime), one daemon vs N processes"],
+    }))
+}
+
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |n: &str| {
@@ -1306,6 +1426,12 @@ fn main() -> Result<()> {
             &binary_path(flag("--binary"))?,
             flag("--samples").map_or(30, |v| v.parse().unwrap()),
         )?,
+        "daemon-measure" => daemon_measure(
+            &binary_path(flag("--binary"))?,
+            flag("--clients").map_or(8, |v| v.parse().unwrap()),
+            flag("--writes").map_or(50, |v| v.parse().unwrap()),
+            flag("--requests").map_or(200, |v| v.parse().unwrap()),
+        )?,
         "watch-idle" => watch_idle(
             &binary_path(flag("--binary"))?,
             flag("--seconds").map_or(60, |v| v.parse().unwrap()),
@@ -1324,7 +1450,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | semantic-code-quality [--split dev|heldout|all --local --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N]>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | semantic-code-quality [--split dev|heldout|all --local --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N] | daemon-measure [--clients N --writes N --requests N]>"
         ),
     };
     if let Some(p) = flag("--json-output") {
