@@ -36,7 +36,7 @@ jobs:
           node npm/prepare.mjs dist packages "$PACKAGE_SCOPE"
           case "$version" in *-*) dist_tag=next ;; *) dist_tag=latest ;; esac
           for package in packages/*; do
-            (cd "$package" && npm pack --dry-run --ignore-scripts)
+            (cd "$package" && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP")
           done
           for package in packages/*; do
             test "$package" = packages/main && continue

@@ -48,7 +48,8 @@ for (const [os, cpu, release] of platforms) {
     const entry = lines.map(line => line.trim().split(/\s+/)).find(([, path]) => path === `./bin/${binaryName}`);
     if (!entry || sha256(binary) !== entry[0]) throw new Error(`Binary checksum mismatch: ${release}`);
     const pkg = packageDir(slug, { name: packageName, os: [os], cpu: [cpu],
-        ...(os === 'linux' ? { libc: ['glibc'] } : {}), files: ['bin'] });
+        ...(os === 'linux' ? { libc: ['glibc'] } : {}), files: ['bin'],
+        binarySha256: entry[0] });
     mkdirSync(resolve(pkg, 'bin'), { recursive: true });
     writeFileSync(resolve(pkg, 'bin', binaryName), binary, { mode: 0o755 });
 }
