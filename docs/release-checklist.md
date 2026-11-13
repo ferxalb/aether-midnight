@@ -9,7 +9,7 @@ re-opened below; its record follows in the archived table.
 | rc.8 gate | State |
 | --- | --- |
 | rc.8 version/installer/notes consistency | PASS by inspection — manifest, lockfile, installer pin and `docs/release-notes/v0.1.0-rc.8.md` agree; `cargo check --locked` is the check |
-| Formatting, strict Clippy, `cargo test --locked --no-fail-fast` on the final tree | OPEN — run `.github/workflows/validate.yml` (ubuntu, macOS) |
+| Formatting, strict Clippy, `cargo test --locked --no-fail-fast` on the final tree | OPEN — run `.github/workflows/ci.yml` (workflow_dispatch or push; Windows is continue-on-error) |
 | Frozen code/memory quality identical to rc.7 (`retrieval-quality`, four memory fixtures) | OPEN |
 | Token report vs the published rc.7 binary (paths/order identical, tokens and bytes) | OPEN — `midnight-harness token-report` / `token-compare` |
 | Watcher one-file visibility p95 ≤ 150 ms and idle CPU | OPEN — `watch-latency`, `watch-idle` |
