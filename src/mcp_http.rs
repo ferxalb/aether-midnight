@@ -79,6 +79,7 @@ pub fn serve(db_path: &Path, bind: SocketAddr, cancellation: Arc<AtomicBool>) ->
 /// elapses. Polling the listener (rather than sleeping a fixed interval)
 /// removes up to 15 ms of accept latency from every request while still
 /// observing cancellation promptly.
+#[cfg(unix)]
 fn wait_for_connection(listener: &TcpListener) {
     use std::os::fd::AsRawFd;
     let mut fd = libc::pollfd {
@@ -92,6 +93,11 @@ fn wait_for_connection(listener: &TcpListener) {
         // EINTR or a transient failure: back off briefly instead of spinning.
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[cfg(not(unix))]
+fn wait_for_connection(_listener: &TcpListener) {
+    std::thread::sleep(Duration::from_millis(10));
 }
 
 fn connection(

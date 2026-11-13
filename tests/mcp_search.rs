@@ -296,7 +296,7 @@ fn unconfigured_mcp_stays_lexical_and_invalid_modes_fail_without_requests() {
 }
 
 #[test]
-fn recall_modes_preserve_lexical_default_scope_and_time_contracts() {
+fn recall_modes_respect_default_hybrid_and_explicit_lexical() {
     let mock = Mock::start(|_, req| ok_response(req, DIMS));
     let f = Fixture::new(&mock);
     memory::remember(
@@ -321,8 +321,15 @@ fn recall_modes_preserve_lexical_default_scope_and_time_contracts() {
     embed::embed_memories(&f.db, "project:demo", &mut e, &AtomicBool::new(false)).unwrap();
     let seeded = mock.count();
     let mut mcp = f.mcp(&["--memory-scope", "project:demo"]);
-    assert!(mcp.call("recall", json!({"query":"privacy"})).is_array());
+    assert!(
+        mcp.call("recall", json!({"query":"privacy","mode":"lexical"}))
+            .is_array()
+    );
     assert_eq!(mock.count(), seeded);
+    assert_eq!(
+        mcp.call("recall", json!({"query":"privacy"}))["mode_used"],
+        "hybrid"
+    );
     assert_eq!(
         mcp.call("recall", json!({"query":"privacy","mode":"hybrid"}))["mode_used"],
         "hybrid"
@@ -656,4 +663,40 @@ fn mcp_memory_write_embedding_failure_keeps_the_memory_and_reports_a_notice() {
             .contains("consent")
     );
     assert_eq!(mock.count(), count);
+}
+
+#[test]
+fn mcp_ignores_supplied_origin_and_suggests_only_same_namespace_duplicates() {
+    let mock = Mock::start(|_, req| ok_response(req, DIMS));
+    let f = Fixture::new(&mock);
+    let mut mcp = f.mcp(&[]);
+    let store = |mcp: &mut Mcp, scope, content| {
+        mcp.call(
+            "remember",
+            json!({
+                "scope":scope,"kind":"source","content":content,"origin":"user","embed":false
+            }),
+        )
+    };
+    let first = store(
+        &mut mcp,
+        "project:catalog",
+        "The fireproof locker holds keys.",
+    );
+    let other = store(
+        &mut mcp,
+        "project:catalog-extra",
+        "The fireproof locker holds keys.",
+    );
+    let duplicate = store(
+        &mut mcp,
+        "project:catalog",
+        " THE   FIREPROOF LOCKER HOLDS KEYS. ",
+    );
+    assert_eq!(first["origin"], "agent");
+    assert!(other.get("possible_duplicate_of").is_none());
+    assert_eq!(duplicate["possible_duplicate_of"], first["id"]);
+    assert_eq!(duplicate["duplicate_evidence"], "normalized_text");
+    assert_ne!(duplicate["id"], first["id"]);
+    assert_eq!(mock.count(), 0);
 }

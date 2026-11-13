@@ -1248,8 +1248,11 @@ pub(crate) fn possible_memory_duplicate(
             current.extend(
                 row.get_ref(2)?
                     .as_blob()?
-                    .chunks_exact(4)
-                    .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four bytes"))),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(f32::from_le_bytes),
             );
         }
         let Some(score) = dot_with_blob(row.get_ref(1)?.as_blob()?, &current) else {

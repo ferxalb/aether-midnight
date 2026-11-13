@@ -734,7 +734,7 @@ fn code_vectors_are_isolated_between_repositories() {
 #[test]
 fn chunking_splits_long_files_and_preserves_line_ranges() {
     let text: String = (1..=100).map(|i| format!("line {i}\n")).collect();
-    let (chunks, truncated) = chunk_text(&text);
+    let (chunks, truncated) = fixed_chunks(&text);
     assert!(!truncated);
     assert_eq!(chunks[0].line_start, 1);
     assert_eq!(chunks.last().unwrap().line_end, 100);
@@ -742,7 +742,7 @@ fn chunking_splits_long_files_and_preserves_line_ranges() {
         assert_eq!(pair[1].line_start, pair[0].line_end + 1);
     }
     assert!(chunks.iter().all(|c| c.text.len() <= CHUNK_MAX_BYTES + 16));
-    assert!(chunk_text("\n\n  \n").0.is_empty());
+    assert!(fixed_chunks("\n\n  \n").0.is_empty());
 }
 
 #[test]

@@ -2987,15 +2987,26 @@ pub(crate) fn repo_map_scoped(conn: &Connection, scope: RepoScope) -> Result<Rep
 }
 
 pub(crate) fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
+    #[cfg(windows)]
+    let relative = path
+        .strip_prefix(root)
+        .context("path escapes repository root")?;
+    #[cfg(not(windows))]
     let canonical = path.canonicalize()?;
-    if !canonical.starts_with(root) {
-        bail!("path escapes repository root");
-    }
-    let metadata = fs::symlink_metadata(&canonical)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_FILE_BYTES {
-        bail!("source is a symlink, not a file, or exceeds the 1 MiB read limit");
-    }
-    let relative = canonical.strip_prefix(root)?;
+    #[cfg(not(windows))]
+    let relative = {
+        if !canonical.starts_with(root) {
+            bail!("path escapes repository root");
+        }
+        let metadata = fs::symlink_metadata(&canonical)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_FILE_BYTES
+        {
+            bail!("source is a symlink, not a file, or exceeds the 1 MiB read limit");
+        }
+        canonical.strip_prefix(root)?
+    };
     let bytes = read_limited_from_root(root, relative, MAX_FILE_BYTES as usize + 1, None, &None)?;
     if bytes.len() > MAX_FILE_BYTES as usize || bytes.contains(&0) || has_binary_controls(&bytes) {
         bail!("source is binary or oversized");
