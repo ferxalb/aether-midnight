@@ -1,9 +1,29 @@
-# v0.1.0-rc.7 checklist and stable decision
+# v0.1.0-rc.8 checklist and stable decision
 
-rc.7 replaces rc.6 as the candidate for the v0.1.0 stable decision: it migrates the database to
-schema 9 and changes the MCP memory contract (default scope, write-time embedding, new tools), so
-those changes need a published prerelease first. A passing candidate workflow does not
-automatically authorize or establish stable readiness. Notes: [rc.7](release-notes/v0.1.0-rc.7.md).
+rc.8 replaces rc.7 as the candidate for the v0.1.0 stable decision. It ships the v0.2 line (token-saving
+search results, watcher, single-writer daemon, schema 10 memory provenance, symbol-aware embeddings)
+as one release. A passing candidate workflow does not automatically authorize or establish stable
+readiness. Notes: [rc.8](release-notes/v0.1.0-rc.8.md). rc.7 gates that this release touches are
+re-opened below; its record follows in the archived table.
+
+| rc.8 gate | State |
+| --- | --- |
+| rc.8 version/installer/notes consistency | PASS by inspection — manifest, lockfile, installer pin and `docs/release-notes/v0.1.0-rc.8.md` agree; `cargo check --locked` is the check |
+| Formatting, strict Clippy, `cargo test --locked --no-fail-fast` on the final tree | OPEN — run `.github/workflows/validate.yml` (ubuntu, macOS) |
+| Frozen code/memory quality identical to rc.7 (`retrieval-quality`, four memory fixtures) | OPEN |
+| Token report vs the published rc.7 binary (paths/order identical, tokens and bytes) | OPEN — `midnight-harness token-report` / `token-compare` |
+| Watcher one-file visibility p95 ≤ 150 ms and idle CPU | OPEN — `watch-latency`, `watch-idle` |
+| Daemon: N concurrent writers without `database is locked`, cold start, per-request overhead, RSS by daemon PID | OPEN — `daemon-measure` |
+| Schema 9 → 10 migration, rollback test, refusal by rc.7 | OPEN — fixture tests exist, not run on the final tree |
+| Local-model reuse and RSS | OPEN — needs the pinned ONNX Runtime on the build host |
+| Real Claude Code / Codex sessions with the compact shape, daemon and refs | OPEN |
+| Linux, Windows, npm builds and smoke tests | NOT RUN — experimental |
+| Tagged rc.8 workflow, archive, checksums, install and rc.7 → rc.8 update | OPEN — maintainer publication below |
+| Signing/notarization, arm64 runtime, live Rainy, clean-machine install | OPEN — unchanged |
+
+Do not promote rc.8 automatically. No tag or release is created by editing this checklist.
+
+## rc.7 record (archived)
 
 | rc.7 gate | State |
 | --- | --- |
@@ -73,16 +93,16 @@ maintainer steps below are done. The binary is unsigned and not notarized (docum
 Detailed commands, evidence and measurements: [v0.1-status.md](v0.1-status.md).
 Installation: [installation.md](installation.md). Signing: [release-signing.md](release-signing.md).
 
-## Publish the v0.1.0-rc.7 prerelease (maintainer)
+## Publish the v0.1.0-rc.8 prerelease (maintainer)
 
-Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.7`, tag `v0.1.0-rc.7`,
-`aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
+Version, tag and archive name come from `Cargo.toml` (`0.1.0-rc.8`, tag `v0.1.0-rc.8`,
+`aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz`). `midnight update` and `scripts/install.sh`
 both read the release by that tag, so they only work once it exists. The workflow creates it.
 
 1. Write `docs/release-notes/v<version>.md` (state: unsigned, not notarized, what was and was not
    tested). The workflow appends the archive SHA-256 and fails if the file is missing.
 2. Commit, then tag that exact commit and push the tag:
-   `git tag v0.1.0-rc.7 && git push origin v0.1.0-rc.7`.
+   `git tag v0.1.0-rc.8 && git push origin v0.1.0-rc.8`.
 3. The "macOS release artifacts" workflow runs on the tag: it builds the Universal 2 binary,
    packages it, runs the offline installer smoke test, then a `release` job checks that the tag
    equals `v` + the `Cargo.toml` version, and creates the GitHub Release with the archive, its
@@ -90,7 +110,7 @@ both read the release by that tag, so they only work once it exists. The workflo
    prerelease; a plain version is not. It refuses to touch a release that already exists.
 4. Confirm the public URLs with `curl -fsSIL` and run `midnight update --check` from the prior build.
 5. From an installed rc.6, copy the database (`sqlite3 … ".backup …"`), run `midnight update`, then
-   `midnight status` and `midnight memory scopes`: the first rc.7 run migrates to schema 9.
+   `midnight status` and `midnight memory scopes`: the first rc.8 run migrates to schema 10.
 
 Re-running by hand: "Run workflow" on the tag ref does the same. Run on a branch it only builds and
 uploads the artifact (no release). To fix the notes of a published release use `gh release edit`.
@@ -103,10 +123,10 @@ developers), no Rust, and a fresh user account. Do not change any security setti
 1. Browser path (quarantine): in Safari, download the `.tar.gz` and `install.sh` from the
    release page. Verify the quarantine flag exists:
    `xattr -p com.apple.quarantine ~/Downloads/install.sh` (expected: a value is printed).
-2. `cd ~/Downloads && shasum -a 256 aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz` must equal
+2. `cd ~/Downloads && shasum -a 256 aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz` must equal
    `<SHA256>` from the release notes.
-3. `sh ./install.sh --archive-file aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz --sha256 <SHA256> --no-runtime`.
-   Record the exit code, the `--version` line (`aether-midnight 0.1.0-rc.7`) and the Gatekeeper
+3. `sh ./install.sh --archive-file aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz --sha256 <SHA256> --no-runtime`.
+   Record the exit code, the `--version` line (`aether-midnight 0.1.0-rc.8`) and the Gatekeeper
    assessment. Also run `xattr -l ~/.local/bin/aether-midnight` and record whether a quarantine
    attribute is present (the installer only reports it, never removes it). If macOS blocks it, record that exactly, do not override it, and mark the
    gate FAIL.

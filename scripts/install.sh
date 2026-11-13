@@ -17,7 +17,7 @@
 set -eu
 umask 022
 
-VERSION=0.1.0-rc.7
+VERSION=0.1.0-rc.8
 APP=aether-midnight
 ALIAS=midnight
 RELEASE_BASE="https://github.com/ferxalbs/aether-midnight/releases/download/v$VERSION"

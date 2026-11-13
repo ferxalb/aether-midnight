@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (9) — Close Part 1 and prepare 0.1.0-rc.8 (one release for the v0.2 line)
+
+- Decision: Part 1 and Part 2 ship together as `0.1.0-rc.8` (schema 10); no rc.9. Version bumped in `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README, CHANGELOG, `docs/installation.md`, `docs/release-checklist.md` and the `docs/v0.1-status.md` banner; new `docs/release-notes/v0.1.0-rc.8.md` (unsigned, not notarized, schema 10 so rc.7 and older cannot open a migrated database, tested and untested lists, Linux/Windows/npm NOT RUN, archive SHA left to the workflow). Historical rc.7 mentions (release notes, performance and benchmark-guide procedures, `rc7-workloads`, earlier history entries) are unchanged on purpose.
+- Harness: `daemon-measure` (cold start, per-request overhead, concurrent writers with and without the daemon, daemon RSS/CPU read by PID with `ps`). The "before" binary for Part 1 comparisons is the published rc.7 archive (tag `v0.1.0-rc.7` is the base commit `4427450`; archive SHA-256 verified against its `.sha256` and inner `SHA256SUMS`).
+- Validation state: only `cargo check --locked --all-targets` was run for this entry. Tests, strict Clippy, quality suites and every measurement are open (see the rc.8 checklist); `.github/workflows/validate.yml` runs fmt, Clippy and tests on ubuntu and macOS.
+
 ## 2026-11-12 (8) — v0.2 Phase C experimental native distribution
 
 - Added native CI and release matrices, checksum-gated npm package assembly, glibc Linux installer and updater selection, extra ORT archive pins and Windows handle-based source reads.

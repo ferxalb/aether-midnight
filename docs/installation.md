@@ -8,8 +8,8 @@ unsupported, and the script refuses to run there.
 ## Script install (recommended)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.7/install.sh | sh -s -- --no-runtime
-# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz --sha256 <hex>
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.8/install.sh | sh -s -- --no-runtime
+# offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz --sha256 <hex>
 ```
 
 `scripts/install.sh` (from the repository) runs as your user (it refuses root/sudo) and:
@@ -33,7 +33,7 @@ failed after a successful binary install, 10 unsupported platform, 11 root, 12 m
 tool). `--dry-run` prints the plan. Next to the binary it also creates `midnight`, a relative symlink
 to `aether-midnight` (the program takes its display name from how it is invoked); an existing
 `midnight` that is not that link is left untouched with a warning. With no source option the script downloads the
-v0.1.0-rc.7 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
+v0.1.0-rc.8 archive and its `.sha256` from the GitHub Release; `--sha256` overrides it.
 
 ### Update and uninstall
 
@@ -58,11 +58,11 @@ entries instead of editing them unless you pass `--remove-client-entries`. The u
 `config.json`, `credentials.json` and the project trust list are what `--purge-config` removes;
 the database, token registry, models and ONNX Runtime are what `--purge-data` removes.
 
-Downgrades and the database: rc.7 migrates the database to schema 9 the first time it opens it.
-rc.6 and older binaries refuse a schema-9 database (they report that it is newer than they
+Downgrades and the database: rc.8 migrates the database to schema 10 the first time it opens it.
+rc.7 and older binaries refuse a schema-10 database (they report that it is newer than they
 support) instead of guessing. Before `midnight update --to` an older version, keep a copy, for
-example `sqlite3 midnight.sqlite3 ".backup 'midnight-before-rc7.sqlite3'"` taken before the
-first rc.7 run, or export each namespace with `midnight memory export`.
+example `sqlite3 midnight.sqlite3 ".backup 'midnight-before-rc8.sqlite3'"` taken before the
+first rc.8 run, or export each namespace with `midnight memory export`.
 
 ### Gatekeeper
 
@@ -91,9 +91,9 @@ aether-midnight runtime install && aether-midnight doctor
 For a locally built or subsequently signed and approved archive:
 
 ```sh
-shasum -a 256 -c aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz.sha256
-tar -xzf aether-midnight-0.1.0-rc.7-macos-universal2.tar.gz
-cd aether-midnight-0.1.0-rc.7-macos-universal2
+shasum -a 256 -c aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz.sha256
+tar -xzf aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz
+cd aether-midnight-0.1.0-rc.8-macos-universal2
 shasum -a 256 -c SHA256SUMS
 mkdir -p "$HOME/.local/bin"
 install -m 755 bin/aether-midnight "$HOME/.local/bin/aether-midnight"
