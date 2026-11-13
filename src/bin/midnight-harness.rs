@@ -859,6 +859,177 @@ fn rc7_workloads(repo: &Path, output: &Path) -> Result<Value> {
     Ok(json!({"repo": repo, "files": files}))
 }
 
+// ---------- token metrics (v0.2) ----------
+/// Copy of `aether_midnight::code::estimate_tokens` (`midnight-heuristic-v1`). The harness applies
+/// one estimator to the raw responses of any binary so before/after numbers are comparable even
+/// when the base binary cannot report them. An estimate, not a model tokenizer count.
+fn estimate_tokens(text: &str) -> usize {
+    let mut tokens = 0usize;
+    let mut identifier_bytes = 0usize;
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            identifier_bytes += 1;
+        } else {
+            tokens += identifier_bytes.div_ceil(4);
+            identifier_bytes = 0;
+            if !character.is_whitespace() {
+                tokens += 1;
+            }
+        }
+    }
+    tokens + identifier_bytes.div_ceil(4)
+}
+
+fn pctl(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Drive `search_code` (lexical, one request in flight, one fresh connection) over the frozen
+/// retrieval queries and record paths, response bytes and estimated tokens per query.
+fn token_report(bin: &Path, limit: usize, samples_output: Option<&Path>) -> Result<Value> {
+    let queries = read_json(&Path::new(ROOT).join("benchmark/retrieval_queries.json"))?["queries"]
+        .as_array()
+        .context("queries")?
+        .clone();
+    let tmp = tempfile::tempdir()?;
+    let repo = tmp.path().join("repo");
+    copy_dir(&Path::new(ROOT).join("benchmark/retrieval_fixture"), &repo)?;
+    let db = tmp.path().join("tokens.sqlite3");
+    let (db_s, repo_s) = (db.to_str().unwrap(), repo.to_str().unwrap());
+    let envs = [("MIDNIGHT_INDEX_WORKERS", "1")];
+    let (idx, _) = run_cli(
+        bin,
+        &["--db", db_s, "index", "--repo", repo_s, "--verify-hashes"],
+        &envs,
+    )?;
+    if idx["complete"] != true {
+        bail!("fixture index incomplete");
+    }
+    let mut rows = vec![];
+    let mut samples = vec![];
+    let (mut bytes_all, mut tokens_all) = (vec![], vec![]);
+    for q in &queries {
+        // A fresh connection per query: no delivery history, so every response carries text.
+        let mut mcp = Mcp::start(bin, &db)?;
+        let (_, v) = mcp.call(
+            "search_code",
+            json!({"repo_path":repo_s,"query":q["query"],"limit":limit,"mode":"lexical"}),
+        )?;
+        mcp.close()?;
+        let text = v.to_string();
+        let paths: Vec<&str> = v["results"]
+            .as_array()
+            .map(|r| r.iter().filter_map(|x| x["path"].as_str()).collect())
+            .unwrap_or_default();
+        let (bytes, tokens) = (text.len(), estimate_tokens(&text));
+        bytes_all.push(bytes as f64);
+        tokens_all.push(tokens as f64);
+        rows.push(json!({"id":q["id"],"kind":q["kind"],"paths":paths,"bytes":bytes,"estimated_tokens":tokens}));
+        samples.push(Value::String(text));
+    }
+    if let Some(path) = samples_output {
+        std::fs::write(path, serde_json::to_string_pretty(&samples)? + "\n")?;
+    }
+    let summarize = |mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        json!({"sum":v.iter().sum::<f64>(),"p50":pctl(&v,0.5),"p95":pctl(&v,0.95),"max":v.last()})
+    };
+    Ok(
+        json!({"schema_version":1,"limit":limit,"estimator":"midnight-heuristic-v1 (estimate)",
+        "query_count":rows.len(),"bytes":summarize(bytes_all),"estimated_tokens":summarize(tokens_all),"queries":rows}),
+    )
+}
+
+/// Compare two `token-report` outputs: paths and order per query, then token and byte deltas.
+fn token_compare(before: &Path, after: &Path) -> Result<Value> {
+    let (b, a) = (read_json(before)?, read_json(after)?);
+    let (bq, aq) = (
+        b["queries"].as_array().context("before")?,
+        a["queries"].as_array().context("after")?,
+    );
+    if bq.len() != aq.len() {
+        bail!("reports have different query counts");
+    }
+    let (mut differing, mut worse, mut rows) = (vec![], 0, vec![]);
+    for (x, y) in bq.iter().zip(aq) {
+        let (px, py) = (
+            x["paths"].as_array().unwrap(),
+            y["paths"].as_array().unwrap(),
+        );
+        // The after side may add results the base cut; the shared prefix must be identical.
+        let n = px.len().min(py.len());
+        let same_order = px[..n] == py[..n];
+        let same_paths = px == py;
+        if !same_order {
+            differing.push(x["id"].clone());
+        }
+        let (tb, ta) = (
+            x["estimated_tokens"].as_u64().unwrap(),
+            y["estimated_tokens"].as_u64().unwrap(),
+        );
+        if ta > tb {
+            worse += 1;
+        }
+        rows.push(json!({"id":x["id"],"same_paths":same_paths,"same_order_on_shared_prefix":same_order,
+            "tokens_before":tb,"tokens_after":ta,"bytes_before":x["bytes"],"bytes_after":y["bytes"]}));
+    }
+    Ok(
+        json!({"queries":rows.len(),"order_differences":differing,"queries_with_more_tokens_after":worse,
+        "tokens_before":b["estimated_tokens"],"tokens_after":a["estimated_tokens"],
+        "bytes_before":b["bytes"],"bytes_after":a["bytes"],"rows":rows}),
+    )
+}
+
+/// Offline estimator calibration: the ratio of the estimate to externally supplied reference
+/// counts (one number per sample). No network call; "not measured" without a reference file.
+fn calibrate_tokens(samples: &Path, reference: Option<&Path>) -> Result<Value> {
+    let samples = read_json(samples)?;
+    let samples = samples
+        .as_array()
+        .context("samples must be a JSON array of strings")?;
+    let estimates: Vec<usize> = samples
+        .iter()
+        .map(|s| estimate_tokens(s.as_str().unwrap_or("")))
+        .collect();
+    let Some(reference) = reference else {
+        return Ok(
+            json!({"estimator":"midnight-heuristic-v1","sample_count":estimates.len(),
+            "reference":"not measured","estimates":estimates}),
+        );
+    };
+    let reference = read_json(reference)?;
+    let reference: Vec<f64> = reference
+        .as_array()
+        .context("reference must be a JSON array of numbers")?
+        .iter()
+        .map(|v| v.as_f64().unwrap_or(0.0))
+        .collect();
+    if reference.len() != estimates.len() {
+        bail!(
+            "reference has {} counts for {} samples",
+            reference.len(),
+            estimates.len()
+        );
+    }
+    let mut ratios: Vec<f64> = estimates
+        .iter()
+        .zip(&reference)
+        .filter(|(_, r)| **r > 0.0)
+        .map(|(e, r)| *e as f64 / r)
+        .collect();
+    ratios.sort_by(|a, b| a.total_cmp(b));
+    let mean = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
+    Ok(
+        json!({"estimator":"midnight-heuristic-v1","sample_count":ratios.len(),
+        "ratio_estimate_over_reference":{"mean":mean,"p5":pctl(&ratios,0.05),"p50":pctl(&ratios,0.5),"p95":pctl(&ratios,0.95)},
+        "note":"reference counts were supplied by the caller; the harness made no network call"}),
+    )
+}
+
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |n: &str| {
@@ -897,6 +1068,18 @@ fn main() -> Result<()> {
             )?
         }
         "retrieval-quality" => retrieval_quality(&binary_path(flag("--binary"))?)?,
+        "token-report" => token_report(
+            &binary_path(flag("--binary"))?,
+            flag("--limit").map_or(5, |v| v.parse().unwrap()),
+            flag("--samples-output").map(Path::new),
+        )?,
+        "token-compare" => {
+            token_compare(Path::new(need("--before")?), Path::new(need("--after")?))?
+        }
+        "calibrate-tokens" => calibrate_tokens(
+            Path::new(need("--samples")?),
+            flag("--reference").map(Path::new),
+        )?,
         "rc7-workloads" => rc7_workloads(Path::new(need("--repo")?), Path::new(need("--output")?))?,
         "measure-mcp" => measure_mcp(
             &binary_path(flag("--binary"))?,
@@ -904,7 +1087,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F]>"
         ),
     };
     if let Some(p) = flag("--json-output") {

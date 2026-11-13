@@ -115,7 +115,7 @@ pub struct IndexStatus {
     pub skipped: BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CodeResult {
     pub path: String,
     pub line_start: Option<u32>,
@@ -129,6 +129,13 @@ pub struct CodeResult {
     pub estimated_tokens: usize,
     pub score: f64,
     pub score_breakdown: BTreeMap<String, f64>,
+    /// Source text the excerpt was cut from, kept only so the compact renderer
+    /// (`context.rs`) can build symbol-bounded ranges without reading the file twice.
+    #[serde(skip)]
+    pub source: Option<std::sync::Arc<str>>,
+    /// Hash of `source`; empty when the source was not read.
+    #[serde(skip)]
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2483,10 +2490,12 @@ fn make_results(
     for candidate in candidates.into_iter().take(limit) {
         let abs = scope.root.join(&candidate.path);
         let checked = current_text(&scope.root, &abs).ok();
+        let mut source: Option<std::sync::Arc<str>> = None;
         let (freshness, snippet, line_start, line_end, line_capped) =
             if let Some((text, current_hash)) = checked {
                 if current_hash == candidate.hash {
                     let (start, end, snippet, capped) = excerpt(&text, query, context_lines);
+                    source = Some(std::sync::Arc::from(text));
                     (
                         "fresh".to_string(),
                         Some(snippet),
@@ -2535,6 +2544,12 @@ fn make_results(
             estimated_tokens: 0,
             score: candidate.exact_path + candidate.exact_symbol + candidate.lexical,
             score_breakdown: breakdown,
+            content_hash: if source.is_some() {
+                candidate.hash.clone()
+            } else {
+                String::new()
+            },
+            source,
         });
     }
     Ok(out)
@@ -2656,6 +2671,8 @@ fn cold_search(
             estimated_tokens: 0,
             score: if path_hit { 60.0 } else { 25.0 },
             score_breakdown: breakdown,
+            source: Some(std::sync::Arc::from(text.0.as_str())),
+            content_hash: text.1.clone(),
         });
         if !results.is_empty() {
             break;
@@ -2977,7 +2994,12 @@ fn excerpt(text: &str, query: &str, context_lines: usize) -> (u32, u32, String, 
 
 /// Numbered snippet lines with each line capped at `MAX_SNIPPET_LINE_CHARS`. `match_column`
 /// centers the cut of the first line on the match so the matched text stays visible.
-fn snippet_lines(text: &str, start: u32, end: u32, match_column: Option<usize>) -> (String, bool) {
+pub(crate) fn snippet_lines(
+    text: &str,
+    start: u32,
+    end: u32,
+    match_column: Option<usize>,
+) -> (String, bool) {
     let mut capped = false;
     let lines = text
         .lines()
@@ -3090,7 +3112,8 @@ pub(crate) fn pack_context(
     (packed, used, truncated)
 }
 
-fn estimate_tokens(text: &str) -> usize {
+/// Project token estimate (`midnight-heuristic-v1`); an estimate, not a model tokenizer.
+pub fn estimate_tokens(text: &str) -> usize {
     let mut tokens = 0usize;
     let mut identifier_bytes = 0usize;
     for character in text.chars() {

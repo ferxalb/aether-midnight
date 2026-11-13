@@ -6,6 +6,7 @@ pub mod cloud;
 pub mod code;
 pub mod config;
 pub mod connect;
+pub mod context;
 pub mod db;
 pub mod embed;
 pub mod mcp;

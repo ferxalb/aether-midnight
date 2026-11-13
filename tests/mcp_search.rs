@@ -176,7 +176,18 @@ fn configured_mcp_defaults_to_hybrid_caches_queries_and_preserves_explicit_lexic
     assert_eq!(hybrid["results"][0]["path"], "Products.tsx");
     assert_eq!(mock.count(), seeded + 1);
     let repeat = mcp.call("search_code", args.clone());
-    assert_eq!(repeat["results"], hybrid["results"]);
+    // Same evidence, but the second response refers to ranges the connection already received.
+    let paths = |v: &serde_json::Value| -> Vec<serde_json::Value> {
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].clone())
+            .collect()
+    };
+    assert_eq!(paths(&repeat), paths(&hybrid));
+    assert_eq!(repeat["results"][0]["ranges"][0]["delivered"], true);
+    assert!(repeat["results"][0]["ranges"][0].get("text").is_none());
     assert_eq!(mock.count(), seeded + 1);
     let mut explicit = args.clone();
     explicit["mode"] = json!("lexical");

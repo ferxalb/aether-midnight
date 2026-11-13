@@ -17,6 +17,8 @@ pub struct Session {
     memory: Option<memory::MemorySession>,
     search: search::QueryCache,
     local: search::LocalModel,
+    /// Ranges already sent on this connection (hashes only); see `context.rs`.
+    ledger: crate::context::SharedLedger,
 }
 
 /// Newest protocol revision this server implements; offered when the client asks for an unknown one.
@@ -239,7 +241,13 @@ pub fn handle_message(
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     Some(match method {
-        "initialize" => initialize(id, &params, policy),
+        "initialize" => {
+            if let Some(session) = memory_session.as_ref() {
+                use crate::context::DeliveryLedger;
+                session.ledger.borrow_mut().clear();
+            }
+            initialize(id, &params, policy)
+        }
         "ping" => ok_response(id, json!({})),
         "tools/list" => {
             let visible: Vec<Value> = tools()
@@ -437,12 +445,12 @@ pub fn tools() -> Vec<Value> {
         tool(
             "search_code",
             "Search code using lexical, semantic, or hybrid retrieval. Defaults to hybrid with a configured, permitted provider; otherwise lexical. Hybrid protects exact paths, symbols and literal phrases before RRF. Remote modes send only the query to the saved provider and require user consent. Never configures providers or uploads source files. Returns current-source evidence within an estimated-token budget.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192},"context_lines":{"type":"integer","minimum":1,"maximum":8,"description":"Snippet lines per result, starting at the matching line (default 3). Lines longer than 200 characters are cut around the match."}},"required":["query"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20},"token_budget":{"type":"integer","minimum":64,"maximum":8192},"context_lines":{"type":"integer","minimum":1,"maximum":8,"description":"Snippet lines per result, starting at the matching line (default 3). Lines longer than 200 characters are cut around the match."},"fresh_context":{"type":"boolean","description":"Resend ranges this connection already received instead of returning references."},"explain":{"type":"boolean","description":"Include score and score_breakdown per result."},"verbose":{"type":"boolean","description":"Return the pre-0.2 response shape (snippet per result)."}},"required":["query"]}),
         ),
         tool(
             "open_range",
             "Read a bounded line range from the current repository file and report whether it matches the indexed hash.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"},"line_start":{"type":"integer","minimum":1},"line_end":{"type":"integer","minimum":1}},"required":["path","line_start","line_end"]}),
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"path":{"type":"string"},"line_start":{"type":"integer","minimum":1},"line_end":{"type":"integer","minimum":1},"ref":{"type":"string","description":"A ref from search_code (path#start-end@hash). Replaces path and line numbers; a ref whose file changed returns stale_handle and no content."}}}),
         ),
         tool(
             "list_symbols",
@@ -451,8 +459,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "repo_map",
-            "Return deterministic file/language/symbol counts for one worktree.",
-            json!({"type":"object","properties":{"repo_path":{"type":"string"}}}),
+            "Return deterministic file/language/symbol counts for one worktree plus a ranked, token-budgeted file list (files).",
+            json!({"type":"object","properties":{"repo_path":{"type":"string"},"query":{"type":"string","description":"Bias the file ranking toward paths and symbols matching these terms."},"token_budget":{"type":"integer","minimum":64,"maximum":8192,"description":"Budget for the ranked files list (default 1024)."}}}),
         ),
         tool(
             "index_status",
@@ -602,6 +610,38 @@ fn call_tool(
         "search_code" => {
             let repo = path_arg(&args, "repo_path")?;
             let (mode, settings) = search::resolve(&args, Some(&repo), policy, false)?;
+            let query = required_str(&args, "query")?;
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+            let user_budget = args
+                .get("token_budget")
+                .and_then(Value::as_u64)
+                .unwrap_or(2048) as usize;
+            let context_lines = args
+                .get("context_lines")
+                .and_then(Value::as_u64)
+                .map_or(code::DEFAULT_CONTEXT_LINES, |n| n.min(64) as usize);
+            let verbose = args
+                .get("verbose")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let flag = |name: &str| args.get(name).and_then(Value::as_bool).unwrap_or(false);
+            let opts = crate::context::CompactOptions {
+                token_budget: user_budget,
+                limit: limit.clamp(1, 20),
+                fresh_context: flag("fresh_context"),
+                explain: flag("explain"),
+            };
+            // Compact shape: retrieve with the largest budget so the legacy packer cuts nothing,
+            // then let the compact renderer apply the caller's budget (order never changes).
+            let backend_budget = if verbose {
+                user_budget
+            } else {
+                code::MAX_TOKEN_BUDGET
+            };
+            let ledger = memory_session
+                .get_or_insert_with(Session::default)
+                .ledger
+                .clone();
             if mode != crate::embed::SearchMode::Lexical {
                 let session = memory_session.get_or_insert_with(Session::default);
                 let mut loader = search::loader(
@@ -611,44 +651,75 @@ fn call_tool(
                     session.local.clone(),
                     repo.to_string_lossy().into_owned(),
                 );
-                let query = required_str(&args, "query")?;
                 let scope = crate::db::repo_scope(&repo)?;
-                return Ok(serde_json::to_value(crate::embed::search_code_on(
-                    session_connection(db_path, memory_session)?,
+                let conn = session_connection(db_path, memory_session)?;
+                let response = crate::embed::search_code_on(
+                    conn,
                     &scope,
                     query,
                     mode,
-                    args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
-                    args.get("token_budget")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(2048) as usize,
-                    args.get("context_lines")
-                        .and_then(Value::as_u64)
-                        .map_or(code::DEFAULT_CONTEXT_LINES, |n| n.min(64) as usize),
+                    limit,
+                    backend_budget,
+                    context_lines,
                     &mut loader,
-                )?)?);
+                )?;
+                if verbose {
+                    return Ok(serde_json::to_value(response)?);
+                }
+                let info = serde_json::to_value(&response.info)?;
+                let mut value = crate::context::compact_search(
+                    conn,
+                    &scope,
+                    response.search,
+                    query,
+                    context_lines,
+                    &opts,
+                    &mut *ledger.borrow_mut(),
+                )?;
+                crate::context::merge_info(&mut value, info);
+                return Ok(value);
             }
-            let query = required_str(&args, "query")?;
             let scope = crate::db::repo_scope(&repo)?;
+            let conn = session_connection(db_path, memory_session)?;
             let result = code::search_code_scoped(
-                session_connection(db_path, memory_session)?,
+                conn,
                 &scope,
                 query,
-                args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize,
-                args.get("token_budget")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(2048) as usize,
-                args.get("context_lines")
-                    .and_then(Value::as_u64)
-                    .map_or(code::DEFAULT_CONTEXT_LINES, |n| n.min(64) as usize),
+                limit,
+                backend_budget,
+                context_lines,
             )?;
-            Ok(serde_json::to_value(result)?)
+            if verbose {
+                return Ok(serde_json::to_value(result)?);
+            }
+            Ok(crate::context::compact_search(
+                conn,
+                &scope,
+                result,
+                query,
+                context_lines,
+                &opts,
+                &mut *ledger.borrow_mut(),
+            )?)
         }
         "open_range" => {
             let repo = path_arg(&args, "repo_path")?;
             let scope = crate::db::repo_scope(&repo)?;
+            let ledger = memory_session
+                .get_or_insert_with(Session::default)
+                .ledger
+                .clone();
+            let conn = session_connection(db_path, memory_session)?;
+            if let Some(handle) = optional_str(&args, "ref") {
+                return crate::context::open_by_handle(
+                    conn,
+                    &scope,
+                    handle,
+                    &mut *ledger.borrow_mut(),
+                );
+            }
             let result = code::open_range_scoped(
-                session_connection(db_path, memory_session)?,
+                conn,
                 &scope,
                 required_str(&args, "path")?,
                 required_u32(&args, "line_start")?,
@@ -670,10 +741,18 @@ fn call_tool(
         "repo_map" => {
             let repo = path_arg(&args, "repo_path")?;
             let scope = crate::db::repo_scope(&repo)?;
-            Ok(serde_json::to_value(code::repo_map_scoped(
-                session_connection(db_path, memory_session)?,
-                scope,
-            )?)?)
+            let conn = session_connection(db_path, memory_session)?;
+            let ranked = crate::context::ranked_repo_files(
+                conn,
+                &scope,
+                optional_str(&args, "query"),
+                args.get("token_budget")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1024) as usize,
+            )?;
+            let mut value = serde_json::to_value(code::repo_map_scoped(conn, scope)?)?;
+            crate::context::merge_info(&mut value, ranked);
+            Ok(value)
         }
         "index_status" => {
             let repo = path_arg(&args, "repo_path")?;

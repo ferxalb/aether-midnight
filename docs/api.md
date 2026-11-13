@@ -101,6 +101,28 @@ Available tools are `index_repository`, `refresh_indexed_file`, `search_code`, `
 
 **Code search ordering (0.1.0-rc.5).** `score` and `score_breakdown.lexical_fts` are unchanged and still saturate at 50 for any text match with a BM25 magnitude above about 2.5e-5. Results with equal `score` are now ordered by raw FTS5 BM25 (better first) and only then by path. Before, equal scores were ordered by path alone, so a file with the rarest query term could rank below path-earlier files that matched only common words. Requests remain serial and response IDs/order retain the existing JSON-RPC contract.
 
+**Compact, budgeted code-search results (contract change, 0.2 development).** Design: `docs/design/v0.2-token-savings.md`. MCP `search_code` now returns the `compact-v1` shape by default; `verbose: true` returns the exact previous shape (old CLI output is unchanged). Ranking, evidence classes, result order and `limit` are untouched; only presentation and the budget cut change.
+
+Old (per result, rc.7):
+
+```json
+{"scope":"repo:R:worktree:W","results":[{"path":"src/alpha.rs","line_start":12,"line_end":14,"match_reason":"lexical","index_generation":3,"index_complete":true,"freshness":"fresh","snippet":"12:     let needle = value;\n13: ...","snippet_truncated":false,"estimated_tokens":61,"score":4.2,"score_breakdown":{"exact_path":0,"exact_symbol":0,"lexical_fts":4.2}}],"token_budget":2048,"estimated_tokens":61,"truncated":false,"token_estimator":"midnight-heuristic-v1 (...)"}
+```
+
+New (default):
+
+```json
+{"scope":"repo:R:worktree:W","generation":3,"complete":true,"shape":"compact-v1","results":[{"path":"src/alpha.rs","freshness":"fresh","match_reason":"lexical","symbol":"function outer_function","ranges":[{"lines":"1-14","ref":"src/alpha.rs#1-14@0a1b2c3d4e5f","text":"1: pub fn outer_function(...) {\n2: ...\n12:     let needle = value;"}]}],"token_budget":2048,"estimated_tokens":88,"truncated":false,"token_estimator":"midnight-heuristic-v1 (...)"}
+```
+
+* Hoisted to the response: `generation`, `complete` (formerly per-result `index_generation`, `index_complete`). Removed from each result unless `explain: true` (which adds `score` and `score_breakdown`): `line_start`, `line_end`, `snippet`, `snippet_truncated`, `estimated_tokens`, `index_generation`, `index_complete`, `score`, `score_breakdown`. Kept: `path`, `freshness`, `match_reason`.
+* `ranges` (at most 2 per result, adjacent ones merged) are bounded by the innermost indexed symbol: the symbol's signature line(s) plus a `context_lines` window at the match; without a symbol, the plain window. Text lines are numbered and capped at 200 characters as before.
+* `ref` is a stateless handle `path#start-end@hash12` (first 12 hex characters of the file's content hash). `open_range` accepts `{"ref": ...}` instead of `path`/`line_start`/`line_end` and expands the range (up to 200 lines). If the file changed since the ref was issued, `open_range` returns `stale_handle: true`, `freshness: "stale"`, the current `content_hash` and **no content**; a stale ref is never served as fresh.
+* Budget: `estimated_tokens` of the whole compact response is at most `token_budget` (a heuristic estimate of the serialized JSON). When the budget is short, bodies are reduced in this order — `detail: "signature"` (signature plus the matching line), then `detail: "reference"` (only `lines` and `ref`) — starting with the lowest evidence class and the lowest score per estimated token; the tail is dropped only when even references do not fit. Order is never changed; `truncated` is true whenever anything was reduced or dropped, the index is incomplete, or the result limit was reached.
+* Connection history: a range already sent on this connection with the same content hash is returned as `{"lines","ref","delivered":true}` without text. `fresh_context: true` forces text, the history is cleared on `initialize`, holds at most 512 range hashes, never stores query text, and is lost on restart (the next response simply carries text again).
+* `repo_map` keeps its previous fields and adds a deterministic, ranked, budgeted `files` list (`ln(1+symbols) - 0.1*depth`, plus a bias for `query`; `token_budget` default 1024) with `files_total`, `files_estimated_tokens`, `files_truncated`. Fan-in centrality is not implemented yet.
+* Hybrid and semantic responses keep their `SearchInfo` fields (`mode_used`, `degraded`, `notice`, ...) next to the compact fields.
+
 ## Node.js and Bun client examples
 
 The same no-dependency client example is provided for Node.js and Bun and starts the Rust MCP process. Runtime verification is pending (not run) in the latest benchmark run:

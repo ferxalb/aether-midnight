@@ -1557,6 +1557,7 @@ pub(crate) fn search_code_on(
                 estimated_tokens: 0,
                 score: f64::from(hit.similarity),
                 score_breakdown: breakdown,
+                ..Default::default()
             },
         );
     }
@@ -1657,7 +1658,7 @@ pub(crate) fn search_code_on(
     })
 }
 
-fn code_evidence_class(result: &CodeResult) -> u8 {
+pub(crate) fn code_evidence_class(result: &CodeResult) -> u8 {
     if result.freshness != "fresh" {
         return 0;
     }

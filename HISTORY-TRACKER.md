@@ -2,6 +2,13 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (3) — v0.2 Phase 1: compact, budgeted, handle-based code search results
+
+- Design records for all six v0.2 items are in `docs/design/` (`v0.2-overview.md` and one file per item). Part 1 implements token savings, the watcher and the daemon; memory, semantic quality and Linux/Windows/NPM are design only for Part 2. Web facts in the records are labeled verified / not verified.
+- New `src/context.rs`: MCP `search_code` returns the `compact-v1` shape by default (`verbose: true` restores the old one): symbol-bounded ranges (signature + match window, at most 2 per file, adjacent merged), stateless content-hash handles (`open_range` `ref`, stale handles return no content), a per-connection bounded delivery ledger (hashes only, `fresh_context` override), budget packing that demotes bodies (full → signature → reference) by evidence class and score per token without reordering, and a ranked, budgeted `repo_map` `files` list. Retrieval and ranking code is unchanged; the legacy packer is bypassed (max budget) in the compact path. Contract changes with old and new examples: `docs/api.md`.
+- Harness: `token-report`, `token-compare` (paths/order and token/byte deltas between any two binaries) and an offline `calibrate-tokens` (needs caller-supplied reference counts; otherwise "not measured").
+- Tests written, **not run yet** (CPU rule): `src/context.rs` unit tests, three compact/ranking tests in `src/tests.rs`, and an updated repeat-search assertion in `tests/mcp_search.rs`. `cargo check --locked --all-targets` passes. No measurement has been taken; token and quality numbers come in the final phase.
+
 ## 2026-11-12 (2) — Prepare rc.7, add the rc.7 validation procedure, index paths by trigram
 
 - Version `0.1.0-rc.7` in `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README and `docs/installation.md`; new `docs/release-notes/v0.1.0-rc.7.md`; `docs/release-checklist.md` now lists rc.7 gates (measurement, real-repository, real-client and publication gates open) above the rc.6 campaign; `CHANGELOG.md` and `docs/v0.1-status.md` point at rc.7. No tag, release or publication was made. Downgrade advice (back up before the first rc.7 run) is in `docs/installation.md`.
