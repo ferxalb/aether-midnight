@@ -19,6 +19,7 @@ mod text_index;
 pub mod uninstall;
 pub mod update;
 pub mod ux;
+pub mod watch;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const INDEX_FORMAT_VERSION: u32 = 2;

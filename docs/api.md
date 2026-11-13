@@ -123,6 +123,8 @@ New (default):
 * `repo_map` keeps its previous fields and adds a deterministic, ranked, budgeted `files` list (`ln(1+symbols) - 0.1*depth`, plus a bias for `query`; `token_budget` default 1024) with `files_total`, `files_estimated_tokens`, `files_truncated`. Fan-in centrality is not implemented yet.
 * Hybrid and semantic responses keep their `SearchInfo` fields (`mode_used`, `degraded`, `notice`, ...) next to the compact fields.
 
+**File watcher (0.2 development, opt-in).** Design: `docs/design/v0.2-watcher.md`. With `MIDNIGHT_WATCH=1` (and by default inside the daemon, once it exists) a long-lived process watches each indexed repository with native OS events (FSEvents, inotify, ReadDirectoryChangesW; never polling), refreshes changed files through the single-file path and reconciles once after storms, branch switches, queue overflow and backend errors. `index_status` gains `watcher`: `{state, reason, pending, watches, refresh_count, reconcile_count, overflow_count, error_count, last_error}` where `state` is `off`, `catching_up`, `active`, `degraded` (for example inotify watch limit reached; the reason names the limit) or `unavailable`. Result freshness labels do not depend on the watcher: they come from a content-hash comparison at query time, so an edit is `stale` until it is refreshed. The watcher uses `refresh_watched_file`, which leaves the catalog `complete` flag as it was (the watcher reconciles whenever it could have missed a change); the public `refresh_indexed_file` tool still marks the catalog partial.
+
 ## Node.js and Bun client examples
 
 The same no-dependency client example is provided for Node.js and Bun and starts the Rust MCP process. Runtime verification is pending (not run) in the latest benchmark run:

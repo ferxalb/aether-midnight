@@ -570,6 +570,7 @@ fn call_tool(
                 cancellation,
             )?;
             let mut result = serde_json::to_value(result)?;
+            crate::watch::ensure(db_path, &repo);
             if !cancellation.load(std::sync::atomic::Ordering::Relaxed) {
                 let embedded = (|| -> Result<Option<crate::embed::EmbedReport>> {
                     let Some(settings) = search::index_settings(&repo, policy)? else {
@@ -757,10 +758,14 @@ fn call_tool(
         "index_status" => {
             let repo = path_arg(&args, "repo_path")?;
             let scope = crate::db::repo_scope(&repo)?;
-            Ok(serde_json::to_value(code::index_status_scoped(
+            crate::watch::ensure(db_path, &scope.root);
+            let root = scope.root.clone();
+            let mut value = serde_json::to_value(code::index_status_scoped(
                 session_connection(db_path, memory_session)?,
                 scope,
-            )?)?)
+            )?)?;
+            value["watcher"] = crate::watch::status_json(&root);
+            Ok(value)
         }
         "remember" => {
             let record = if let Some(key) = optional_str(&args, "operation_key") {

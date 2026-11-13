@@ -103,8 +103,12 @@ struct Mcp {
 }
 impl Mcp {
     fn start(bin: &Path, db: &Path) -> Result<Self> {
+        Self::start_with_env(bin, db, &[])
+    }
+    fn start_with_env(bin: &Path, db: &Path, envs: &[(&str, &str)]) -> Result<Self> {
         let started = Instant::now();
         let mut child = Command::new(bin)
+            .envs(envs.iter().copied())
             .arg("--db")
             .arg(db)
             .arg("mcp")
@@ -1030,6 +1034,107 @@ fn calibrate_tokens(samples: &Path, reference: Option<&Path>) -> Result<Value> {
     )
 }
 
+// ---------- watcher measurements (v0.2) ----------
+fn watch_fixture(bin: &Path) -> Result<(tempfile::TempDir, PathBuf, PathBuf)> {
+    let tmp = tempfile::tempdir()?;
+    let repo = tmp.path().join("repo");
+    copy_dir(&Path::new(ROOT).join("benchmark/retrieval_fixture"), &repo)?;
+    let db = tmp.path().join("watch.sqlite3");
+    let (idx, _) = run_cli(
+        bin,
+        &[
+            "--db",
+            db.to_str().unwrap(),
+            "index",
+            "--repo",
+            repo.to_str().unwrap(),
+        ],
+        &[("MIDNIGHT_INDEX_WORKERS", "1")],
+    )?;
+    if idx["complete"] != true {
+        bail!("fixture index incomplete");
+    }
+    Ok((tmp, repo, db))
+}
+
+fn wait_for_watcher(mcp: &mut Mcp, repo: &Path) -> Result<()> {
+    for _ in 0..200 {
+        let (_, v) = mcp.call("index_status", json!({"repo_path":repo}))?;
+        if v["watcher"]["state"] == "active" {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    bail!("watcher never became active")
+}
+
+/// One-file visibility: from the write returning to the first `search_code` that returns the new
+/// token as a fresh result. One request in flight; polling adds up to one search plus 2 ms of
+/// quantization to every sample, so this slightly overstates the latency.
+fn watch_latency(bin: &Path, samples: usize) -> Result<Value> {
+    let (_tmp, repo, db) = watch_fixture(bin)?;
+    let mut mcp = Mcp::start_with_env(
+        bin,
+        &db,
+        &[("MIDNIGHT_WATCH", "1"), ("MIDNIGHT_DAEMON", "0")],
+    )?;
+    wait_for_watcher(&mut mcp, &repo)?;
+    let (mut ms, mut failures) = (vec![], 0);
+    for i in 0..samples {
+        let token = format!("watchprobe{i}marker");
+        let rel = format!("probe_{}.rs", i % 5);
+        std::fs::write(repo.join(&rel), format!("pub fn {token}() {{}}\n"))?;
+        let t0 = Instant::now();
+        let mut seen = false;
+        while t0.elapsed().as_secs_f64() < 5.0 {
+            let (_, v) = mcp.call(
+                "search_code",
+                json!({"repo_path":repo,"query":token,"limit":3,"mode":"lexical"}),
+            )?;
+            if v["results"][0]["path"] == rel.as_str() && v["results"][0]["freshness"] == "fresh" {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if seen {
+            ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        } else {
+            failures += 1;
+        }
+    }
+    let (_, status) = mcp.call("index_status", json!({"repo_path":repo}))?;
+    let usage = mcp.close()?;
+    Ok(
+        json!({"samples":samples,"failures":failures,"visibility":distribution(&ms),
+        "watcher":status["watcher"],"process":usage.json(),
+        "note":"polling quantization (<= one search + 2 ms) is included in each sample"}),
+    )
+}
+
+/// Idle CPU of a watching process: CPU of a session that idles for `seconds` minus CPU of an
+/// identical session closed immediately, divided by the idle window.
+fn watch_idle(bin: &Path, seconds: u64) -> Result<Value> {
+    let run = |idle: u64| -> Result<Usage> {
+        let (_tmp, repo, db) = watch_fixture(bin)?;
+        let mut mcp = Mcp::start_with_env(
+            bin,
+            &db,
+            &[("MIDNIGHT_WATCH", "1"), ("MIDNIGHT_DAEMON", "0")],
+        )?;
+        wait_for_watcher(&mut mcp, &repo)?;
+        std::thread::sleep(std::time::Duration::from_secs(idle));
+        mcp.close()
+    };
+    let baseline = run(0)?;
+    let idle = run(seconds)?;
+    let extra = (idle.cpu_user_s + idle.cpu_sys_s) - (baseline.cpu_user_s + baseline.cpu_sys_s);
+    Ok(
+        json!({"idle_seconds":seconds,"baseline":baseline.json(),"idle_session":idle.json(),
+        "idle_cpu_seconds_over_window":extra,"idle_cpu_fraction_of_one_core":extra / seconds as f64}),
+    )
+}
+
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |n: &str| {
@@ -1073,6 +1178,14 @@ fn main() -> Result<()> {
             flag("--limit").map_or(5, |v| v.parse().unwrap()),
             flag("--samples-output").map(Path::new),
         )?,
+        "watch-latency" => watch_latency(
+            &binary_path(flag("--binary"))?,
+            flag("--samples").map_or(30, |v| v.parse().unwrap()),
+        )?,
+        "watch-idle" => watch_idle(
+            &binary_path(flag("--binary"))?,
+            flag("--seconds").map_or(60, |v| v.parse().unwrap()),
+        )?,
         "token-compare" => {
             token_compare(Path::new(need("--before")?), Path::new(need("--after")?))?
         }
@@ -1087,7 +1200,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F]>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N]>"
         ),
     };
     if let Some(p) = flag("--json-output") {

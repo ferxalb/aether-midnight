@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-12 (4) — v0.2 Phase 2: native file watcher (opt-in until the daemon)
+
+- New `src/watch.rs` on `notify` 8.2.2 (`default-features = false`, `macos_fsevent`); this is the only dependency change of Part 1 and the only `Cargo.lock` change (`cargo add`, one network resolve; later commands keep `--locked`). Native OS events only, no `PollWatcher`, no tick thread: the debounce thread blocks on its channel while idle. Per-path coalescing (40 ms quiet, 200 ms max wait), bounded queue (4,096 events, 512 pending paths) and one incremental reconciliation for storms, branch/index changes, rescan notices, ignore-rule edits, removed directories and backend errors. `.git` stays excluded from indexing; `HEAD`, `index`, `packed-refs` and `refs/heads/**` (also for linked worktrees) signal branch changes. Linux registers per-directory watches after an ignore-aware count and refuses to start (state `degraded`, reason names `fs.inotify.max_user_watches`) instead of half-registering.
+- `code::refresh_watched_file` refreshes one file without clearing the catalog `complete` flag (the public `refresh_indexed_file` is unchanged and still marks it partial). `index_status` reports `watcher` state; enable with `MIDNIGHT_WATCH=1`. Freshness labels are unchanged: they come from query-time hash comparison.
+- Harness: `watch-latency` (visibility p50/p95) and `watch-idle` (idle CPU over a window). Unit tests for debounce, storm collapse, classification and a real-event test are written, **not run**; no latency or CPU number exists yet.
+
 ## 2026-11-12 (3) — v0.2 Phase 1: compact, budgeted, handle-based code search results
 
 - Design records for all six v0.2 items are in `docs/design/` (`v0.2-overview.md` and one file per item). Part 1 implements token savings, the watcher and the daemon; memory, semantic quality and Linux/Windows/NPM are design only for Part 2. Web facts in the records are labeled verified / not verified.

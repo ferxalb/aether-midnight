@@ -351,6 +351,30 @@ pub fn refresh_indexed_file(
     relative_path: &str,
     cancellation: &AtomicBool,
 ) -> Result<FileRefreshReport> {
+    refresh_file_inner(db_path, root, relative_path, cancellation, false)
+}
+
+/// [`refresh_indexed_file`] for a caller that guarantees it has seen every change since the last
+/// complete scan (the file watcher: it reconciles on start, overflow, branch switch and error).
+/// The catalog's `is_complete` flag is left as it was instead of being cleared; a changed file with
+/// a Tree-sitter parse error still clears `structural_complete`. Never call it from a caller that
+/// cannot make that guarantee.
+pub fn refresh_watched_file(
+    db_path: &Path,
+    root: &Path,
+    relative_path: &str,
+    cancellation: &AtomicBool,
+) -> Result<FileRefreshReport> {
+    refresh_file_inner(db_path, root, relative_path, cancellation, true)
+}
+
+fn refresh_file_inner(
+    db_path: &Path,
+    root: &Path,
+    relative_path: &str,
+    cancellation: &AtomicBool,
+    preserve_completeness: bool,
+) -> Result<FileRefreshReport> {
     let started = Instant::now();
     let scope = repo_scope(root)?;
     let requested_relative_path = safe_relative_path(relative_path)?;
@@ -489,6 +513,10 @@ pub fn refresh_indexed_file(
         ),
     };
 
+    let changed_parse_error = matches!(
+        &prepared,
+        Some(p) if matches!(&p.kind, PreparedKind::Changed(f) if f.parse_error)
+    );
     let tx = conn.transaction()?;
     match prepared {
         Some(prepared) => match prepared.kind {
@@ -522,11 +550,35 @@ pub fn refresh_indexed_file(
         }
     }
     let now = now_utc();
-    tx.execute(
-        "UPDATE repositories SET generation=?3,is_complete=0,structural_complete=0,
-         last_index_started=?4,last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
-        params![scope.repo_id, scope.worktree_id, generation as i64, now],
-    )?;
+    if preserve_completeness {
+        tx.execute(
+            "UPDATE repositories SET generation=?3,
+             structural_complete=CASE WHEN ?5=1 THEN 0 ELSE structural_complete END,
+             last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
+            params![
+                scope.repo_id,
+                scope.worktree_id,
+                generation as i64,
+                now,
+                i64::from(changed_parse_error)
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE repositories SET generation=?3,is_complete=0,structural_complete=0,
+             last_index_started=?4,last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
+            params![scope.repo_id, scope.worktree_id, generation as i64, now],
+        )?;
+    }
+    let catalog_complete = preserve_completeness
+        && tx
+            .query_row(
+                "SELECT is_complete FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
+                params![scope.repo_id, scope.worktree_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(false);
     tx.commit()?;
 
     Ok(FileRefreshReport {
@@ -535,14 +587,17 @@ pub fn refresh_indexed_file(
         path: relative_path,
         operation: operation.to_string(),
         generation,
-        catalog_complete: false,
-        reconciliation_required: true,
+        catalog_complete,
+        reconciliation_required: !preserve_completeness,
         reason,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
 }
 
-fn target_is_eligible(root: &Path, relative: &Path) -> Result<std::result::Result<bool, String>> {
+pub(crate) fn target_is_eligible(
+    root: &Path,
+    relative: &Path,
+) -> Result<std::result::Result<bool, String>> {
     let aetherignore = root.join(".aetherignore");
     let mut builder = WalkBuilder::new(root);
     builder
@@ -3265,7 +3320,7 @@ fn has_binary_controls(bytes: &[u8]) -> bool {
         .any(|byte| (*byte < 0x20 && !matches!(*byte, b'\n' | b'\r' | b'\t')) || *byte == 0x7f)
 }
 
-fn is_secret_path(path: &Path) -> bool {
+pub(crate) fn is_secret_path(path: &Path) -> bool {
     if path.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
         [".aws", ".ssh", ".gnupg", ".docker", ".kube"]
@@ -3300,7 +3355,7 @@ fn is_secret_path(path: &Path) -> bool {
         || lower == "known_hosts"
 }
 
-fn is_vcs_metadata_path(path: &Path) -> bool {
+pub(crate) fn is_vcs_metadata_path(path: &Path) -> bool {
     path.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
         // `.midnight` is Midnight's own project storage and must never be indexed.
@@ -3318,7 +3373,7 @@ fn valid_aetherignore(path: &Path, root: &Path) -> bool {
         .is_ok_and(|canonical| canonical.starts_with(root))
 }
 
-fn default_generated_path(path: &Path) -> bool {
+pub(crate) fn default_generated_path(path: &Path) -> bool {
     const DIRS: &[&str] = &[
         ".git",
         ".hg",

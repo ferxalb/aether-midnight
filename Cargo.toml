@@ -38,6 +38,7 @@ ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 rainy-sdk = { version = "=0.6.51", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 hf-hub = { version = "=0.4.3", default-features = false, features = ["ureq", "native-tls"] }
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 
