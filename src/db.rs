@@ -435,11 +435,24 @@ fn migrate(connection: &Connection) -> Result<()> {
 }
 
 fn migrate_memory_origin(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "ALTER TABLE memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'
-            CHECK(origin IN ('user','agent','repo'));
-         ALTER TABLE memories ADD COLUMN dedup_key TEXT;",
-    )?;
+    // Idempotent: a database whose user_version was rewound after migration already has the
+    // columns, and SQLite has no ADD COLUMN IF NOT EXISTS.
+    let has_column = |name: &str| -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name=?1)",
+            [name],
+            |row| row.get(0),
+        )?)
+    };
+    if !has_column("origin")? {
+        connection.execute_batch(
+            "ALTER TABLE memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'
+                CHECK(origin IN ('user','agent','repo'));",
+        )?;
+    }
+    if !has_column("dedup_key")? {
+        connection.execute_batch("ALTER TABLE memories ADD COLUMN dedup_key TEXT;")?;
+    }
     let mut select = connection.prepare(
         "SELECT id,content FROM memories WHERE id>?1 AND deleted_at IS NULL ORDER BY id LIMIT 128",
     )?;
@@ -460,7 +473,7 @@ fn migrate_memory_origin(connection: &Connection) -> Result<()> {
         }
     }
     connection.execute_batch(
-        "CREATE INDEX memories_dedup ON memories(scope,dedup_key) WHERE deleted_at IS NULL;
+        "CREATE INDEX IF NOT EXISTS memories_dedup ON memories(scope,dedup_key) WHERE deleted_at IS NULL;
          UPDATE metadata SET value='10' WHERE key='schema_version';
          PRAGMA user_version=10;",
     )?;

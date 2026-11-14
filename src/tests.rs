@@ -1644,6 +1644,44 @@ fn memory_batch_inserts_all_records_and_indexes_them_together() {
 }
 
 #[test]
+fn memory_origin_migration_is_idempotent_when_version_is_rewound() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("origin-twice.sqlite3");
+    let conn = crate::db::open_db(&path).unwrap();
+    conn.execute(
+        "INSERT INTO memories(scope,kind,content,created_at) VALUES('user:t','source','origin twice','2025-01-01T00:00:00.000000000Z')",
+        [],
+    )
+    .unwrap();
+    // Rewind a fully migrated database; origin, dedup_key and the index already exist.
+    conn.execute_batch(
+        "PRAGMA user_version=9; UPDATE metadata SET value='9' WHERE key='schema_version';",
+    )
+    .unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let conn = crate::db::open_db(&path).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        let (columns, indexes, keyed): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM pragma_table_info('memories') WHERE name IN ('origin','dedup_key')),
+                    (SELECT count(*) FROM sqlite_master WHERE type='index' AND name='memories_dedup'),
+                    (SELECT count(*) FROM memories WHERE dedup_key IS NOT NULL)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((columns, indexes, keyed), (2, 1, 1));
+        conn.execute_batch("PRAGMA user_version=9;").unwrap();
+    }
+    crate::db::open_db(&path).unwrap();
+}
+
+#[test]
 fn operation_ledger_migration_failure_rolls_back_and_retries() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("ledger.sqlite3");
