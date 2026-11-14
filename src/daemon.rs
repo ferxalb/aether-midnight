@@ -180,6 +180,7 @@ pub fn paths(db_path: &Path) -> Result<Paths> {
     let absolute = std::path::absolute(db_path).unwrap_or_else(|_| db_path.to_path_buf());
     let key = crate::db::hash_bytes(absolute.to_string_lossy().as_bytes());
     let key = &key[..8];
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut dir = base_dir()?;
     // `sun_path` is ~104 bytes on macOS and 108 on Linux; stay well inside it.
     if dir.join(format!("d-{key}.sock")).as_os_str().len() > 96 {

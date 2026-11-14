@@ -237,6 +237,8 @@ fn create_private_db_file(path: &Path) -> Result<()> {
 }
 
 fn set_private_db_permissions(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
