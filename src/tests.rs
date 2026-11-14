@@ -145,7 +145,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -234,7 +234,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -312,7 +312,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
