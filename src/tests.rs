@@ -397,7 +397,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 9);
+    assert_eq!(reopened_version, 10);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()
