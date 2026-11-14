@@ -780,3 +780,21 @@ fn sustained_rate_limiting_still_returns_every_vector_in_order() {
         "12 batches, each rate limited once then served"
     );
 }
+
+#[test]
+fn interactive_query_retries_timeout_once_and_reports_the_error_class() {
+    let mock = Mock::start(|_, request| {
+        Reply::Delayed(
+            Duration::from_millis(1200),
+            Box::new(ok_response(request, DIMS)),
+        )
+    });
+    let mut client = embedder(Provider::OpenRouter, &mock)
+        .interactive_queries(500)
+        .unwrap();
+    client.retry_backoff = Duration::ZERO;
+    let error = client.embed(TextKind::Query, &["slow query"]).unwrap_err();
+    assert!(error.to_string().starts_with("timeout:"), "{error:#}");
+    assert_eq!(kind_of(error), CloudErrorKind::Timeout);
+    assert_eq!(mock.count(), 2);
+}

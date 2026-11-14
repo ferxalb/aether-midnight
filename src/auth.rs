@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -194,7 +195,12 @@ impl Authenticator {
             return None;
         }
         let meta = fs::metadata(&self.path).ok()?;
-        let stamp = (meta.modified().ok()?, meta.len(), meta.ino());
+        #[cfg(unix)]
+        let identity = meta.ino();
+        // No inode on this platform: modified time and length alone detect registry changes.
+        #[cfg(not(unix))]
+        let identity = 0u64;
+        let stamp = (meta.modified().ok()?, meta.len(), identity);
         let mut cache = self.cache.lock().ok()?;
         if cache.0 != Some(stamp) {
             match load(&self.path) {

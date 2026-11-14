@@ -10,16 +10,16 @@ Midnight indexes your repositories on your machine so you, or an AI agent like C
 - **Built for agents.** One command registers it as an MCP server in Claude Code, Claude Desktop, or Codex.
 - **Optional semantic search.** Use a local model, or a cloud provider you choose (OpenRouter or Rainy).
 
-> **Status:** prerelease (`v0.1.0-rc.7`). Commands and output fields may still change. macOS is the supported platform; **Linux and Windows are experimental** and not stable (see [docs/platforms.md](docs/platforms.md)).
+> **Status:** prerelease (`v0.1.0-rc.8`). Commands and output fields may still change. macOS is the supported platform; **Linux and Windows are experimental** and not stable (see [docs/platforms.md](docs/platforms.md)).
 
-rc.7 is the candidate for the stable-readiness review; it migrates the database to schema 9 (older versions cannot open it afterwards). See the [release notes](docs/release-notes/v0.1.0-rc.7.md) and [validation checklist](docs/release-checklist.md); stable status is not automatic.
+rc.8 is the candidate for the stable-readiness review; it migrates the database to schema 10 (older versions cannot open it afterwards). See the [release notes](docs/release-notes/v0.1.0-rc.8.md) and [validation checklist](docs/release-checklist.md); stable status is not automatic.
 
 ## Install
 
 **macOS (Apple silicon or Intel).** No Rust or sudo needed:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.7/install.sh | sh -s -- --no-runtime
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.8/install.sh | sh -s -- --no-runtime
 ```
 
 This verifies the download's SHA-256 and installs `aether-midnight` to `~/.local/bin`, plus a shorter `midnight` alias. Add `~/.local/bin` to your `PATH` if it is not there yet. The binary is not signed or notarized; if macOS blocks it, see [docs/installation.md](docs/installation.md).

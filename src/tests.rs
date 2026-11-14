@@ -145,7 +145,7 @@ fn migrations_and_interrupted_transaction_recover() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let tx = conn.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES('uncommitted-test','x')",
@@ -178,7 +178,7 @@ fn migrations_and_interrupted_transaction_recover() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "9");
+    assert_eq!(schema, "10");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -234,7 +234,7 @@ fn trigram_format_migration_discards_unrebuildable_postings_and_marks_reindex_ne
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let (format, old_table, new_table, files, complete): (String, bool, bool, i64, bool) = migrated
         .query_row(
             "SELECT
@@ -312,7 +312,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let version: i64 = migrated
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let schema_version: String = migrated
         .query_row(
             "SELECT value FROM metadata WHERE key='schema_version'",
@@ -320,7 +320,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "9");
+    assert_eq!(schema_version, "10");
     let (records, source_uri, source_link, supersedes_link, deleted_at, content_column_is_null): (
         i64,
         String,
@@ -397,7 +397,7 @@ fn schema_two_memory_fts_migration_preserves_history_rebuilds_scope_tokens_and_i
     let reopened_version: i64 = reopened
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(reopened_version, 9);
+    assert_eq!(reopened_version, 10);
     assert_eq!(
         memory::recall(&database, "user:alice", "morning review", None, 10)
             .unwrap()
@@ -1644,6 +1644,44 @@ fn memory_batch_inserts_all_records_and_indexes_them_together() {
 }
 
 #[test]
+fn memory_origin_migration_is_idempotent_when_version_is_rewound() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("origin-twice.sqlite3");
+    let conn = crate::db::open_db(&path).unwrap();
+    conn.execute(
+        "INSERT INTO memories(scope,kind,content,created_at) VALUES('user:t','source','origin twice','2025-01-01T00:00:00.000000000Z')",
+        [],
+    )
+    .unwrap();
+    // Rewind a fully migrated database; origin, dedup_key and the index already exist.
+    conn.execute_batch(
+        "PRAGMA user_version=9; UPDATE metadata SET value='9' WHERE key='schema_version';",
+    )
+    .unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let conn = crate::db::open_db(&path).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        let (columns, indexes, keyed): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT count(*) FROM pragma_table_info('memories') WHERE name IN ('origin','dedup_key')),
+                    (SELECT count(*) FROM sqlite_master WHERE type='index' AND name='memories_dedup'),
+                    (SELECT count(*) FROM memories WHERE dedup_key IS NOT NULL)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((columns, indexes, keyed), (2, 1, 1));
+        conn.execute_batch("PRAGMA user_version=9;").unwrap();
+    }
+    crate::db::open_db(&path).unwrap();
+}
+
+#[test]
 fn operation_ledger_migration_failure_rolls_back_and_retries() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("ledger.sqlite3");
@@ -2030,4 +2068,193 @@ fn trigram_path_candidates_equal_the_ascii_folding_scan_through_changes() {
         )
         .unwrap();
     assert_eq!(stale, 0, "deleted paths leave the trigram index");
+}
+
+// ---------- v0.2 token savings (context.rs); written in Phase 1, first run in the final phase ----------
+
+fn compact_fixture(temp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let database = temp.path().join("compact.sqlite3");
+    let repo = new_repo(temp, "compact-repo");
+    let filler = (0..14)
+        .map(|n| format!("    let filler_{n} = value + {n};\n"))
+        .collect::<String>();
+    fs::write(
+        repo.join("src/alpha.rs"),
+        format!(
+            "pub fn outer_function(value: u32) -> u32 {{\n{filler}    let needle_marker_value = value;\n    needle_marker_value\n}}\n"
+        ),
+    )
+    .unwrap();
+    for index in 0..8 {
+        fs::write(
+            repo.join("src").join(format!("shared_{index}.rs")),
+            format!("pub fn shared_fn_{index}() -> &'static str {{ \"shared_token\" }}\n"),
+        )
+        .unwrap();
+    }
+    run_index(&database, &repo);
+    (database, repo)
+}
+
+fn compact_opts(budget: usize, fresh: bool) -> crate::context::CompactOptions {
+    crate::context::CompactOptions {
+        token_budget: budget,
+        limit: 10,
+        fresh_context: fresh,
+        explain: false,
+    }
+}
+
+#[test]
+fn compact_search_bounds_ranges_by_symbol_and_deduplicates_with_the_ledger() {
+    use crate::context::{self, MemoryLedger};
+    let temp = TempDir::new().unwrap();
+    let (database, repo) = compact_fixture(&temp);
+    let conn = db::open_db(&database).unwrap();
+    let scope = db::repo_scope(&repo).unwrap();
+    let search =
+        || code::search_code_scoped(&conn, &scope, "needle_marker_value", 10, 8192, 3).unwrap();
+    let mut ledger = MemoryLedger::default();
+    let first = context::compact_search(
+        &conn,
+        &scope,
+        search(),
+        "needle_marker_value",
+        3,
+        &compact_opts(2048, false),
+        &mut ledger,
+    )
+    .unwrap();
+    assert_eq!(first["results"][0]["path"], "src/alpha.rs");
+    assert_eq!(first["results"][0]["freshness"], "fresh");
+    assert!(
+        first["results"][0]["symbol"]
+            .as_str()
+            .unwrap()
+            .contains("outer_function")
+    );
+    let range = &first["results"][0]["ranges"][0];
+    let text = range["text"].as_str().unwrap();
+    assert!(
+        text.contains("outer_function"),
+        "signature line is included: {text}"
+    );
+    assert!(text.contains("needle_marker_value"));
+    assert!(
+        !text.contains("filler_5"),
+        "unrelated body lines are not sent: {text}"
+    );
+    assert!(first["generation"].as_u64().unwrap() >= 1);
+    assert!(
+        first.get("results").unwrap()[0]
+            .get("score_breakdown")
+            .is_none()
+    );
+    let handle = range["ref"].as_str().unwrap().to_string();
+
+    // Same content, same connection: a reference instead of text.
+    let second = context::compact_search(
+        &conn,
+        &scope,
+        search(),
+        "needle_marker_value",
+        3,
+        &compact_opts(2048, false),
+        &mut ledger,
+    )
+    .unwrap();
+    assert_eq!(second["results"][0]["ranges"][0]["delivered"], true);
+    assert!(second["results"][0]["ranges"][0].get("text").is_none());
+    // fresh_context forces the text again.
+    let forced = context::compact_search(
+        &conn,
+        &scope,
+        search(),
+        "needle_marker_value",
+        3,
+        &compact_opts(2048, true),
+        &mut ledger,
+    )
+    .unwrap();
+    assert!(forced["results"][0]["ranges"][0]["text"].is_string());
+
+    // A handle is fresh while the file is unchanged and stale (without content) afterwards.
+    let opened = context::open_by_handle(&conn, &scope, &handle, &mut ledger).unwrap();
+    assert!(opened.get("stale_handle").is_none());
+    assert!(
+        opened["content"]
+            .as_str()
+            .unwrap()
+            .contains("needle_marker_value")
+    );
+    fs::write(repo.join("src/alpha.rs"), "pub fn outer_function() {}\n").unwrap();
+    let stale = context::open_by_handle(&conn, &scope, &handle, &mut ledger).unwrap();
+    assert_eq!(stale["stale_handle"], true);
+    assert_eq!(stale["freshness"], "stale");
+    assert!(stale.get("content").is_none());
+}
+
+#[test]
+fn compact_search_keeps_order_and_the_hard_budget_at_every_budget() {
+    use crate::context::{self, MemoryLedger};
+    let temp = TempDir::new().unwrap();
+    let (database, repo) = compact_fixture(&temp);
+    let conn = db::open_db(&database).unwrap();
+    let scope = db::repo_scope(&repo).unwrap();
+    let paths = |value: &serde_json::Value| -> Vec<String> {
+        value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let run = |budget: usize| {
+        let response =
+            code::search_code_scoped(&conn, &scope, "shared_token", 10, 8192, 3).unwrap();
+        context::compact_search(
+            &conn,
+            &scope,
+            response,
+            "shared_token",
+            3,
+            &compact_opts(budget, true),
+            &mut MemoryLedger::default(),
+        )
+        .unwrap()
+    };
+    let full = run(8192);
+    let full_paths = paths(&full);
+    assert!(full_paths.len() >= 8);
+    for budget in (64..=1024).step_by(32) {
+        let value = run(budget);
+        assert!(
+            value["estimated_tokens"].as_u64().unwrap() as usize <= budget,
+            "budget {budget}: {}",
+            value["estimated_tokens"]
+        );
+        let got = paths(&value);
+        assert_eq!(
+            got,
+            full_paths[..got.len()],
+            "order is a prefix at budget {budget}"
+        );
+    }
+}
+
+#[test]
+fn ranked_repo_files_are_deterministic_budgeted_and_query_biased() {
+    use crate::context;
+    let temp = TempDir::new().unwrap();
+    let (database, repo) = compact_fixture(&temp);
+    let conn = db::open_db(&database).unwrap();
+    let scope = db::repo_scope(&repo).unwrap();
+    let a = context::ranked_repo_files(&conn, &scope, None, 1024).unwrap();
+    let b = context::ranked_repo_files(&conn, &scope, None, 1024).unwrap();
+    assert_eq!(a, b);
+    let small = context::ranked_repo_files(&conn, &scope, None, 64).unwrap();
+    assert!(small["files_estimated_tokens"].as_u64().unwrap() <= 64);
+    assert_eq!(small["files_truncated"], true);
+    let biased = context::ranked_repo_files(&conn, &scope, Some("shared_fn_3"), 1024).unwrap();
+    assert_eq!(biased["files"][0]["path"], "src/shared_3.rs");
 }

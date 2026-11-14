@@ -35,3 +35,11 @@ macOS are not promised there. Do not rely on it for important data.
 - Bun: pending (not run)
 - Windows: pending (not run)
 - Linux ARM: pending (not run)
+
+## v0.2 experimental platform work
+
+Linux glibc x86-64 and ARM64 archive build and update paths are **NOT RUN** on Linux.
+ORT 1.23.2 archive and library bytes were checked against the committed pins. Actual runtime
+loading, minimum glibc and vector parity are **OPEN**. Windows x86-64 and ARM64 containment,
+archive assembly and ORT install are **NOT RUN**. User-only ACLs and named-pipe daemon
+transport are **OPEN**.

@@ -16,6 +16,79 @@
 
 This page retains the committed Linux benchmark evidence. A separate native macOS run and measured before/after writer optimization are documented in [the performance comparison](performance-comparison.md). The committed benchmark files are historical evidence and are not overwritten by local campaigns.
 
+## 2026-11-13: rc.8 paired measurements (macOS x86_64)
+
+**Conditions.** Single host: `x86_64`, macOS 26.7.1, 12 logical CPUs, warm file cache, shared host (no other
+cargo or rustc process; background services not controlled). "Before" is the **published rc.7 universal2
+build** (tag `v0.1.0-rc.7` equals base commit `4427450`; archive and inner `SHA256SUMS` verified; `--version`
+printed `0.1.0-rc.7`). "After" is a **local** `cargo build --release --locked` of the rc.8 tree, so the two
+builds are not identical build pipelines. Measurements ran at normal priority, one process at a time,
+with an isolated config directory. `pmset -g therm` reported no thermal warning and `CPU_Speed_Limit = 100`
+before and after every group; no number was discarded. Raw outputs are kept in ignored local storage. Nothing
+here uses the local model, the ONNX runtime, or any provider.
+
+**Frozen quality (PASS).** Code `retrieval-quality` at limits 5 and 10 (n=51 queries, both strategies) and
+`memory-quality --split all --repeats 1` on `memory_quality_v2`, `memory_quality_single_term_v1`,
+`memory_retrieval_adversarial_v1`, `memory_quality_v1` and `memory_quality_v3`: every per-query rank, top-10 list
+and aggregate is identical between rc.7 and rc.8 (only wall-clock fields differ). Default code strategy MRR
+0.978261 (unicode61 0.804348); memory MRR v2 0.8917, single-term 0.8968, adversarial 1.0, v1 0.9167, v3 0.4762
+(v3 R@5 0.571, n=7 positive and 3 negative queries; weak on this suite and unchanged). Namespace leaks 0 on all.
+`memory_quality_v3` runs on rc.7, so its before side is measured. The one rc.8 difference is the new duplicate
+detection field: rc.7 0 of 1 labeled pair, rc.8 1 of 1 (n=1, anecdotal). The two `retrieval-quality` harness
+runs per binary took 6.7 to 6.9 s (rc.7) and 6.9 to 7.0 s (rc.8) wall (n=2 per side, harness included): rc.8 is
+not faster there.
+
+**Token savings** (`token-report`, 51 queries, estimator `midnight-heuristic-v1`, an estimate and not a
+provider-billed count). Paths and order are identical for all 51 queries. `--limit 5` and `--limit 10`
+produced identical reports.
+
+| Metric | rc.7 | rc.8 | Change |
+| --- | --- | --- | --- |
+| Estimated tokens, total | 41,422 | 30,115 | -27.3% |
+| Estimated tokens p50 / p95 / max per query | 919 / 1,004 / 1,004 | 645 / 773 / 773 | lower |
+| Response bytes, total | 96,897 | 67,344 | -30.5% |
+| Response bytes p50 / p95 / max | 2,118 / 2,436 / 2,436 | 1,406 / 1,827 / 1,827 | lower |
+
+**Regression:** 5 of 51 queries use more tokens in rc.8 (the four per-language negative queries and the
+mid-token-fragment query): 146 versus 119 estimated tokens and 384 versus 332 bytes each, because the compact
+shape adds fixed per-response fields to an empty result.
+
+**Watcher** (rc.8 only, no rc.7 equivalent). `watch-latency`, n=30: one-file visibility p50 55.5 ms, p95 58.9 ms,
+p99 59.2 ms, 0 failures; the samples include polling quantization (at most one search plus 2 ms). The p95 goal of
+150 ms or less was met in this run (a goal, not a guarantee). `watch-idle`, 60 s: about 0.0006 CPU-seconds
+(roughly 0.001% of one core); process peak RSS 15.4 MB (single run).
+
+**Daemon** (`daemon-measure`, 8 clients, 50 writes each, 200 requests; rc.8 only).
+
+| Measure | In-process | Via daemon |
+| --- | --- | --- |
+| `database is locked` errors / total errors | 0 / 0 | 0 / 0 |
+| Wall time for 8 x 50 writes | 0.751 s | 0.268 s |
+| `search_code` p50 / p95 / p99 (n=200) | 0.552 / 0.624 / 0.738 ms | 0.661 / 0.767 / 0.862 ms |
+
+The daemon did not avoid lock errors here because the 5 s busy timeout already absorbed this load; the measured
+benefit is write throughput. **Regression:** each request through the daemon costs about 0.11 ms more at p50
+(about +20%). Cold start (spawn to first status answer, includes database open) 139 ms (n=1). Daemon RSS
+read with `ps` is **current, not peak**: 12.5 MiB after start, 16.1 MiB after the load, 0.39 CPU-seconds over
+the load (10 ms resolution). Local-model RSS and one-daemon-versus-N-process memory are **not measured**.
+
+**Migration** (temporary copy created by the rc.7 binary; four memories and a four-file repository indexed;
+no real data). Schema 9 to 10 on first rc.8 open: 0.06 s wall for the whole process (n=1, tiny database; not a
+claim about large databases). Memory ids and contents unchanged (4 of 4), 24 symbols and 4 files unchanged,
+legacy rows default to origin `agent`, `verify-integrity` ok, a code search returns the same four paths as rc.7
+did before migration. rc.7 refuses the migrated copy (`database schema 10 is newer than this binary supports (9)`,
+exit 1); the pre-migration copy still opens with rc.7. An rc.7 JSONL export imports into rc.8 (4 of 4, no
+dropped links), and the rc.8 re-export imports into rc.7.
+
+**Semantic suite** (`semantic-code-quality`). The harness has no mock-provider mode, so only the lexical baseline
+was run, and it is identical on both binaries: dev n=3 MRR 0.333; held-out n=4 MRR 0.5; protected rank failures 0.
+Semantic and hybrid modes, local-model quality, load time and RSS, and cloud availability are **not measured**.
+
+**Smoke.** `--version` and `doctor` (required checks pass; the two failing checks are the optional cloud
+providers without credentials), and `mcp` `initialize` plus `tools/list` (14 tools) both through the
+auto-started daemon (about 0.14 s including daemon start) and in-process with `--no-daemon` (about 0.06 s).
+The automatic fallback after a daemon failure was not exercised.
+
 ## 2026-11-12: path trigram index (schema 9)
 
 Profiling the code workload of the 2026-11-11 section showed that every lexical `search_code`

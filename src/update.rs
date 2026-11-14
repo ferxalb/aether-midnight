@@ -167,7 +167,12 @@ fn ser_version<S: serde::Serializer>(v: &Version, s: S) -> Result<S::Ok, S::Erro
 }
 
 pub fn archive_name(version: &Version) -> String {
-    format!("aether-midnight-{version}-macos-universal2")
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x64-gnu",
+        ("linux", "aarch64") => "linux-arm64-gnu",
+        _ => "macos-universal2",
+    };
+    format!("aether-midnight-{version}-{platform}")
 }
 
 /// Releases in `list` (the GitHub `releases` JSON array) that carry this platform's archive and
@@ -454,6 +459,20 @@ pub fn installed_binary() -> Result<PathBuf> {
     Ok(exe)
 }
 
+/// The shim marks child processes and the executable path also identifies direct npm launches.
+pub fn npm_managed() -> bool {
+    std::env::var_os("MIDNIGHT_NPM_MANAGED").is_some()
+        || std::env::current_exe().is_ok_and(|path| {
+            let mut components = path.components();
+            components.any(|part| part.as_os_str() == "node_modules")
+                && components.any(|part| {
+                    part.as_os_str()
+                        .to_string_lossy()
+                        .starts_with("aether-midnight-")
+                })
+        })
+}
+
 fn is_cargo_output(path: &Path) -> bool {
     let parts: Vec<_> = path
         .components()
@@ -473,8 +492,13 @@ pub struct Applied {
 
 /// Download, verify and swap in `release`. `target` is the installed binary.
 pub fn apply(release: &Release, target: &Path) -> Result<Applied> {
-    if !cfg!(target_os = "macos") && std::env::var_os(API_ENV).is_none() {
-        bail!("update installs the macOS Universal 2 build; on this platform rebuild from source");
+    if npm_managed() {
+        bail!("this installation is managed by npm; use npm update");
+    }
+    if !cfg!(any(target_os = "macos", target_os = "linux")) && std::env::var_os(API_ENV).is_none() {
+        bail!(
+            "update is available for macOS and glibc Linux archives; rebuild from source on this platform"
+        );
     }
     let (_, hosts) = api_base()?;
     let sha_file = fetch(

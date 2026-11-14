@@ -335,6 +335,7 @@ fn cli_memory_export_import_round_trips_links_atomically() {
             .clone()
     };
     let new_source = by_content("Retry budget is 3 attempts");
+    assert_eq!(new_source["origin"], "user");
     let old_fact = by_content("Retries: 3");
     let new_fact = by_content("Retries: 5");
     assert_eq!(old_fact["source_id"], new_source["id"]);

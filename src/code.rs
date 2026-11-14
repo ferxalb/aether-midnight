@@ -115,7 +115,7 @@ pub struct IndexStatus {
     pub skipped: BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CodeResult {
     pub path: String,
     pub line_start: Option<u32>,
@@ -129,6 +129,13 @@ pub struct CodeResult {
     pub estimated_tokens: usize,
     pub score: f64,
     pub score_breakdown: BTreeMap<String, f64>,
+    /// Source text the excerpt was cut from, kept only so the compact renderer
+    /// (`context.rs`) can build symbol-bounded ranges without reading the file twice.
+    #[serde(skip)]
+    pub source: Option<std::sync::Arc<str>>,
+    /// Hash of `source`; empty when the source was not read.
+    #[serde(skip)]
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -344,6 +351,30 @@ pub fn refresh_indexed_file(
     relative_path: &str,
     cancellation: &AtomicBool,
 ) -> Result<FileRefreshReport> {
+    refresh_file_inner(db_path, root, relative_path, cancellation, false)
+}
+
+/// [`refresh_indexed_file`] for a caller that guarantees it has seen every change since the last
+/// complete scan (the file watcher: it reconciles on start, overflow, branch switch and error).
+/// The catalog's `is_complete` flag is left as it was instead of being cleared; a changed file with
+/// a Tree-sitter parse error still clears `structural_complete`. Never call it from a caller that
+/// cannot make that guarantee.
+pub fn refresh_watched_file(
+    db_path: &Path,
+    root: &Path,
+    relative_path: &str,
+    cancellation: &AtomicBool,
+) -> Result<FileRefreshReport> {
+    refresh_file_inner(db_path, root, relative_path, cancellation, true)
+}
+
+fn refresh_file_inner(
+    db_path: &Path,
+    root: &Path,
+    relative_path: &str,
+    cancellation: &AtomicBool,
+    preserve_completeness: bool,
+) -> Result<FileRefreshReport> {
     let started = Instant::now();
     let scope = repo_scope(root)?;
     let requested_relative_path = safe_relative_path(relative_path)?;
@@ -482,6 +513,10 @@ pub fn refresh_indexed_file(
         ),
     };
 
+    let changed_parse_error = matches!(
+        &prepared,
+        Some(p) if matches!(&p.kind, PreparedKind::Changed(f) if f.parse_error)
+    );
     let tx = conn.transaction()?;
     match prepared {
         Some(prepared) => match prepared.kind {
@@ -515,11 +550,35 @@ pub fn refresh_indexed_file(
         }
     }
     let now = now_utc();
-    tx.execute(
-        "UPDATE repositories SET generation=?3,is_complete=0,structural_complete=0,
-         last_index_started=?4,last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
-        params![scope.repo_id, scope.worktree_id, generation as i64, now],
-    )?;
+    if preserve_completeness {
+        tx.execute(
+            "UPDATE repositories SET generation=?3,
+             structural_complete=CASE WHEN ?5=1 THEN 0 ELSE structural_complete END,
+             last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
+            params![
+                scope.repo_id,
+                scope.worktree_id,
+                generation as i64,
+                now,
+                i64::from(changed_parse_error)
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE repositories SET generation=?3,is_complete=0,structural_complete=0,
+             last_index_started=?4,last_index_finished=?4 WHERE repo_id=?1 AND worktree_id=?2",
+            params![scope.repo_id, scope.worktree_id, generation as i64, now],
+        )?;
+    }
+    let catalog_complete = preserve_completeness
+        && tx
+            .query_row(
+                "SELECT is_complete FROM repositories WHERE repo_id=?1 AND worktree_id=?2",
+                params![scope.repo_id, scope.worktree_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(false);
     tx.commit()?;
 
     Ok(FileRefreshReport {
@@ -528,14 +587,17 @@ pub fn refresh_indexed_file(
         path: relative_path,
         operation: operation.to_string(),
         generation,
-        catalog_complete: false,
-        reconciliation_required: true,
+        catalog_complete,
+        reconciliation_required: !preserve_completeness,
         reason,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
 }
 
-fn target_is_eligible(root: &Path, relative: &Path) -> Result<std::result::Result<bool, String>> {
+pub(crate) fn target_is_eligible(
+    root: &Path,
+    relative: &Path,
+) -> Result<std::result::Result<bool, String>> {
     let aetherignore = root.join(".aetherignore");
     let mut builder = WalkBuilder::new(root);
     builder
@@ -2483,10 +2545,12 @@ fn make_results(
     for candidate in candidates.into_iter().take(limit) {
         let abs = scope.root.join(&candidate.path);
         let checked = current_text(&scope.root, &abs).ok();
+        let mut source: Option<std::sync::Arc<str>> = None;
         let (freshness, snippet, line_start, line_end, line_capped) =
             if let Some((text, current_hash)) = checked {
                 if current_hash == candidate.hash {
                     let (start, end, snippet, capped) = excerpt(&text, query, context_lines);
+                    source = Some(std::sync::Arc::from(text));
                     (
                         "fresh".to_string(),
                         Some(snippet),
@@ -2535,6 +2599,12 @@ fn make_results(
             estimated_tokens: 0,
             score: candidate.exact_path + candidate.exact_symbol + candidate.lexical,
             score_breakdown: breakdown,
+            content_hash: if source.is_some() {
+                candidate.hash.clone()
+            } else {
+                String::new()
+            },
+            source,
         });
     }
     Ok(out)
@@ -2656,6 +2726,8 @@ fn cold_search(
             estimated_tokens: 0,
             score: if path_hit { 60.0 } else { 25.0 },
             score_breakdown: breakdown,
+            source: Some(std::sync::Arc::from(text.0.as_str())),
+            content_hash: text.1.clone(),
         });
         if !results.is_empty() {
             break;
@@ -2915,15 +2987,26 @@ pub(crate) fn repo_map_scoped(conn: &Connection, scope: RepoScope) -> Result<Rep
 }
 
 pub(crate) fn current_text(root: &Path, path: &Path) -> Result<(String, String)> {
+    #[cfg(windows)]
+    let relative = path
+        .strip_prefix(root)
+        .context("path escapes repository root")?;
+    #[cfg(not(windows))]
     let canonical = path.canonicalize()?;
-    if !canonical.starts_with(root) {
-        bail!("path escapes repository root");
-    }
-    let metadata = fs::symlink_metadata(&canonical)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_FILE_BYTES {
-        bail!("source is a symlink, not a file, or exceeds the 1 MiB read limit");
-    }
-    let relative = canonical.strip_prefix(root)?;
+    #[cfg(not(windows))]
+    let relative = {
+        if !canonical.starts_with(root) {
+            bail!("path escapes repository root");
+        }
+        let metadata = fs::symlink_metadata(&canonical)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_FILE_BYTES
+        {
+            bail!("source is a symlink, not a file, or exceeds the 1 MiB read limit");
+        }
+        canonical.strip_prefix(root)?
+    };
     let bytes = read_limited_from_root(root, relative, MAX_FILE_BYTES as usize + 1, None, &None)?;
     if bytes.len() > MAX_FILE_BYTES as usize || bytes.contains(&0) || has_binary_controls(&bytes) {
         bail!("source is binary or oversized");
@@ -2977,7 +3060,12 @@ fn excerpt(text: &str, query: &str, context_lines: usize) -> (u32, u32, String, 
 
 /// Numbered snippet lines with each line capped at `MAX_SNIPPET_LINE_CHARS`. `match_column`
 /// centers the cut of the first line on the match so the matched text stays visible.
-fn snippet_lines(text: &str, start: u32, end: u32, match_column: Option<usize>) -> (String, bool) {
+pub(crate) fn snippet_lines(
+    text: &str,
+    start: u32,
+    end: u32,
+    match_column: Option<usize>,
+) -> (String, bool) {
     let mut capped = false;
     let lines = text
         .lines()
@@ -3090,7 +3178,8 @@ pub(crate) fn pack_context(
     (packed, used, truncated)
 }
 
-fn estimate_tokens(text: &str) -> usize {
+/// Project token estimate (`midnight-heuristic-v1`); an estimate, not a model tokenizer.
+pub fn estimate_tokens(text: &str) -> usize {
     let mut tokens = 0usize;
     let mut identifier_bytes = 0usize;
     for character in text.chars() {
@@ -3199,11 +3288,114 @@ fn read_limited_from_root(
         let file = unsafe { File::from_raw_fd(descriptor) };
         read_bounded(file, limit, cancellation, stage_hook)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let file = open_windows_source(root, relative)?;
+        read_bounded(file, limit, cancellation, stage_hook)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (root, relative, limit, cancellation, stage_hook);
         bail!("safe repository-relative file access requires Unix openat support on this build")
     }
+}
+
+#[cfg(windows)]
+fn open_windows_source(root: &Path, relative: &Path) -> Result<File> {
+    use std::os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW,
+    };
+
+    let open = |path: &Path| -> Result<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("repository path contains a reparse point");
+        }
+        Ok(file)
+    };
+    let final_path = |file: &File| -> Result<PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        let mut buffer = vec![0u16; 32_768];
+        // SAFETY: the handle remains open, and the buffer is valid for its reported length.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        } as usize;
+        if len == 0 {
+            return Err(std::io::Error::last_os_error()).context("resolve Windows source handle");
+        }
+        if len >= buffer.len() {
+            bail!("Windows source handle path exceeds the supported length");
+        }
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])))
+    };
+
+    let mut pinned = vec![open(root)?];
+    let root = final_path(&pinned[0])?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            bail!("source path must stay beneath repository root");
+        };
+        let name_text = name.to_string_lossy();
+        let stem = name_text
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_ascii_uppercase();
+        if name_text.contains(':')
+            || name_text.ends_with(['.', ' '])
+            || matches!(
+                stem.as_str(),
+                "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+            )
+            || ["COM", "LPT"].iter().any(|prefix| {
+                stem.strip_prefix(prefix).is_some_and(|suffix| {
+                    matches!(
+                        suffix,
+                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                    )
+                })
+            })
+        {
+            bail!("source path contains a Windows device or stream name");
+        }
+        if pinned.len() > 128 {
+            bail!("source path has excessive directory depth");
+        }
+        current.push(name);
+        let handle = open(&current)?;
+        let final_name = final_path(&handle)?;
+        // The OS returns canonical spelling for both open handles. Use a component comparison
+        // so case-sensitive Windows directories cannot alias a different root.
+        if !final_name.starts_with(&root) || final_name == root {
+            bail!("Windows source handle escaped the repository root");
+        }
+        current = final_name;
+        pinned.push(handle);
+    }
+    if pinned.len() == 1 {
+        bail!("source path is empty");
+    }
+    let file = pinned.pop().expect("source handle was opened");
+    if !file.metadata()?.is_file() {
+        bail!("source path is not a regular file");
+    }
+    Ok(file)
 }
 
 fn read_bounded(
@@ -3242,7 +3434,7 @@ fn has_binary_controls(bytes: &[u8]) -> bool {
         .any(|byte| (*byte < 0x20 && !matches!(*byte, b'\n' | b'\r' | b'\t')) || *byte == 0x7f)
 }
 
-fn is_secret_path(path: &Path) -> bool {
+pub(crate) fn is_secret_path(path: &Path) -> bool {
     if path.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
         [".aws", ".ssh", ".gnupg", ".docker", ".kube"]
@@ -3277,7 +3469,7 @@ fn is_secret_path(path: &Path) -> bool {
         || lower == "known_hosts"
 }
 
-fn is_vcs_metadata_path(path: &Path) -> bool {
+pub(crate) fn is_vcs_metadata_path(path: &Path) -> bool {
     path.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
         // `.midnight` is Midnight's own project storage and must never be indexed.
@@ -3295,7 +3487,7 @@ fn valid_aetherignore(path: &Path, root: &Path) -> bool {
         .is_ok_and(|canonical| canonical.starts_with(root))
 }
 
-fn default_generated_path(path: &Path) -> bool {
+pub(crate) fn default_generated_path(path: &Path) -> bool {
     const DIRS: &[&str] = &[
         ".git",
         ".hg",

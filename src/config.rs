@@ -76,6 +76,8 @@ pub struct Settings {
     pub upload_consent: Option<String>,
     #[serde(default)]
     pub validated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_timeout_ms: Option<u64>,
 }
 
 impl Settings {
@@ -88,6 +90,7 @@ impl Settings {
             endpoint: None,
             upload_consent: None,
             validated_at: None,
+            embed_timeout_ms: None,
         }
     }
 
@@ -275,9 +278,22 @@ pub fn cloud_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
     build_cloud_embedder(settings, false)
 }
 
-/// MCP's interactive query budget: one attempt with a five-second transport timeout. Timeouts
-/// are not part of the embedding-space identity, so existing vectors remain compatible.
+/// MCP interactive query transport. Timeouts do not affect the embedding-space identity.
 pub(crate) fn cloud_query_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
+    let timeout = match std::env::var("MIDNIGHT_EMBED_TIMEOUT_MS") {
+        Ok(raw) => raw
+            .parse::<u64>()
+            .context("MIDNIGHT_EMBED_TIMEOUT_MS must be an integer")?,
+        Err(std::env::VarError::NotPresent) => settings.embed_timeout_ms.unwrap_or(4500),
+        Err(error) => return Err(error).context("read MIDNIGHT_EMBED_TIMEOUT_MS"),
+    };
+    if !(500..=9000).contains(&timeout) {
+        bail!("embedding query timeout must be between 500 and 9000 ms");
+    }
+    build_cloud_embedder(settings, true)?.interactive_queries(timeout)
+}
+
+pub(crate) fn cloud_write_embedder(settings: &Settings) -> Result<cloud::CloudEmbedder> {
     build_cloud_embedder(settings, true)
 }
 

@@ -1,15 +1,15 @@
 #!/bin/sh
-# AETHER Midnight v0.1 user-local installer. macOS (Apple silicon and Intel). Never uses sudo.
+# AETHER Midnight v0.1 user-local installer. macOS and experimental glibc Linux. Never uses sudo.
 #
 # Usage:
 #   install.sh [--archive-file FILE | --archive-url https://...] [--sha256 HEX]
 #              [--prefix DIR] [--no-runtime] [--dry-run] [--help]
 #
-# With no source option it downloads the pinned Universal 2 archive and its .sha256 file
+# With no source option it downloads the pinned platform archive and its .sha256 file
 # from the public GitHub Release v$VERSION (see VERSION below). The archive SHA-256 is always checked before
 # anything is extracted or installed. --sha256 overrides the downloaded checksum.
 # This script is pinned to release VERSION below. It only accepts an archive named
-# aether-midnight-VERSION-macos-universal2.tar.gz whose top-level directory has the same
+# aether-midnight-VERSION-PLATFORM.tar.gz whose top-level directory has the same
 # name, and the installed binary must report VERSION; any other release is refused.
 #
 # This script does NOT bypass Gatekeeper, does not touch quarantine attributes, does not
@@ -17,15 +17,13 @@
 set -eu
 umask 022
 
-VERSION=0.1.0-rc.7
+VERSION=0.1.0-rc.8
 APP=aether-midnight
 ALIAS=midnight
-ARCHIVE_NAME="$APP-$VERSION-macos-universal2"
 RELEASE_BASE="https://github.com/ferxalbs/aether-midnight/releases/download/v$VERSION"
-PIN_URL="$RELEASE_BASE/$ARCHIVE_NAME.tar.gz"
 
 PREFIX="${AETHER_MIDNIGHT_PREFIX:-$HOME/.local}"
-URL="$PIN_URL"
+URL=""
 FILE=""
 SHA=""
 WANT_RUNTIME=1
@@ -69,19 +67,28 @@ SOURCE_BUILD_HELP="Fallback: build from source (Rust 1.98+, Xcode Command Line T
   See docs/installation.md."
 
 # ---- platform gate -------------------------------------------------------------------
-[ "$(uname -s)" = Darwin ] || die 10 "unsupported OS $(uname -s). Only macOS is supported. $SOURCE_BUILD_HELP"
-case "$(uname -m)" in
-x86_64 | arm64) ;;
-*) die 10 "unsupported architecture $(uname -m). Only macOS arm64 and x86_64 are supported. $SOURCE_BUILD_HELP" ;;
+case "$(uname -s):$(uname -m)" in
+Darwin:arm64 | Darwin:x86_64) PLATFORM=macos-universal2 ;;
+Linux:x86_64) PLATFORM=linux-x64-gnu ;;
+Linux:aarch64) PLATFORM=linux-arm64-gnu ;;
+*) die 10 "unsupported platform $(uname -s)/$(uname -m). $SOURCE_BUILD_HELP" ;;
 esac
+ARCHIVE_NAME="$APP-$VERSION-$PLATFORM"
+PIN_URL="$RELEASE_BASE/$ARCHIVE_NAME.tar.gz"
+if [ -z "$FILE" ] && [ -z "$URL" ]; then URL="$PIN_URL"; fi
 [ "$(id -u)" -ne 0 ] || die 11 "do not run as root or with sudo; this installs into your home directory."
 case "$PREFIX" in /*) ;; *) die 2 "--prefix must be an absolute path" ;; esac
-for tool in shasum tar curl mktemp install; do
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"
+    else shasum -a 256 "$@"
+    fi
+}
+for tool in tar curl mktemp install; do
     command -v "$tool" >/dev/null 2>&1 || die 12 "required tool not found: $tool"
 done
 
 # ---- inputs --------------------------------------------------------------------------
-if [ -n "$FILE" ] && [ "$URL" != "$PIN_URL" ]; then
+if [ -n "$FILE" ] && [ -n "$URL" ]; then
     die 2 "pass only one of --archive-file and --archive-url"
 fi
 if [ -n "$FILE" ]; then
@@ -137,7 +144,7 @@ else
         [ "${#SHA}" -eq 64 ] || die 5 "downloaded checksum file is not a SHA-256. Nothing was installed."
     fi
 fi
-ACTUAL=$(shasum -a 256 "$ARCHIVE" | cut -d' ' -f1)
+ACTUAL=$(sha256 "$ARCHIVE" | cut -d' ' -f1)
 if [ "$ACTUAL" != "$SHA" ]; then
     die 5 "SHA-256 mismatch: expected $SHA, got $ACTUAL. The archive is corrupt or not the pinned release. Nothing was installed."
 fi
@@ -157,16 +164,16 @@ mkdir "$TMP/x"
 tar -xzf "$ARCHIVE" -C "$TMP/x" -o 2>/dev/null || die 6 "extraction failed. Nothing was installed."
 ROOT="$TMP/x/$ARCHIVE_NAME"
 [ -d "$ROOT" ] && [ ! -L "$ROOT/bin/$APP" ] && [ -f "$ROOT/bin/$APP" ] && [ -f "$ROOT/SHA256SUMS" ] || die 6 "archive layout is not an AETHER Midnight release (missing bin/$APP or SHA256SUMS)."
-(cd "$ROOT" && shasum -a 256 -c SHA256SUMS >"$TMP/sums.log" 2>&1) || {
+(cd "$ROOT" && sha256 -c SHA256SUMS >"$TMP/sums.log" 2>&1) || {
     grep -v ": OK$" "$TMP/sums.log" >&2 || true
     die 6 "internal SHA256SUMS check failed. Nothing was installed."
 }
 say "Archive contents verified against SHA256SUMS."
 
 # ---- install (atomic, idempotent) ----------------------------------------------------
-NEW_SHA=$(shasum -a 256 "$ROOT/bin/$APP" | cut -d' ' -f1)
+NEW_SHA=$(sha256 "$ROOT/bin/$APP" | cut -d' ' -f1)
 mkdir -p "$BIN_DIR" || die 7 "cannot create $BIN_DIR"
-if [ -f "$DEST" ] && [ "$(shasum -a 256 "$DEST" | cut -d' ' -f1)" = "$NEW_SHA" ]; then
+if [ -f "$DEST" ] && [ "$(sha256 "$DEST" | cut -d' ' -f1)" = "$NEW_SHA" ]; then
     say "$DEST is already up to date; leaving it unchanged."
 else
     STAGED="$BIN_DIR/.$APP.new.$$"

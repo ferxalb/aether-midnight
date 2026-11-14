@@ -1,4 +1,4 @@
-name: macOS release artifacts
+name: Native release artifacts
 
 # Builds, packages and uploads Universal 2 artifacts and checksums. Pushing a `v*` tag (or running
 # this by hand on a tag ref) also publishes the GitHub Release; a branch run only builds.
@@ -77,8 +77,51 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, platform: linux-x64-gnu, binary: aether-midnight}
+          - {runner: ubuntu-24.04-arm, platform: linux-arm64-gnu, binary: aether-midnight}
+          - {runner: windows-latest, platform: windows-x64, binary: aether-midnight.exe}
+          - {runner: windows-11-arm, platform: windows-arm64, binary: aether-midnight.exe}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.98 --profile minimal
+      - run: cargo +1.98 build --release --locked --bin aether-midnight
+      - shell: bash
+        run: |
+          target/release/${{ matrix.binary }} --version
+          sh scripts/package-platform.sh ${{ matrix.platform }} target/release/${{ matrix.binary }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aether-midnight-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  npm-pack:
+    needs: [universal2, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: aether-midnight-*
+          merge-multiple: true
+          path: dist
+      - run: |
+          node npm/prepare.mjs dist packages
+          for package in packages/*; do
+            (cd "$package" && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP")
+          done
+
   release:
-    needs: universal2
+    needs: [universal2, native, npm-pack]
     # Only for tag refs; never for a branch run.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
@@ -90,7 +133,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: aether-midnight-macos-universal2
+          pattern: aether-midnight-*
+          merge-multiple: true
           path: dist
 
       - name: Check the tag matches the packaged version
@@ -101,7 +145,7 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $VERSION"; exit 1; }
           NAME=aether-midnight-$VERSION-macos-universal2
           test -f "dist/$NAME.tar.gz" && test -f "dist/$NAME.tar.gz.sha256" && test -f dist/install.sh
-          (cd dist && sha256sum -c "$NAME.tar.gz.sha256")
+          (cd dist && for sums in *.tar.gz.sha256; do sha256sum -c "$sums"; done)
           grep -q "^VERSION=$VERSION\$" dist/install.sh
           test -f "docs/release-notes/$GITHUB_REF_NAME.md" || {
             echo "missing docs/release-notes/$GITHUB_REF_NAME.md"; exit 1; }
@@ -123,4 +167,4 @@ jobs:
           case "$VERSION" in *-*) PRE="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" $PRE --verify-tag \
             --title "$GITHUB_REF_NAME" --notes-file notes.md \
-            "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" dist/install.sh
+            dist/*.tar.gz dist/*.tar.gz.sha256 dist/install.sh

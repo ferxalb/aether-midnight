@@ -1,0 +1,45 @@
+name: npm trusted publishing
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published native release tag
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: vars.MIDNIGHT_NPM_SCOPE != ''
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      PACKAGE_SCOPE: ${{ vars.MIDNIGHT_NPM_SCOPE }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          test "$RELEASE_TAG" = "v$version"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$(git rev-parse HEAD)"
+          gh release download "$RELEASE_TAG" --dir dist --pattern '*.tar.gz' --pattern '*.tar.gz.sha256'
+          node npm/prepare.mjs dist packages "$PACKAGE_SCOPE"
+          case "$version" in *-*) dist_tag=next ;; *) dist_tag=latest ;; esac
+          for package in packages/*; do
+            (cd "$package" && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP")
+          done
+          for package in packages/*; do
+            test "$package" = packages/main && continue
+            (cd "$package" && npm publish --provenance --access public --ignore-scripts --tag "$dist_tag")
+          done
+          (cd packages/main && npm publish --provenance --access public --ignore-scripts --tag "$dist_tag")

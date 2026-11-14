@@ -96,6 +96,7 @@ impl Fixture {
         let mut child = self
             .command()
             .current_dir(dir)
+            .env("MIDNIGHT_DAEMON", "0")
             .arg("mcp")
             .args(extra)
             .stdin(Stdio::piped())
@@ -176,7 +177,18 @@ fn configured_mcp_defaults_to_hybrid_caches_queries_and_preserves_explicit_lexic
     assert_eq!(hybrid["results"][0]["path"], "Products.tsx");
     assert_eq!(mock.count(), seeded + 1);
     let repeat = mcp.call("search_code", args.clone());
-    assert_eq!(repeat["results"], hybrid["results"]);
+    // Same evidence, but the second response refers to ranges the connection already received.
+    let paths = |v: &serde_json::Value| -> Vec<serde_json::Value> {
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].clone())
+            .collect()
+    };
+    assert_eq!(paths(&repeat), paths(&hybrid));
+    assert_eq!(repeat["results"][0]["ranges"][0]["delivered"], true);
+    assert!(repeat["results"][0]["ranges"][0].get("text").is_none());
     assert_eq!(mock.count(), seeded + 1);
     let mut explicit = args.clone();
     explicit["mode"] = json!("lexical");
@@ -284,7 +296,7 @@ fn unconfigured_mcp_stays_lexical_and_invalid_modes_fail_without_requests() {
 }
 
 #[test]
-fn recall_modes_preserve_lexical_default_scope_and_time_contracts() {
+fn recall_modes_respect_default_hybrid_and_explicit_lexical() {
     let mock = Mock::start(|_, req| ok_response(req, DIMS));
     let f = Fixture::new(&mock);
     memory::remember(
@@ -309,8 +321,15 @@ fn recall_modes_preserve_lexical_default_scope_and_time_contracts() {
     embed::embed_memories(&f.db, "project:demo", &mut e, &AtomicBool::new(false)).unwrap();
     let seeded = mock.count();
     let mut mcp = f.mcp(&["--memory-scope", "project:demo"]);
-    assert!(mcp.call("recall", json!({"query":"privacy"})).is_array());
+    assert!(
+        mcp.call("recall", json!({"query":"privacy","mode":"lexical"}))
+            .is_array()
+    );
     assert_eq!(mock.count(), seeded);
+    assert_eq!(
+        mcp.call("recall", json!({"query":"privacy"}))["mode_used"],
+        "hybrid"
+    );
     assert_eq!(
         mcp.call("recall", json!({"query":"privacy","mode":"hybrid"}))["mode_used"],
         "hybrid"
@@ -366,6 +385,7 @@ fn http_tokens_require_their_own_remote_grant_in_addition_to_saved_consent() {
     let remote = mint(true);
     let mut child = f
         .command()
+        .env("MIDNIGHT_DAEMON", "0")
         .arg("serve-http")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -450,7 +470,7 @@ fn project_opt_out_blocks_implicit_and_explicit_remote_calls() {
 }
 
 #[test]
-fn local_only_stdio_and_transient_provider_outages_do_not_upload_or_retry() {
+fn local_only_stdio_blocks_upload_and_interactive_outages_retry_once() {
     let mock = Mock::start(|n, req| {
         if n == 0 {
             ok_response(req, DIMS)
@@ -481,8 +501,8 @@ fn local_only_stdio_and_transient_provider_outages_do_not_upload_or_retry() {
     assert_eq!(degraded["results"][0]["path"], "Products.tsx");
     assert_eq!(
         mock.count(),
-        seeded + 1,
-        "interactive queries must not retry a 503"
+        seeded + 2,
+        "interactive queries retry a 503 once"
     );
 }
 
@@ -643,4 +663,40 @@ fn mcp_memory_write_embedding_failure_keeps_the_memory_and_reports_a_notice() {
             .contains("consent")
     );
     assert_eq!(mock.count(), count);
+}
+
+#[test]
+fn mcp_ignores_supplied_origin_and_suggests_only_same_namespace_duplicates() {
+    let mock = Mock::start(|_, req| ok_response(req, DIMS));
+    let f = Fixture::new(&mock);
+    let mut mcp = f.mcp(&[]);
+    let store = |mcp: &mut Mcp, scope, content| {
+        mcp.call(
+            "remember",
+            json!({
+                "scope":scope,"kind":"source","content":content,"origin":"user","embed":false
+            }),
+        )
+    };
+    let first = store(
+        &mut mcp,
+        "project:catalog",
+        "The fireproof locker holds keys.",
+    );
+    let other = store(
+        &mut mcp,
+        "project:catalog-extra",
+        "The fireproof locker holds keys.",
+    );
+    let duplicate = store(
+        &mut mcp,
+        "project:catalog",
+        " THE   FIREPROOF LOCKER HOLDS KEYS. ",
+    );
+    assert_eq!(first["origin"], "agent");
+    assert!(other.get("possible_duplicate_of").is_none());
+    assert_eq!(duplicate["possible_duplicate_of"], first["id"]);
+    assert_eq!(duplicate["duplicate_evidence"], "normalized_text");
+    assert_ne!(duplicate["id"], first["id"]);
+    assert_eq!(mock.count(), 0);
 }

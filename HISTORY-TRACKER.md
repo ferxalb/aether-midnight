@@ -2,6 +2,56 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-13 (11) — rc.8 paired local measurements against published rc.7
+
+- Measured the local rc.8 release build against the published rc.7 universal2 binary (tag `v0.1.0-rc.7` equals `4427450`, checksums verified) on one Intel macOS 26.7.1 host, warm cache, shared host, no thermal throttling. Frozen code (n=51) and five memory suites are identical per query. Estimated tokens -27.3% and bytes -30.5% with identical paths and order; five empty-result queries cost more. Watcher p95 58.9 ms (n=30), idle CPU about 0.001% of a core. Daemon: 0 lock errors with or without it, write wall time 0.751 s to 0.268 s, +0.11 ms p50 per request. Schema 9 to 10 migration on a temporary copy preserved data and rc.7 refused it. Details and caveats in `docs/performance.md`.
+- NOT MEASURED: semantic and hybrid quality (the harness has no mock mode), local-model quality, load time and RSS, cloud availability, large-database migration, `bench-retrieval` and `bench-memory`. NOT RUN: Linux, arm64 and Windows runtime, npm, signing, live providers, real client sessions. Nothing was pushed, tagged or published; strict Clippy and tests were not rerun (CI passed for `1084416`).
+
+## 2026-11-12 (10) — Close rc.8 Part 2 follow-up and document remaining gates
+
+- Aligned explicit global recall with global reference lookup and added a real rc.7 migration, export and refusal test. Added cloud timeout classification and frozen top-ten reporting. Native npm package jobs now produce tarballs and record verified binary hashes.
+- `cargo fmt` and `nice -n 19 cargo check --locked -j2` passed. Release tests and measurements remain open. Linux, Windows, npm and signing are NOT RUN. See `docs/part2-validation.md` for the pending commands.
+
+## 2026-11-12 (9) — Close Part 1 and prepare 0.1.0-rc.8 (one release for the v0.2 line)
+
+- Decision: Part 1 and Part 2 ship together as `0.1.0-rc.8` (schema 10); no rc.9. Version bumped in `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README, CHANGELOG, `docs/installation.md`, `docs/release-checklist.md` and the `docs/v0.1-status.md` banner; new `docs/release-notes/v0.1.0-rc.8.md` (unsigned, not notarized, schema 10 so rc.7 and older cannot open a migrated database, tested and untested lists, Linux/Windows/npm NOT RUN, archive SHA left to the workflow). Historical rc.7 mentions (release notes, performance and benchmark-guide procedures, `rc7-workloads`, earlier history entries) are unchanged on purpose.
+- Harness: `daemon-measure` (cold start, per-request overhead, concurrent writers with and without the daemon, daemon RSS/CPU read by PID with `ps`). The "before" binary for Part 1 comparisons is the published rc.7 archive (tag `v0.1.0-rc.7` is the base commit `4427450`; archive SHA-256 verified against its `.sha256` and inner `SHA256SUMS`).
+- Validation state: only `cargo check --locked --all-targets` was run for this entry. Tests, strict Clippy, quality suites and every measurement are open (see the rc.8 checklist); `.github/workflows/ci.yml` (extended instead of adding a second workflow: `workflow_dispatch`, push on `claude/**`, `test --no-fail-fast`, Windows `continue-on-error`) runs fmt, Clippy and tests on macOS, Linux x86_64/arm64 and the experimental Windows runners.
+
+## 2026-11-12 (8) — v0.2 Phase C experimental native distribution
+
+- Added native CI and release matrices, checksum-gated npm package assembly, glibc Linux installer and updater selection, extra ORT archive pins and Windows handle-based source reads.
+- Linux and Windows native runs remain pending. Windows ACLs, daemon transport and signing workflow integration are open in `docs/design/v0.2-platforms.md` and `docs/release-checklist.md`.
+
+## 2026-11-12 (7) — v0.2 Phase B symbol-aware embedding chunks and query transport
+
+- Code embeddings use existing Tree-sitter symbol ends when rebuilding chunks and retain unchanged vectors. Cloud queries get bounded timeout configuration, classified failures and a same-provider retry.
+- Added a frozen semantic code fixture and harness command. Model selection, quantization and measurement gates are in `docs/design/v0.2-semantic.md`.
+
+## 2026-11-12 (6) — v0.2 Phase A memory provenance and layered recall
+
+- Schema 10 records origin and normalized-text digests, adds duplicate suggestions, and shares the daemon's lazy model slot across connections. MCP recall adds policy-checked layers, eligible-vector gating, and optional budget packing.
+- Decision records and remaining queue, CLI and quality gates are in `docs/design/v0.2-memory.md`. No release measurements at this checkpoint.
+
+## 2026-11-12 (5) — v0.2 Phase 3: single-writer daemon
+
+- New `src/daemon.rs`: one daemon per database (advisory `flock`, stale-file recovery, Unix socket in a `0700` directory with a `0600` socket and a hashed short path, `Transport` trait so named pipes can follow), JSON line framing with a `hello` handshake (protocol and schema must match; an idle mismatching daemon is restarted once, a busy one is an error, never a second writer), per-connection `Policy` and client working directory, a FIFO write gate around writer tools and the watcher sink, idle shutdown (`MIDNIGHT_DAEMON_IDLE_SECS`, default 600), graceful shutdown with WAL checkpoint. `midnight mcp` and `serve-http` proxy to it with an explicit, reported in-process fallback; `midnight daemon start|stop|status`, `mcp --no-daemon`, `MIDNIGHT_DAEMON=0`. The watcher is on by default inside the daemon. Design rationale (why a single writer beats `busy_timeout`/IMMEDIATE-only): `docs/design/v0.2-daemon.md`; contract: `docs/api.md`.
+- Not done, stated in the docs: one-shot CLI commands still run in-process; no Windows transport; no worktree row sharing (needs schema 10, deferred to Part 2); embedding calls still run under the write gate.
+- Tests written, **not run**: `tests/daemon.rs` and unit tests; existing `mcp`/`serve-http` test spawns now set `MIDNIGHT_DAEMON=0`. `cargo check --locked --all-targets` passes. No measurement exists yet.
+
+## 2026-11-12 (4) — v0.2 Phase 2: native file watcher (opt-in until the daemon)
+
+- New `src/watch.rs` on `notify` 8.2.2 (`default-features = false`, `macos_fsevent`); this is the only dependency change of Part 1 and the only `Cargo.lock` change (`cargo add`, one network resolve; later commands keep `--locked`). Native OS events only, no `PollWatcher`, no tick thread: the debounce thread blocks on its channel while idle. Per-path coalescing (40 ms quiet, 200 ms max wait), bounded queue (4,096 events, 512 pending paths) and one incremental reconciliation for storms, branch/index changes, rescan notices, ignore-rule edits, removed directories and backend errors. `.git` stays excluded from indexing; `HEAD`, `index`, `packed-refs` and `refs/heads/**` (also for linked worktrees) signal branch changes. Linux registers per-directory watches after an ignore-aware count and refuses to start (state `degraded`, reason names `fs.inotify.max_user_watches`) instead of half-registering.
+- `code::refresh_watched_file` refreshes one file without clearing the catalog `complete` flag (the public `refresh_indexed_file` is unchanged and still marks it partial). `index_status` reports `watcher` state; enable with `MIDNIGHT_WATCH=1`. Freshness labels are unchanged: they come from query-time hash comparison.
+- Harness: `watch-latency` (visibility p50/p95) and `watch-idle` (idle CPU over a window). Unit tests for debounce, storm collapse, classification and a real-event test are written, **not run**; no latency or CPU number exists yet.
+
+## 2026-11-12 (3) — v0.2 Phase 1: compact, budgeted, handle-based code search results
+
+- Design records for all six v0.2 items are in `docs/design/` (`v0.2-overview.md` and one file per item). Part 1 implements token savings, the watcher and the daemon; memory, semantic quality and Linux/Windows/NPM are design only for Part 2. Web facts in the records are labeled verified / not verified.
+- New `src/context.rs`: MCP `search_code` returns the `compact-v1` shape by default (`verbose: true` restores the old one): symbol-bounded ranges (signature + match window, at most 2 per file, adjacent merged), stateless content-hash handles (`open_range` `ref`, stale handles return no content), a per-connection bounded delivery ledger (hashes only, `fresh_context` override), budget packing that demotes bodies (full → signature → reference) by evidence class and score per token without reordering, and a ranked, budgeted `repo_map` `files` list. Retrieval and ranking code is unchanged; the legacy packer is bypassed (max budget) in the compact path. Contract changes with old and new examples: `docs/api.md`.
+- Harness: `token-report`, `token-compare` (paths/order and token/byte deltas between any two binaries) and an offline `calibrate-tokens` (needs caller-supplied reference counts; otherwise "not measured").
+- Tests written, **not run yet** (CPU rule): `src/context.rs` unit tests, three compact/ranking tests in `src/tests.rs`, and an updated repeat-search assertion in `tests/mcp_search.rs`. `cargo check --locked --all-targets` passes. No measurement has been taken; token and quality numbers come in the final phase.
+
 ## 2026-11-12 (2) — Prepare rc.7, add the rc.7 validation procedure, index paths by trigram
 
 - Version `0.1.0-rc.7` in `Cargo.toml`, `Cargo.lock`, `scripts/install.sh`, README and `docs/installation.md`; new `docs/release-notes/v0.1.0-rc.7.md`; `docs/release-checklist.md` now lists rc.7 gates (measurement, real-repository, real-client and publication gates open) above the rc.6 campaign; `CHANGELOG.md` and `docs/v0.1-status.md` point at rc.7. No tag, release or publication was made. Downgrade advice (back up before the first rc.7 run) is in `docs/installation.md`.

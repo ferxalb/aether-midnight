@@ -101,6 +101,37 @@ Available tools are `index_repository`, `refresh_indexed_file`, `search_code`, `
 
 **Code search ordering (0.1.0-rc.5).** `score` and `score_breakdown.lexical_fts` are unchanged and still saturate at 50 for any text match with a BM25 magnitude above about 2.5e-5. Results with equal `score` are now ordered by raw FTS5 BM25 (better first) and only then by path. Before, equal scores were ordered by path alone, so a file with the rarest query term could rank below path-earlier files that matched only common words. Requests remain serial and response IDs/order retain the existing JSON-RPC contract.
 
+**Compact, budgeted code-search results (contract change, 0.2 development).** Design: `docs/design/v0.2-token-savings.md`. MCP `search_code` now returns the `compact-v1` shape by default; `verbose: true` returns the exact previous shape (old CLI output is unchanged). Ranking, evidence classes, result order and `limit` are untouched; only presentation and the budget cut change.
+
+Old (per result, rc.7):
+
+```json
+{"scope":"repo:R:worktree:W","results":[{"path":"src/alpha.rs","line_start":12,"line_end":14,"match_reason":"lexical","index_generation":3,"index_complete":true,"freshness":"fresh","snippet":"12:     let needle = value;\n13: ...","snippet_truncated":false,"estimated_tokens":61,"score":4.2,"score_breakdown":{"exact_path":0,"exact_symbol":0,"lexical_fts":4.2}}],"token_budget":2048,"estimated_tokens":61,"truncated":false,"token_estimator":"midnight-heuristic-v1 (...)"}
+```
+
+New (default):
+
+```json
+{"scope":"repo:R:worktree:W","generation":3,"complete":true,"shape":"compact-v1","results":[{"path":"src/alpha.rs","freshness":"fresh","match_reason":"lexical","symbol":"function outer_function","ranges":[{"lines":"1-14","ref":"src/alpha.rs#1-14@0a1b2c3d4e5f","text":"1: pub fn outer_function(...) {\n2: ...\n12:     let needle = value;"}]}],"token_budget":2048,"estimated_tokens":88,"truncated":false,"token_estimator":"midnight-heuristic-v1 (...)"}
+```
+
+* Hoisted to the response: `generation`, `complete` (formerly per-result `index_generation`, `index_complete`). Removed from each result unless `explain: true` (which adds `score` and `score_breakdown`): `line_start`, `line_end`, `snippet`, `snippet_truncated`, `estimated_tokens`, `index_generation`, `index_complete`, `score`, `score_breakdown`. Kept: `path`, `freshness`, `match_reason`.
+* `ranges` (at most 2 per result, adjacent ones merged) are bounded by the innermost indexed symbol: the symbol's signature line(s) plus a `context_lines` window at the match; without a symbol, the plain window. Text lines are numbered and capped at 200 characters as before.
+* `ref` is a stateless handle `path#start-end@hash12` (first 12 hex characters of the file's content hash). `open_range` accepts `{"ref": ...}` instead of `path`/`line_start`/`line_end` and expands the range (up to 200 lines). If the file changed since the ref was issued, `open_range` returns `stale_handle: true`, `freshness: "stale"`, the current `content_hash` and **no content**; a stale ref is never served as fresh.
+* Budget: `estimated_tokens` (a heuristic estimate of the serialized `results` array; the small fixed header — scope, generation, labels — is not charged, as before) is at most `token_budget`. When the budget is short, bodies are reduced in this order — `detail: "signature"` (signature plus the matching line), then `detail: "reference"` (only `lines` and `ref`) — starting with the lowest evidence class and the lowest score per estimated token; the tail is dropped only when even references do not fit. Order is never changed; `truncated` is true whenever anything was reduced or dropped, the index is incomplete, or the result limit was reached.
+* Connection history: a range already sent on this connection with the same content hash is returned as `{"lines","ref","delivered":true}` without text. `fresh_context: true` forces text, the history is cleared on `initialize`, holds at most 512 range hashes, never stores query text, and is lost on restart (the next response simply carries text again).
+* `repo_map` keeps its previous fields and adds a deterministic, ranked, budgeted `files` list (`ln(1+symbols) - 0.1*depth`, plus a bias for `query`; `token_budget` default 1024) with `files_total`, `files_estimated_tokens`, `files_truncated`. Fan-in centrality is not implemented yet.
+* Hybrid and semantic responses keep their `SearchInfo` fields (`mode_used`, `degraded`, `notice`, ...) next to the compact fields.
+
+**File watcher (0.2 development, opt-in).** Design: `docs/design/v0.2-watcher.md`. With `MIDNIGHT_WATCH=1` (and by default inside the daemon, once it exists) a long-lived process watches each indexed repository with native OS events (FSEvents, inotify, ReadDirectoryChangesW; never polling), refreshes changed files through the single-file path and reconciles once after storms, branch switches, queue overflow and backend errors. `index_status` gains `watcher`: `{state, reason, pending, watches, refresh_count, reconcile_count, overflow_count, error_count, last_error}` where `state` is `off`, `catching_up`, `active`, `degraded` (for example inotify watch limit reached; the reason names the limit) or `unavailable`. Result freshness labels do not depend on the watcher: they come from a content-hash comparison at query time, so an edit is `stale` until it is refreshed. The watcher uses `refresh_watched_file`, which leaves the catalog `complete` flag as it was (the watcher reconciles whenever it could have missed a change); the public `refresh_indexed_file` tool still marks the catalog partial.
+
+**Single-writer daemon (0.2 development).** Design: `docs/design/v0.2-daemon.md`. `midnight mcp` (stdio) and `serve-http` connect to one daemon per database file, starting it when none runs; the daemon owns all writes (a FIFO write gate around `index_repository`, `refresh_indexed_file`, `remember`, `remember_batch`, `forget`), hosts the file watchers (default on there) and the per-connection delivery history, and keeps one local model. The same tools, `Policy` checks, scope injection and repo-root checks run daemon-side, per connection, from the policy the front end sends in its handshake; relative `repo_path` values and the default repository resolve against the client's working directory.
+
+* `midnight daemon start|stop|status` (`run` is internal). `mcp --no-daemon` or `MIDNIGHT_DAEMON=0` serves in-process as before. When the daemon cannot be used, `mcp` prints `midnight: daemon unavailable (<reason>); running in-process` to stderr, and the `initialize` instructions say `Server mode: in-process (<reason>)` or `Server mode: daemon`.
+* Idle shutdown after `MIDNIGHT_DAEMON_IDLE_SECS` (default 600, `0` = never) without connections. `MIDNIGHT_RUN_DIR` overrides the socket directory (default `$XDG_RUNTIME_DIR/midnight`, else `<config dir>/run`, falling back to `/tmp/midnight-<uid>` when the path would exceed the socket-path limit). The directory is `0700`, the socket `0600`, ownership is verified.
+* Wire: newline-delimited JSON. First line is a control message (`hello` with `protocol`, `schema`, `client_version`, `policy`, `cwd`; or `status`, `shutdown`, `shutdown_if_idle`); after `{"midnight":"ready"}` the stream is the stdio MCP dialect. A different protocol or schema yields `version_mismatch`: an idle daemon is restarted once, a busy one is reported with how to stop it; the client never falls back to a second writer for that case.
+* Not routed through the daemon yet: one-shot CLI commands (`index`, `memory ...`). They keep the SQLite WAL, the index lock and the 5 s `busy_timeout`, so they can still report `database is locked` while a daemon holds a long write. Windows has no transport yet (named pipes are designed), so it runs in-process.
+
 ## Node.js and Bun client examples
 
 The same no-dependency client example is provided for Node.js and Bun and starts the Rust MCP process. Runtime verification is pending (not run) in the latest benchmark run:
@@ -123,3 +154,13 @@ export AETHER_REPO="$PWD"
 ```
 
 `examples/go` contains a small Go module and JSON-RPC stdio client. It uses the same optional environment variables as the Node example. Go runtime verification is pending (not run) in the latest benchmark run. Both clients require the Rust executable to be built or installed separately.
+
+### Schema 10 memory recall
+
+An explicit MCP `recall` scope searches a single exact namespace. Omitted scope in a trusted
+project can add `global:user` when allowed by policy, returning a `results` array and `layers`
+with per-layer search information. The project wins ties within lexical evidence classes.
+Records carry `origin`; writes can return `possible_duplicate_of` and `duplicate_evidence`
+without merging observations. Current-time recall can use the configured provider when
+compatible active vectors exist and saved consent allows it. An explicit lexical mode stays
+offline. Pass `token_budget` to request a packed response with previews or ID references.

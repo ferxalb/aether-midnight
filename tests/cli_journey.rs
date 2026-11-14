@@ -3,7 +3,9 @@
 //! here proves behaviour against a live Rainy or OpenRouter account.
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
@@ -141,6 +143,7 @@ fn embed_inputs(m: &Mock) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 fn mode_of(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -229,8 +232,11 @@ fn interactive_cloud_wizard_then_index_search_status_end_to_end() {
     assert!(cfg.contains("test/embed-large") && cfg.contains("openrouter"));
     let creds = s.config_dir().join("credentials.json");
     assert!(fs::read_to_string(&creds).unwrap().contains(KEY));
-    assert_eq!(mode_of(&creds), 0o600);
-    assert_eq!(mode_of(&s.config_dir()), 0o700);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode_of(&creds), 0o600);
+        assert_eq!(mode_of(&s.config_dir()), 0o700);
+    }
 
     // The setup probe sent only the fixed test string, authenticated with the entered key.
     let sent = embed_inputs(&m);

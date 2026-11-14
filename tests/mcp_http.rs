@@ -29,6 +29,7 @@ fn start(db: &std::path::Path, extra: &[&str]) -> Server {
         .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(db)
+        .env("MIDNIGHT_DAEMON", "0")
         .arg("serve-http")
         .args(extra)
         .stdout(Stdio::piped())
@@ -324,6 +325,7 @@ fn http_refuses_non_loopback_bind() {
         .env("AETHER_MIDNIGHT_CONFIG_DIR", db_config_isolation())
         .arg("--db")
         .arg(temp.path().join("m.sqlite3"))
+        .env("MIDNIGHT_DAEMON", "0")
         .args(["serve-http", "--bind", "0.0.0.0:0"])
         .output()
         .unwrap();
@@ -365,7 +367,7 @@ fn two_server_processes_share_one_database_without_losing_acknowledged_writes() 
     let version: i64 = initialized
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     drop(initialized);
     let b = std::sync::Arc::new(start(&db, &[]));
     let mut threads = Vec::new();
@@ -393,6 +395,7 @@ fn two_server_processes_share_one_database_without_losing_acknowledged_writes() 
     assert_eq!(rows.len(), 100);
 }
 
+#[cfg(unix)]
 #[test]
 fn http_scoped_replays_survive_concurrent_reads_maintenance_and_restart() {
     let temp = TempDir::new().unwrap();

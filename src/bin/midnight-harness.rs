@@ -30,10 +30,11 @@ impl Usage {
     }
 }
 
-fn reap(pid: u32) -> Result<(i32, Usage)> {
+#[cfg(unix)]
+fn reap(child: &mut Child) -> Result<(i32, Usage)> {
     let mut status = 0;
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::wait4(pid as i32, &mut status, 0, &mut ru) } < 0 {
+    if unsafe { libc::wait4(child.id() as i32, &mut status, 0, &mut ru) } < 0 {
         bail!("wait4 failed: {}", std::io::Error::last_os_error());
     }
     let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
@@ -47,6 +48,12 @@ fn reap(pid: u32) -> Result<(i32, Usage)> {
             peak_rss_bytes: rss,
         },
     ))
+}
+
+#[cfg(not(unix))]
+fn reap(child: &mut Child) -> Result<(i32, Usage)> {
+    let _ = child.wait()?;
+    bail!("process CPU and peak RSS measurement requires wait4 support")
 }
 
 fn binary_path(arg: Option<&str>) -> Result<PathBuf> {
@@ -80,7 +87,7 @@ fn run_cli(bin: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<(Value, U
     });
     let mut text = String::new();
     std::io::Read::read_to_string(&mut out, &mut text)?;
-    let (code, mut usage) = reap(child.id())?;
+    let (code, mut usage) = reap(&mut child)?;
     usage.wall_s = started.elapsed().as_secs_f64();
     let stderr = t.join().unwrap_or_default();
     if code != 0 {
@@ -103,8 +110,13 @@ struct Mcp {
 }
 impl Mcp {
     fn start(bin: &Path, db: &Path) -> Result<Self> {
+        Self::start_with_env(bin, db, &[])
+    }
+    fn start_with_env(bin: &Path, db: &Path, envs: &[(&str, &str)]) -> Result<Self> {
         let started = Instant::now();
         let mut child = Command::new(bin)
+            .env("MIDNIGHT_DAEMON", "0")
+            .envs(envs.iter().copied())
             .arg("--db")
             .arg(db)
             .arg("mcp")
@@ -160,7 +172,7 @@ impl Mcp {
         if let Some(mut i) = self.input.take() {
             let _ = writeln!(i, r#"{{"jsonrpc":"2.0","method":"exit"}}"#);
         }
-        let (code, mut usage) = reap(self.child.id())?;
+        let (code, mut usage) = reap(&mut self.child)?;
         usage.wall_s = self.started.elapsed().as_secs_f64();
         if code != 0 {
             bail!("MCP server returned {code}");
@@ -466,6 +478,8 @@ fn memory_quality(
         HashMap::<String, String>::new(),
     );
     let mut remember_ms = vec![];
+    let mut duplicate_counts = [0u64; 3]; // correct, predicted, labeled
+    let v3 = fx["schema_version"] == 3;
     for r in records {
         let mut args = serde_json::Map::new();
         for k in [
@@ -476,6 +490,7 @@ fn memory_quality(
             "observed_at",
             "valid_from",
             "valid_to",
+            "origin",
         ] {
             if let Some(v) = r.get(k) {
                 args.insert(k.into(), v.clone());
@@ -489,6 +504,15 @@ fn memory_quality(
         }
         let (ms, mem) = mcp.call("remember", Value::Object(args))?;
         remember_ms.push(ms);
+        if v3 {
+            let expected = r["duplicate_of"]
+                .as_str()
+                .and_then(|key| key_to_id.get(key));
+            let actual = mem.get("possible_duplicate_of");
+            duplicate_counts[0] += u64::from(expected.is_some() && expected == actual);
+            duplicate_counts[1] += u64::from(actual.is_some());
+            duplicate_counts[2] += u64::from(expected.is_some());
+        }
         let id = mem["id"].to_string();
         key_to_id.insert(r["key"].as_str().unwrap().to_string(), mem["id"].clone());
         id_to_key.insert(id, r["key"].as_str().unwrap().to_string());
@@ -518,7 +542,11 @@ fn memory_quality(
             recall_ms.push(ms);
             last = res;
         }
-        let results = last.as_array().cloned().unwrap_or_default();
+        let results = last
+            .as_array()
+            .or_else(|| last["results"].as_array())
+            .cloned()
+            .unwrap_or_default();
         let actual: Vec<String> = results
             .iter()
             .map(|i| {
@@ -605,8 +633,7 @@ fn memory_quality(
         .iter()
         .filter(|r| !r["temporal_correct_at_10"].is_null())
         .collect();
-    Ok(
-        json!({"schema_version":2,"suite":split,"fixture":fixture,"insertion_order":if reverse{"reverse"}else{"forward"},
+    let mut report = json!({"schema_version":2,"suite":split,"fixture":fixture,"insertion_order":if reverse{"reverse"}else{"forward"},
         "query_count":queries.len(),"memory_count":key_to_id.len(),
         "measurement":{"scope":"whole aether-midnight mcp process, one request in flight; setup remember calls included in the session",
             "mcp_request_count":usage,"process":proc_usage.json()},
@@ -618,12 +645,109 @@ fn memory_quality(
             "temporal_invalid_result_count":rows.iter().map(|r| r["invalid_temporal_results"].as_u64().unwrap()).sum::<u64>(),
             "temporal_accuracy_at_10":tem.iter().filter(|r| r["temporal_correct_at_10"]==true).count() as f64/tem.len().max(1) as f64,
             "namespace_leak_count":rows.iter().map(|r| r["namespace_leaks"].as_u64().unwrap()).sum::<u64>(),
-            "queries":rows}}),
-    )
+            "queries":rows}});
+    if v3 {
+        let [correct, predicted, labeled] = duplicate_counts;
+        report["duplicate_detection"] = json!({
+            "correct":correct,"predicted":predicted,"labeled":labeled,
+            "precision":(predicted != 0).then(|| correct as f64 / predicted as f64),
+            "recall":(labeled != 0).then(|| correct as f64 / labeled as f64)
+        });
+    }
+    Ok(report)
 }
 
 // ---------- code-retrieval oracle (CLI) ----------
-fn retrieval_quality(bin: &Path) -> Result<Value> {
+fn semantic_code_quality(bin: &Path, split: &str, local: bool) -> Result<Value> {
+    let suite = Path::new(ROOT).join("benchmark/semantic_code_v1");
+    let queries = read_json(&suite.join("queries.json"))?;
+    let queries = queries["queries"]
+        .as_array()
+        .context("missing semantic queries")?;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    copy_dir(&suite.join("fixture"), &repo)?;
+    let db = temp.path().join("code.sqlite3");
+    let db = db.to_str().context("database path is not UTF-8")?;
+    let repo = repo.to_str().context("fixture path is not UTF-8")?;
+    run_cli(
+        bin,
+        &["--db", db, "index", "--repo", repo, "--no-embed"],
+        &[],
+    )?;
+    if local {
+        run_cli(
+            bin,
+            &["--db", db, "embed", "--repo", repo, "--provider", "local"],
+            &[],
+        )?;
+    }
+    let mut report = serde_json::Map::new();
+    for mode in ["lexical", "semantic", "hybrid"] {
+        if !local && mode != "lexical" {
+            continue;
+        }
+        let mut rows = Vec::new();
+        let mut cold = None;
+        for query in queries
+            .iter()
+            .filter(|q| split == "all" || q["split"] == split)
+        {
+            let mut args = vec![
+                "--db",
+                db,
+                "search",
+                "--repo",
+                repo,
+                "--mode",
+                mode,
+                "--limit",
+                "10",
+                "--query",
+                query["query"].as_str().context("missing query text")?,
+            ];
+            if mode != "lexical" {
+                args.extend(["--provider", "local"]);
+            }
+            let (result, usage) = run_cli(bin, &args, &[])?;
+            if mode != "lexical" && result["mode_used"] != mode {
+                bail!("semantic fixture did not run {mode}: {}", result["notice"]);
+            }
+            cold.get_or_insert_with(|| usage.json());
+            let paths = result["results"]
+                .as_array()
+                .context("missing code results")?
+                .iter()
+                .map(|r| &r["path"])
+                .collect::<Vec<_>>();
+            let rank = paths
+                .iter()
+                .position(|path| **path == query["path"])
+                .map(|i| i + 1);
+            rows.push(json!({"id":query["id"],"rank":rank,"top10":paths,"protected":query["protected"]==true}));
+        }
+        let denom = rows.len().max(1) as f64;
+        let count = |predicate: fn(u64) -> bool| {
+            rows.iter()
+                .filter(|row| row["rank"].as_u64().is_some_and(predicate))
+                .count() as f64
+        };
+        let mrr = rows
+            .iter()
+            .filter_map(|row| row["rank"].as_u64())
+            .map(|rank| 1.0 / rank as f64)
+            .sum::<f64>()
+            / denom;
+        report.insert(mode.into(), json!({"queries":rows,"mrr":mrr,
+            "recall_at_1":count(|r| r == 1) / denom,"recall_at_10":count(|r| r <= 10) / denom,
+            "protected_rank_failures":rows.iter().filter(|row| row["protected"]==true && row["rank"]!=1).count(),
+            "first_search_process":cold}));
+    }
+    Ok(Value::Object(report))
+}
+
+fn retrieval_quality(bin: &Path, limit: usize) -> Result<Value> {
+    let limit_arg = limit.to_string();
     let queries = read_json(&Path::new(ROOT).join("benchmark/retrieval_queries.json"))?["queries"]
         .as_array()
         .unwrap()
@@ -661,7 +785,7 @@ fn retrieval_quality(bin: &Path) -> Result<Value> {
                     "--query",
                     q["query"].as_str().unwrap(),
                     "--limit",
-                    "5",
+                    &limit_arg,
                 ],
                 &envs,
             )?;
@@ -692,13 +816,14 @@ fn retrieval_quality(bin: &Path) -> Result<Value> {
             } else {
                 pos += 1;
                 (
-                    ranks.len() as f64 / relevant.len() as f64,
+                    ranks.iter().filter(|rank| **rank <= 5).count() as f64 / relevant.len() as f64,
                     ranks.iter().min().map_or(0.0, |x| 1.0 / *x as f64),
                 )
             };
             recall += r;
             rr += m;
-            rows.push(json!({"id":q["id"],"kind":q["kind"],"top5":paths,"recall_at_5":r,"reciprocal_rank":m}));
+            let top_key = format!("top{limit}");
+            rows.push(json!({"id":q["id"],"kind":q["kind"],(top_key):paths,"recall_at_5":r,"reciprocal_rank":m}));
         }
         let (diag, _) = run_cli(bin, &["--db", db_s, "diagnose"], &envs)?;
         strategies.insert(
@@ -859,6 +984,398 @@ fn rc7_workloads(repo: &Path, output: &Path) -> Result<Value> {
     Ok(json!({"repo": repo, "files": files}))
 }
 
+// ---------- token metrics (v0.2) ----------
+/// Copy of `aether_midnight::code::estimate_tokens` (`midnight-heuristic-v1`). The harness applies
+/// one estimator to the raw responses of any binary so before/after numbers are comparable even
+/// when the base binary cannot report them. An estimate, not a model tokenizer count.
+fn estimate_tokens(text: &str) -> usize {
+    let mut tokens = 0usize;
+    let mut identifier_bytes = 0usize;
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            identifier_bytes += 1;
+        } else {
+            tokens += identifier_bytes.div_ceil(4);
+            identifier_bytes = 0;
+            if !character.is_whitespace() {
+                tokens += 1;
+            }
+        }
+    }
+    tokens + identifier_bytes.div_ceil(4)
+}
+
+fn pctl(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Drive `search_code` (lexical, one request in flight, one fresh connection) over the frozen
+/// retrieval queries and record paths, response bytes and estimated tokens per query.
+fn token_report(bin: &Path, limit: usize, samples_output: Option<&Path>) -> Result<Value> {
+    let queries = read_json(&Path::new(ROOT).join("benchmark/retrieval_queries.json"))?["queries"]
+        .as_array()
+        .context("queries")?
+        .clone();
+    let tmp = tempfile::tempdir()?;
+    let repo = tmp.path().join("repo");
+    copy_dir(&Path::new(ROOT).join("benchmark/retrieval_fixture"), &repo)?;
+    let db = tmp.path().join("tokens.sqlite3");
+    let (db_s, repo_s) = (db.to_str().unwrap(), repo.to_str().unwrap());
+    let envs = [("MIDNIGHT_INDEX_WORKERS", "1")];
+    let (idx, _) = run_cli(
+        bin,
+        &["--db", db_s, "index", "--repo", repo_s, "--verify-hashes"],
+        &envs,
+    )?;
+    if idx["complete"] != true {
+        bail!("fixture index incomplete");
+    }
+    let mut rows = vec![];
+    let mut samples = vec![];
+    let (mut bytes_all, mut tokens_all) = (vec![], vec![]);
+    for q in &queries {
+        // A fresh connection per query: no delivery history, so every response carries text.
+        let mut mcp = Mcp::start(bin, &db)?;
+        let (_, v) = mcp.call(
+            "search_code",
+            json!({"repo_path":repo_s,"query":q["query"],"limit":limit,"mode":"lexical"}),
+        )?;
+        mcp.close()?;
+        let text = v.to_string();
+        let paths: Vec<&str> = v["results"]
+            .as_array()
+            .map(|r| r.iter().filter_map(|x| x["path"].as_str()).collect())
+            .unwrap_or_default();
+        let (bytes, tokens) = (text.len(), estimate_tokens(&text));
+        bytes_all.push(bytes as f64);
+        tokens_all.push(tokens as f64);
+        rows.push(json!({"id":q["id"],"kind":q["kind"],"paths":paths,"bytes":bytes,"estimated_tokens":tokens}));
+        samples.push(Value::String(text));
+    }
+    if let Some(path) = samples_output {
+        std::fs::write(path, serde_json::to_string_pretty(&samples)? + "\n")?;
+    }
+    let summarize = |mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        json!({"sum":v.iter().sum::<f64>(),"p50":pctl(&v,0.5),"p95":pctl(&v,0.95),"max":v.last()})
+    };
+    Ok(
+        json!({"schema_version":1,"limit":limit,"estimator":"midnight-heuristic-v1 (estimate)",
+        "query_count":rows.len(),"bytes":summarize(bytes_all),"estimated_tokens":summarize(tokens_all),"queries":rows}),
+    )
+}
+
+/// Compare two `token-report` outputs: paths and order per query, then token and byte deltas.
+fn token_compare(before: &Path, after: &Path) -> Result<Value> {
+    let (b, a) = (read_json(before)?, read_json(after)?);
+    let (bq, aq) = (
+        b["queries"].as_array().context("before")?,
+        a["queries"].as_array().context("after")?,
+    );
+    if bq.len() != aq.len() {
+        bail!("reports have different query counts");
+    }
+    let (mut differing, mut worse, mut rows) = (vec![], 0, vec![]);
+    for (x, y) in bq.iter().zip(aq) {
+        let (px, py) = (
+            x["paths"].as_array().unwrap(),
+            y["paths"].as_array().unwrap(),
+        );
+        // The after side may add results the base cut; the shared prefix must be identical.
+        let n = px.len().min(py.len());
+        let same_order = px[..n] == py[..n];
+        let same_paths = px == py;
+        if !same_order {
+            differing.push(x["id"].clone());
+        }
+        let (tb, ta) = (
+            x["estimated_tokens"].as_u64().unwrap(),
+            y["estimated_tokens"].as_u64().unwrap(),
+        );
+        if ta > tb {
+            worse += 1;
+        }
+        rows.push(json!({"id":x["id"],"same_paths":same_paths,"same_order_on_shared_prefix":same_order,
+            "tokens_before":tb,"tokens_after":ta,"bytes_before":x["bytes"],"bytes_after":y["bytes"]}));
+    }
+    Ok(
+        json!({"queries":rows.len(),"order_differences":differing,"queries_with_more_tokens_after":worse,
+        "tokens_before":b["estimated_tokens"],"tokens_after":a["estimated_tokens"],
+        "bytes_before":b["bytes"],"bytes_after":a["bytes"],"rows":rows}),
+    )
+}
+
+/// Offline estimator calibration: the ratio of the estimate to externally supplied reference
+/// counts (one number per sample). No network call; "not measured" without a reference file.
+fn calibrate_tokens(samples: &Path, reference: Option<&Path>) -> Result<Value> {
+    let samples = read_json(samples)?;
+    let samples = samples
+        .as_array()
+        .context("samples must be a JSON array of strings")?;
+    let estimates: Vec<usize> = samples
+        .iter()
+        .map(|s| estimate_tokens(s.as_str().unwrap_or("")))
+        .collect();
+    let Some(reference) = reference else {
+        return Ok(
+            json!({"estimator":"midnight-heuristic-v1","sample_count":estimates.len(),
+            "reference":"not measured","estimates":estimates}),
+        );
+    };
+    let reference = read_json(reference)?;
+    let reference: Vec<f64> = reference
+        .as_array()
+        .context("reference must be a JSON array of numbers")?
+        .iter()
+        .map(|v| v.as_f64().unwrap_or(0.0))
+        .collect();
+    if reference.len() != estimates.len() {
+        bail!(
+            "reference has {} counts for {} samples",
+            reference.len(),
+            estimates.len()
+        );
+    }
+    let mut ratios: Vec<f64> = estimates
+        .iter()
+        .zip(&reference)
+        .filter(|(_, r)| **r > 0.0)
+        .map(|(e, r)| *e as f64 / r)
+        .collect();
+    ratios.sort_by(|a, b| a.total_cmp(b));
+    let mean = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
+    Ok(
+        json!({"estimator":"midnight-heuristic-v1","sample_count":ratios.len(),
+        "ratio_estimate_over_reference":{"mean":mean,"p5":pctl(&ratios,0.05),"p50":pctl(&ratios,0.5),"p95":pctl(&ratios,0.95)},
+        "note":"reference counts were supplied by the caller; the harness made no network call"}),
+    )
+}
+
+// ---------- watcher measurements (v0.2) ----------
+fn watch_fixture(bin: &Path) -> Result<(tempfile::TempDir, PathBuf, PathBuf)> {
+    let tmp = tempfile::tempdir()?;
+    let repo = tmp.path().join("repo");
+    copy_dir(&Path::new(ROOT).join("benchmark/retrieval_fixture"), &repo)?;
+    let db = tmp.path().join("watch.sqlite3");
+    let (idx, _) = run_cli(
+        bin,
+        &[
+            "--db",
+            db.to_str().unwrap(),
+            "index",
+            "--repo",
+            repo.to_str().unwrap(),
+        ],
+        &[("MIDNIGHT_INDEX_WORKERS", "1")],
+    )?;
+    if idx["complete"] != true {
+        bail!("fixture index incomplete");
+    }
+    Ok((tmp, repo, db))
+}
+
+fn wait_for_watcher(mcp: &mut Mcp, repo: &Path) -> Result<()> {
+    for _ in 0..200 {
+        let (_, v) = mcp.call("index_status", json!({"repo_path":repo}))?;
+        if v["watcher"]["state"] == "active" {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    bail!("watcher never became active")
+}
+
+/// One-file visibility: from the write returning to the first `search_code` that returns the new
+/// token as a fresh result. One request in flight; polling adds up to one search plus 2 ms of
+/// quantization to every sample, so this slightly overstates the latency.
+fn watch_latency(bin: &Path, samples: usize) -> Result<Value> {
+    let (_tmp, repo, db) = watch_fixture(bin)?;
+    let mut mcp = Mcp::start_with_env(
+        bin,
+        &db,
+        &[("MIDNIGHT_WATCH", "1"), ("MIDNIGHT_DAEMON", "0")],
+    )?;
+    wait_for_watcher(&mut mcp, &repo)?;
+    let (mut ms, mut failures) = (vec![], 0);
+    for i in 0..samples {
+        let token = format!("watchprobe{i}marker");
+        let rel = format!("probe_{}.rs", i % 5);
+        std::fs::write(repo.join(&rel), format!("pub fn {token}() {{}}\n"))?;
+        let t0 = Instant::now();
+        let mut seen = false;
+        while t0.elapsed().as_secs_f64() < 5.0 {
+            let (_, v) = mcp.call(
+                "search_code",
+                json!({"repo_path":repo,"query":token,"limit":3,"mode":"lexical"}),
+            )?;
+            if v["results"][0]["path"] == rel.as_str() && v["results"][0]["freshness"] == "fresh" {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if seen {
+            ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        } else {
+            failures += 1;
+        }
+    }
+    let (_, status) = mcp.call("index_status", json!({"repo_path":repo}))?;
+    let usage = mcp.close()?;
+    Ok(
+        json!({"samples":samples,"failures":failures,"visibility":distribution(&ms),
+        "watcher":status["watcher"],"process":usage.json(),
+        "note":"polling quantization (<= one search + 2 ms) is included in each sample"}),
+    )
+}
+
+/// Idle CPU of a watching process: CPU of a session that idles for `seconds` minus CPU of an
+/// identical session closed immediately, divided by the idle window.
+fn watch_idle(bin: &Path, seconds: u64) -> Result<Value> {
+    let run = |idle: u64| -> Result<Usage> {
+        let (_tmp, repo, db) = watch_fixture(bin)?;
+        let mut mcp = Mcp::start_with_env(
+            bin,
+            &db,
+            &[("MIDNIGHT_WATCH", "1"), ("MIDNIGHT_DAEMON", "0")],
+        )?;
+        wait_for_watcher(&mut mcp, &repo)?;
+        std::thread::sleep(std::time::Duration::from_secs(idle));
+        mcp.close()
+    };
+    let baseline = run(0)?;
+    let idle = run(seconds)?;
+    let extra = (idle.cpu_user_s + idle.cpu_sys_s) - (baseline.cpu_user_s + baseline.cpu_sys_s);
+    Ok(
+        json!({"idle_seconds":seconds,"baseline":baseline.json(),"idle_session":idle.json(),
+        "idle_cpu_seconds_over_window":extra,"idle_cpu_fraction_of_one_core":extra / seconds as f64}),
+    )
+}
+
+// ---------- daemon measurements (v0.2) ----------
+/// RSS (KiB) and CPU seconds of a process we did not spawn, by PID, from `ps`. `ps` reports CPU
+/// time at 10 ms resolution (`M:SS.hh`); RSS is the current value, not a high-water mark.
+fn ps_pid(pid: u64) -> Result<(u64, f64)> {
+    let out = Command::new("ps")
+        .args(["-o", "rss=,time=", "-p", &pid.to_string()])
+        .output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.split_whitespace();
+    let rss: u64 = parts.next().context("ps rss")?.parse()?;
+    let time = parts.next().context("ps time")?;
+    let cpu = time
+        .split(':')
+        .try_fold(0.0, |acc, p| p.parse::<f64>().map(|v| acc * 60.0 + v))?;
+    Ok((rss, cpu))
+}
+
+/// N concurrent MCP clients each issue `writes` `remember` calls against one database; returns the
+/// error texts. With `daemon` the clients proxy to one daemon, otherwise each is its own writer.
+fn concurrent_writers(
+    bin: &Path,
+    db: &Path,
+    envs: &[(&str, &str)],
+    clients: usize,
+    writes: usize,
+    daemon: bool,
+) -> Result<Value> {
+    let mode = if daemon { "1" } else { "0" };
+    let started = Instant::now();
+    let errors: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..clients)
+            .map(|c| {
+                let mut all = envs.to_vec();
+                all.push(("MIDNIGHT_DAEMON", mode));
+                scope.spawn(move || -> Vec<String> {
+                    let mut errors = vec![];
+                    let mut mcp = match Mcp::start_with_env(bin, db, &all) {
+                        Ok(m) => m,
+                        Err(e) => return vec![format!("start: {e:#}")],
+                    };
+                    for n in 0..writes {
+                        let args = json!({"scope":"project:load","kind":"source",
+                            "content":format!("client {c} write {n} concurrent load"),"embed":false});
+                        if let Err(e) = mcp.call("remember", args) {
+                            errors.push(format!("{e:#}"));
+                        }
+                    }
+                    let _ = mcp.close();
+                    errors
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let locked = errors
+        .iter()
+        .filter(|e| e.contains("database is locked") || e.contains("locked"))
+        .count();
+    Ok(
+        json!({"clients":clients,"writes_per_client":writes,"daemon":daemon,
+        "wall_seconds":started.elapsed().as_secs_f64(),"error_count":errors.len(),
+        "database_is_locked_count":locked,"first_errors":errors.iter().take(3).collect::<Vec<_>>()}),
+    )
+}
+
+/// Daemon cold start, per-request overhead against in-process, concurrent-writer behavior with
+/// and without the daemon, and the daemon's own RSS and CPU (by PID, not the proxy's).
+fn daemon_measure(bin: &Path, clients: usize, writes: usize, requests: usize) -> Result<Value> {
+    let (tmp, repo, db) = watch_fixture(bin)?;
+    let run_dir = tmp.path().join("run");
+    let config = tmp.path().join("config");
+    let (run_s, config_s) = (
+        run_dir.to_string_lossy().into_owned(),
+        config.to_string_lossy().into_owned(),
+    );
+    let envs: Vec<(&str, &str)> = vec![
+        ("MIDNIGHT_RUN_DIR", &run_s),
+        ("AETHER_MIDNIGHT_CONFIG_DIR", &config_s),
+        ("MIDNIGHT_DAEMON_IDLE_SECS", "300"),
+    ];
+    let db_s = db.to_str().unwrap();
+    let query = json!({"repo_path":repo,"query":"benchmark_target","limit":5,"mode":"lexical"});
+    let overhead = |daemon: bool| -> Result<Value> {
+        let mut all = envs.clone();
+        all.push(("MIDNIGHT_DAEMON", if daemon { "1" } else { "0" }));
+        let mut mcp = Mcp::start_with_env(bin, &db, &all)?;
+        let mut ms = vec![];
+        for _ in 0..requests {
+            ms.push(mcp.call("search_code", query.clone())?.0);
+        }
+        mcp.close()?;
+        Ok(distribution(&ms))
+    };
+    let in_process_overhead = overhead(false)?;
+    let in_process_writers = concurrent_writers(bin, &db, &envs, clients, writes, false)?;
+    // Cold start: the first `daemon start` spawns the daemon and returns once it answers.
+    let mut start_env = envs.clone();
+    start_env.push(("MIDNIGHT_DAEMON", "1"));
+    let (started, usage) = run_cli(bin, &["--db", db_s, "daemon", "start"], &start_env)?;
+    let pid = started["pid"].as_u64().context("daemon pid")?;
+    let (rss_idle, cpu_before) = ps_pid(pid)?;
+    let daemon_overhead = overhead(true)?;
+    let daemon_writers = concurrent_writers(bin, &db, &envs, clients, writes, true)?;
+    let (rss_after, cpu_after) = ps_pid(pid)?;
+    let (stopped, _) = run_cli(bin, &["--db", db_s, "daemon", "stop"], &start_env)?;
+    Ok(json!({
+        "clients":clients,"requests":requests,
+        "cold_start":{"wall_seconds":usage.wall_s,"note":"spawn to first status answer, includes the database open"},
+        "per_request_search_code":{"in_process":in_process_overhead,"via_daemon":daemon_overhead},
+        "concurrent_writers":{"in_process_processes":in_process_writers,"via_daemon":daemon_writers},
+        "daemon_process":{"pid_measured":pid,"rss_kib_after_start":rss_idle,"rss_kib_after_load":rss_after,
+            "cpu_seconds_over_load":cpu_after - cpu_before,"resolution":"ps: 10 ms CPU, current (not peak) RSS"},
+        "stopped":stopped,
+        "not_measured":["local-model RSS (needs the pinned ONNX runtime), one daemon vs N processes"],
+    }))
+}
+
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let flag = |n: &str| {
@@ -896,7 +1413,44 @@ fn main() -> Result<()> {
                 &tmp.path().join("memory.sqlite3"),
             )?
         }
-        "retrieval-quality" => retrieval_quality(&binary_path(flag("--binary"))?)?,
+        "semantic-code-quality" => semantic_code_quality(
+            &binary_path(flag("--binary"))?,
+            flag("--split").unwrap_or("all"),
+            a.iter().any(|arg| arg == "--local"),
+        )?,
+        "retrieval-quality" => {
+            let limit = flag("--limit").unwrap_or("5").parse::<usize>()?;
+            if !matches!(limit, 5 | 10) {
+                bail!("retrieval-quality --limit must be 5 or 10");
+            }
+            retrieval_quality(&binary_path(flag("--binary"))?, limit)?
+        }
+        "token-report" => token_report(
+            &binary_path(flag("--binary"))?,
+            flag("--limit").map_or(5, |v| v.parse().unwrap()),
+            flag("--samples-output").map(Path::new),
+        )?,
+        "watch-latency" => watch_latency(
+            &binary_path(flag("--binary"))?,
+            flag("--samples").map_or(30, |v| v.parse().unwrap()),
+        )?,
+        "daemon-measure" => daemon_measure(
+            &binary_path(flag("--binary"))?,
+            flag("--clients").map_or(8, |v| v.parse().unwrap()),
+            flag("--writes").map_or(50, |v| v.parse().unwrap()),
+            flag("--requests").map_or(200, |v| v.parse().unwrap()),
+        )?,
+        "watch-idle" => watch_idle(
+            &binary_path(flag("--binary"))?,
+            flag("--seconds").map_or(60, |v| v.parse().unwrap()),
+        )?,
+        "token-compare" => {
+            token_compare(Path::new(need("--before")?), Path::new(need("--after")?))?
+        }
+        "calibrate-tokens" => calibrate_tokens(
+            Path::new(need("--samples")?),
+            flag("--reference").map(Path::new),
+        )?,
         "rc7-workloads" => rc7_workloads(Path::new(need("--repo")?), Path::new(need("--output")?))?,
         "measure-mcp" => measure_mcp(
             &binary_path(flag("--binary"))?,
@@ -904,7 +1458,7 @@ fn main() -> Result<()> {
             Path::new(need("--requests")?),
         )?,
         _ => bail!(
-            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | retrieval-quality [--binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR>"
+            "usage: midnight-harness <release-measure --models DIR [--binary B] | license-notices --output DIR | generate-fixture --output DIR | license-inventory [--output F --force] | memory-quality [--fixture F --split dev|heldout|all --insertion-order forward|reverse --repeats N --binary B] | semantic-code-quality [--split dev|heldout|all --local --binary B] | retrieval-quality [--limit 5|10 --binary B] | measure-mcp --db DB --requests FILE [--binary B] | rc7-workloads --repo FIXTURE --output DIR | token-report [--limit N --samples-output F --binary B --json-output F] | token-compare --before F --after F | calibrate-tokens --samples F [--reference F] | watch-latency [--samples N] | watch-idle [--seconds N] | daemon-measure [--clients N --writes N --requests N]>"
         ),
     };
     if let Some(p) = flag("--json-output") {

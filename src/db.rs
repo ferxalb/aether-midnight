@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use crate::INDEX_FORMAT_VERSION;
 
-const SCHEMA_VERSION: i64 = 9;
+/// Schema version this binary reads and writes.
+pub const SCHEMA_VERSION: i64 = 10;
 
 const MEMORY_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE memory_fts USING fts5(
          scope_token,
@@ -236,6 +237,8 @@ fn create_private_db_file(path: &Path) -> Result<()> {
 }
 
 fn set_private_db_permissions(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -405,6 +408,10 @@ fn migrate(connection: &Connection) -> Result<()> {
                 }
                 migrated_version = 9;
             }
+            if migrated_version == 9 {
+                migrate_memory_origin(connection)?;
+                migrated_version = 10;
+            }
             if migrated_version != SCHEMA_VERSION {
                 bail!("no migration path from database schema {migrated_version}");
             }
@@ -426,6 +433,52 @@ fn migrate(connection: &Connection) -> Result<()> {
     if format.parse::<u32>().ok() != Some(INDEX_FORMAT_VERSION) {
         bail!("unsupported index format version {format}");
     }
+    Ok(())
+}
+
+fn migrate_memory_origin(connection: &Connection) -> Result<()> {
+    // Idempotent: a database whose user_version was rewound after migration already has the
+    // columns, and SQLite has no ADD COLUMN IF NOT EXISTS.
+    let has_column = |name: &str| -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name=?1)",
+            [name],
+            |row| row.get(0),
+        )?)
+    };
+    if !has_column("origin")? {
+        connection.execute_batch(
+            "ALTER TABLE memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'
+                CHECK(origin IN ('user','agent','repo'));",
+        )?;
+    }
+    if !has_column("dedup_key")? {
+        connection.execute_batch("ALTER TABLE memories ADD COLUMN dedup_key TEXT;")?;
+    }
+    let mut select = connection.prepare(
+        "SELECT id,content FROM memories WHERE id>?1 AND deleted_at IS NULL ORDER BY id LIMIT 128",
+    )?;
+    let mut write = connection.prepare("UPDATE memories SET dedup_key=?2 WHERE id=?1")?;
+    let mut last = 0;
+    loop {
+        let batch = select
+            .query_map([last], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if batch.is_empty() {
+            break;
+        }
+        for (id, content) in batch {
+            write.execute(params![id, crate::memory::duplicate_digest(&content)])?;
+            last = id;
+        }
+    }
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS memories_dedup ON memories(scope,dedup_key) WHERE deleted_at IS NULL;
+         UPDATE metadata SET value='10' WHERE key='schema_version';
+         PRAGMA user_version=10;",
+    )?;
     Ok(())
 }
 
@@ -745,5 +798,54 @@ mod git_facts_tests {
             git_facts_from_files(temp.path()).is_none()
                 || temp.path().ancestors().any(|a| a.join(".git").exists())
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_schema_tests {
+    use super::*;
+
+    #[test]
+    fn failed_schema_ten_backfill_rolls_back_columns_and_version() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE memories(id INTEGER PRIMARY KEY,scope TEXT,content TEXT,deleted_at TEXT);
+             INSERT INTO memories VALUES(1,'project:fixture','retained content',NULL);
+             CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT);
+             INSERT INTO metadata VALUES('schema_version','9'),('index_format_version','2');
+             CREATE TRIGGER reject_backfill BEFORE UPDATE ON memories
+              BEGIN SELECT RAISE(ABORT,'injected backfill failure'); END;
+             PRAGMA user_version=9;",
+        )?;
+        assert!(
+            migrate(&conn)
+                .unwrap_err()
+                .to_string()
+                .contains("injected backfill failure")
+        );
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, 9);
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM metadata WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "9"
+        );
+        assert_eq!(conn.query_row("SELECT count(*) FROM pragma_table_info('memories') WHERE name IN ('origin','dedup_key')", [], |row| row.get::<_, i64>(0))?, 0);
+        assert_eq!(
+            conn.query_row("SELECT content FROM memories", [], |row| row
+                .get::<_, String>(0))?,
+            "retained content"
+        );
+        conn.execute_batch("DROP TRIGGER reject_backfill")?;
+        migrate(&conn)?;
+        assert_eq!(
+            conn.query_row("SELECT origin FROM memories", [], |row| row
+                .get::<_, String>(0))?,
+            "agent"
+        );
+        Ok(())
     }
 }

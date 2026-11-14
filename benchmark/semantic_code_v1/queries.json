@@ -1,0 +1,11 @@
+{
+  "queries": [
+    {"id":"stale-tickets","split":"dev","query":"Remove reservations whose time is up","path":"leases.rs"},
+    {"id":"bounded-history","split":"dev","query":"Drop the oldest entry when storage is full","path":"ring.rs"},
+    {"id":"exact-path","split":"dev","query":"paths.rs","path":"paths.rs","protected":true},
+    {"id":"safe-relative","split":"heldout","query":"Impide que la ruta suba a una carpeta superior","path":"paths.rs"},
+    {"id":"low-funds","split":"heldout","query":"Rechaza una compra si no queda saldo suficiente","path":"credits.rs"},
+    {"id":"exact-symbol","split":"heldout","query":"reap_expired","path":"leases.rs","protected":true},
+    {"id":"literal","split":"heldout","query":"remaining.checked_sub(cost)","path":"credits.rs","protected":true}
+  ]
+}

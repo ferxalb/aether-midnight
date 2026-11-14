@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::auth::Authenticator;
-use crate::mcp::handle_message;
+use crate::daemon::Backend;
 
 const MAX_BODY: usize = 1024 * 1024;
 const MAX_HEADER_LINE: usize = 8 * 1024;
@@ -79,6 +79,7 @@ pub fn serve(db_path: &Path, bind: SocketAddr, cancellation: Arc<AtomicBool>) ->
 /// elapses. Polling the listener (rather than sleeping a fixed interval)
 /// removes up to 15 ms of accept latency from every request while still
 /// observing cancellation promptly.
+#[cfg(unix)]
 fn wait_for_connection(listener: &TcpListener) {
     use std::os::fd::AsRawFd;
     let mut fd = libc::pollfd {
@@ -94,6 +95,11 @@ fn wait_for_connection(listener: &TcpListener) {
     }
 }
 
+#[cfg(not(unix))]
+fn wait_for_connection(_listener: &TcpListener) {
+    std::thread::sleep(Duration::from_millis(10));
+}
+
 fn connection(
     stream: TcpStream,
     port: u16,
@@ -106,7 +112,7 @@ fn connection(
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut memory_session = None;
+    let mut backend: Option<Backend> = None;
     let mut session_principal = None;
     while !cancel.load(Ordering::Relaxed) {
         let Some(req) = read_request(&mut reader)? else {
@@ -142,7 +148,7 @@ fn connection(
         };
         let policy = &record.policy;
         if session_principal.as_ref() != Some(&record.id) {
-            memory_session = None;
+            backend = None;
             session_principal = Some(record.id.clone());
         }
         match req.method.as_str() {
@@ -169,7 +175,13 @@ fn connection(
                     }
                     continue;
                 }
-                match handle_message(db_path, policy, &mut memory_session, &message, cancel) {
+                if backend.as_ref().is_none_or(|b| !b.matches_policy(policy)) {
+                    backend = Some(Backend::connect(db_path, policy));
+                }
+                let reply = backend
+                    .as_mut()
+                    .and_then(|b| b.handle(db_path, policy, &message, cancel));
+                match reply {
                     Some(resp) => write_response(&stream, 200, "OK", Some(&resp), req.keep_alive)?,
                     None => write_response(&stream, 202, "Accepted", None, req.keep_alive)?,
                 }

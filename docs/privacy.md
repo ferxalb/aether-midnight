@@ -70,3 +70,13 @@ Midnight uses a bounded per-index worker pool and one SQLite writer, with no liv
 Public benchmark reports may retain workload definitions, aggregate timings, sample counts, and process resource measurements. They must omit personal or third-party host identifiers, machine models, local absolute paths, environment variables, account identifiers, and billing or reservation records. Keep unredacted local run artifacts out of version control.
 
 Optional operation keys add a local schema-5 ledger containing the exact namespace/key, input SHA-256 digest and memory ID. These metadata persist after forget and compaction to prevent key reuse; hashes are not encryption and can confirm guesses about low-entropy payloads. Do not put secrets in operation keys. No duplicate memory content is stored in the ledger. `maintain` offers bounded forgotten-content scrubbing and FTS merging; full `compact` remains available. Neither operation promises forensic erasure.
+
+### Persistent prompt injection in memory
+
+An agent can store instructions that resurface in later sessions. Recall content is untrusted
+data even when it came from a CLI invocation or a user-imported export. The origin field
+records transport provenance and does not authenticate the author or grant authority.
+MCP writes are tagged `agent`; CLI writes are tagged `user`. Old records without provenance
+default to `agent`. Imported exports can preserve recorded origin, so only import files
+from sources you trust. Scope policy applies to each recall layer. Budgeted recall can expose
+an ID and origin without exposing the body.
