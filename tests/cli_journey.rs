@@ -3,7 +3,9 @@
 //! here proves behaviour against a live Rainy or OpenRouter account.
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
