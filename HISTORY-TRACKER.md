@@ -2,6 +2,11 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-13 (11) — rc.8 paired local measurements against published rc.7
+
+- Measured the local rc.8 release build against the published rc.7 universal2 binary (tag `v0.1.0-rc.7` equals `4427450`, checksums verified) on one Intel macOS 26.7.1 host, warm cache, shared host, no thermal throttling. Frozen code (n=51) and five memory suites are identical per query. Estimated tokens -27.3% and bytes -30.5% with identical paths and order; five empty-result queries cost more. Watcher p95 58.9 ms (n=30), idle CPU about 0.001% of a core. Daemon: 0 lock errors with or without it, write wall time 0.751 s to 0.268 s, +0.11 ms p50 per request. Schema 9 to 10 migration on a temporary copy preserved data and rc.7 refused it. Details and caveats in `docs/performance.md`.
+- NOT MEASURED: semantic and hybrid quality (the harness has no mock mode), local-model quality, load time and RSS, cloud availability, large-database migration, `bench-retrieval` and `bench-memory`. NOT RUN: Linux, arm64 and Windows runtime, npm, signing, live providers, real client sessions. Nothing was pushed, tagged or published; strict Clippy and tests were not rerun (CI passed for `1084416`).
+
 ## 2026-11-12 (10) — Close rc.8 Part 2 follow-up and document remaining gates
 
 - Aligned explicit global recall with global reference lookup and added a real rc.7 migration, export and refusal test. Added cloud timeout classification and frozen top-ten reporting. Native npm package jobs now produce tarballs and record verified binary hashes.

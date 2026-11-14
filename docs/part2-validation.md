@@ -11,8 +11,8 @@ controls. Phase C adds experimental native distribution and npm package assembly
 | --- | --- |
 | Historical Intel macOS locked release build | PASS before the final rc.8 tree |
 | Locked development check on rc.8 follow-up | PASS |
-| Strict Clippy and release tests | OPEN |
-| Paired frozen retrieval, benchmark and semantic measurements | OPEN |
+| Strict Clippy and tests | PASS in CI on Linux and macOS for `1084416`; Windows test suite fails (known) |
+| Paired frozen retrieval, token, watcher, daemon and migration measurements | PASS on one Intel macOS host, 2026-11-13 ([performance](performance.md)); `bench-retrieval`, `bench-memory`, semantic and hybrid modes and local-model runs NOT MEASURED |
 | Additional ONNX Runtime archive and library digests | PASS |
 | Linux and Windows native builds and smoke tests | NOT RUN |
 | npm publish, signing and notarization | NOT RUN |

@@ -9,16 +9,16 @@ re-opened below; its record follows in the archived table.
 | rc.8 gate | State |
 | --- | --- |
 | rc.8 version/installer/notes consistency | PASS by inspection — manifest, lockfile, installer pin and `docs/release-notes/v0.1.0-rc.8.md` agree; `cargo check --locked` is the check |
-| Formatting, strict Clippy, `cargo test --locked --no-fail-fast` on the final tree | OPEN — run `.github/workflows/ci.yml` (workflow_dispatch or push; Windows is continue-on-error) |
-| Frozen code/memory quality identical to rc.7 (`retrieval-quality`, four memory fixtures) | OPEN |
-| Token report vs the published rc.7 binary (paths/order identical, tokens and bytes) | OPEN — `midnight-harness token-report` / `token-compare` |
-| Watcher one-file visibility p95 ≤ 150 ms and idle CPU | OPEN — `watch-latency`, `watch-idle` |
-| Daemon: N concurrent writers without `database is locked`, cold start, per-request overhead, RSS by daemon PID | OPEN — `daemon-measure` |
-| Schema 9 → 10 migration, rollback, rc.7 refusal and JSONL compatibility | OPEN — supply a real rc.7 binary via `MIDNIGHT_RC7_BINARY` |
-| Memory v3 recall, duplicate detection, trust and layer isolation | OPEN — report dev and held-out separately |
-| Semantic code v1, symbol chunk reuse and classified cloud retries | OPEN — local pinned E5 and loopback cloud tests |
-| Local-model reuse and RSS | OPEN — needs the pinned ONNX Runtime on the build host |
-| Real Claude Code / Codex sessions with the compact shape, daemon and refs | OPEN |
+| Formatting, strict Clippy, `cargo test --locked --no-fail-fast` on the final tree | PASS on Linux and macOS in CI for `1084416` (not rerun in the 2026-11-13 local campaign); Windows compiles but its test suite FAILS in CI (continue-on-error) |
+| Frozen code/memory quality identical to rc.7 (`retrieval-quality`, four memory fixtures) | PASS — 2026-11-13, per-query ranks and top-10 identical (code n=51, five memory suites incl. v3); [performance](performance.md) |
+| Token report vs the published rc.7 binary (paths/order identical, tokens and bytes) | PASS — paths/order identical; estimated tokens -27.3%, bytes -30.5% (estimate); 5 empty-result queries cost more |
+| Watcher one-file visibility p95 ≤ 150 ms and idle CPU | PASS — p95 58.9 ms (n=30), idle about 0.001% of a core; one Intel macOS host |
+| Daemon: N concurrent writers without `database is locked`, cold start, per-request overhead, RSS by daemon PID | PASS — 0 lock errors (also 0 without the daemon), cold start 139 ms, +0.11 ms p50 per request, current RSS 16.1 MiB (not peak) |
+| Schema 9 → 10 migration, rollback, rc.7 refusal and JSONL compatibility | PASS — temporary copy built by the published rc.7 binary; 0.06 s (n=1, tiny database); large-database timing NOT MEASURED |
+| Memory v3 recall, duplicate detection, trust and layer isolation | PARTIAL — run as `--split all` only: R@5 0.571, MRR 0.476, no leaks, duplicate detection 1 of 1; dev and held-out reported separately NOT RUN; cross-layer isolation NOT MEASURED |
+| Semantic code v1, symbol chunk reuse and classified cloud retries | NOT MEASURED — lexical baseline only (identical to rc.7); semantic and hybrid need the local model or a mock mode the harness lacks |
+| Local-model reuse and RSS | NOT MEASURED — deliberately not loaded in the 2026-11-13 run |
+| Real Claude Code / Codex sessions with the compact shape, daemon and refs | NOT RUN (smoke only: MCP `initialize` and `tools/list` via daemon and `--no-daemon`) |
 | Linux, Windows, npm builds and smoke tests | NOT RUN — experimental |
 | Tagged rc.8 workflow, archive, checksums, install and rc.7 → rc.8 update | OPEN — maintainer publication below |
 | Signing/notarization, arm64 runtime, live Rainy, clean-machine install | OPEN — unchanged |
