@@ -2,6 +2,13 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-15 (13) — Fix the npm-pack checksum parser for Windows archives; keep Windows out of rc.8 assets
+
+- The second rc.8 tag run (`Native release artifacts` #14) passed `universal2` and all four native jobs but failed in `npm-pack` at `npm/prepare.mjs`: `Binary checksum mismatch: windows-x64`. The archive itself was fine. On Windows (Git Bash) `sha256sum` writes `<hash> *./bin/aether-midnight.exe`, with a `*` binary-mode marker before the path, and `prepare.mjs` compared the path without stripping it, so it found no entry. Confirmed on the real Windows artifact (hash of the extracted binary equals the hash in `SHA256SUMS`).
+- Fix: `prepare.mjs` strips a leading `*` from the path before matching. Checked against the five real artifacts of run #14: all six platform packages and the main package are prepared, `npm pack --ignore-scripts` succeeds for all seven, and `sha256sum -c` passes for every archive checksum. Nothing was published; package scope is still the `@SCOPE` placeholder.
+- The `release` job now removes the Windows archives from `dist/` before `gh release create`: the Windows binaries compile, but the Windows test suite fails in CI (token randomness, main-thread stack, paths), so they are not published in rc.8. Linux archives are still attached and remain experimental and NOT RUN. Revert this one step to publish them.
+- Not verified: the `release` job itself (it only runs on a tag), npm publishing, signing.
+
 ## 2026-11-15 (12) — Regenerate the third-party license inventory for rc.8
 
 - The `v0.1.0-rc.8` tag workflow (`Native release artifacts`, job `universal2`) stopped at `scripts/package-release.sh`: `cmp THIRD_PARTY_LICENSES.json` against the freshly generated inventory differed at line 70 (`package_count`). The committed inventory still listed 375 packages while `Cargo.lock` had 384 entries (383 packages besides the root) after the `notify` file-watcher dependency was added. The release gate did its job; nothing was published (`release` and `npm-pack` were skipped, no rc.8 GitHub Release exists).
