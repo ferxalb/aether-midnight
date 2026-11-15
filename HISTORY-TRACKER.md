@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-15 (12) — Regenerate the third-party license inventory for rc.8
+
+- The `v0.1.0-rc.8` tag workflow (`Native release artifacts`, job `universal2`) stopped at `scripts/package-release.sh`: `cmp THIRD_PARTY_LICENSES.json` against the freshly generated inventory differed at line 70 (`package_count`). The committed inventory still listed 375 packages while `Cargo.lock` had 384 entries (383 packages besides the root) after the `notify` file-watcher dependency was added. The release gate did its job; nothing was published (`release` and `npm-pack` were skipped, no rc.8 GitHub Release exists).
+- Regenerated with `midnight-harness license-inventory --output THIRD_PARTY_LICENSES.json --force` (Rust 1.98.1, Linux, `--locked`). The inventory is derived from `cargo metadata` and does not depend on the build host. New packages: `inotify` 0.11.5 (ISC), `inotify-sys` 0.1.8 (ISC), `kqueue` 1.2.1 (MIT), `kqueue-sys` 1.1.2 (MIT), `notify` 8.2.2 (CC0-1.0), `notify-types` 2.3.0 (MIT OR Apache-2.0), `objc2-core-foundation` 0.3.2 and `objc2-core-services` 0.3.2 (Zlib OR Apache-2.0 OR MIT). `package_count` is now 383. `license-notices` also ran and produced notice files for the new crates. This is an engineering inventory, not a legal review.
+- Verified here only: the regenerated file is byte-identical to a fresh generation, and `license-notices` completes. The remaining packaging steps (macOS universal2 build, archive, installer smoke test) were not run. Because the `v0.1.0-rc.8` tag points at the failed commit, it must be moved to the fixed commit before the workflow can publish.
+
 ## 2026-11-13 (11) — rc.8 paired local measurements against published rc.7
 
 - Measured the local rc.8 release build against the published rc.7 universal2 binary (tag `v0.1.0-rc.7` equals `4427450`, checksums verified) on one Intel macOS 26.7.1 host, warm cache, shared host, no thermal throttling. Frozen code (n=51) and five memory suites are identical per query. Estimated tokens -27.3% and bytes -30.5% with identical paths and order; five empty-result queries cost more. Watcher p95 58.9 ms (n=30), idle CPU about 0.001% of a core. Daemon: 0 lock errors with or without it, write wall time 0.751 s to 0.268 s, +0.11 ms p50 per request. Schema 9 to 10 migration on a temporary copy preserved data and rc.7 refused it. Details and caveats in `docs/performance.md`.
