@@ -45,7 +45,10 @@ for (const [os, cpu, release] of platforms) {
     });
     const binary = extract(`bin/${binaryName}`);
     const lines = extract('SHA256SUMS').toString().split(/\r?\n/);
-    const entry = lines.map(line => line.trim().split(/\s+/)).find(([, path]) => path === `./bin/${binaryName}`);
+    // `sha256sum` on Windows (Git Bash) marks binary mode with a leading `*` before the path.
+    const entry = lines.map(line => line.trim().split(/\s+/))
+        .map(([hash, path = '']) => [hash, path.replace(/^\*/, '')])
+        .find(([, path]) => path === `./bin/${binaryName}`);
     if (!entry || sha256(binary) !== entry[0]) throw new Error(`Binary checksum mismatch: ${release}`);
     const pkg = packageDir(slug, { name: packageName, os: [os], cpu: [cpu],
         ...(os === 'linux' ? { libc: ['glibc'] } : {}), files: ['bin'],
