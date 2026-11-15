@@ -160,6 +160,9 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "release $GITHUB_REF_NAME already exists; not modifying it"; exit 1
           fi
+          # rc.8: the Windows builds compile but their test suite fails in CI, so they are not
+          # published as release assets (the checksums above already covered them).
+          rm -f dist/*-windows-*
           SHA=$(cut -d' ' -f1 "dist/$NAME.tar.gz.sha256")
           cp "docs/release-notes/$GITHUB_REF_NAME.md" notes.md
           printf '\nSHA-256 of the archive: `%s`\n' "$SHA" >> notes.md
