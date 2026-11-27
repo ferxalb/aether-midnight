@@ -20,7 +20,7 @@ umask 022
 VERSION=0.1.0-rc.8
 APP=aether-midnight
 ALIAS=midnight
-RELEASE_BASE="https://github.com/ferxalbs/aether-midnight/releases/download/v$VERSION"
+RELEASE_BASE="https://github.com/ferxalb/aether-midnight/releases/download/v$VERSION"
 
 PREFIX="${AETHER_MIDNIGHT_PREFIX:-$HOME/.local}"
 URL=""

@@ -20,7 +20,7 @@ const platforms = [
 const common = {
     version,
     license: 'Apache-2.0',
-    repository: 'git+https://github.com/ferxalbs/aether-midnight.git',
+    repository: 'git+https://github.com/ferxalb/aether-midnight.git',
 };
 const optionalDependencies = {};
 const sha256 = data => createHash('sha256').update(data).digest('hex');

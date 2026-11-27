@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const REPO: &str = "ferxalbs/aether-midnight";
+pub const REPO: &str = "ferxalb/aether-midnight";
 const DEFAULT_API: &str = "https://api.github.com";
 /// Test/mirror override. Must be `https`, or `http` on a loopback address.
 pub const API_ENV: &str = "AETHER_MIDNIGHT_UPDATE_API";

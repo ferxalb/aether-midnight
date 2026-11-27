@@ -8,7 +8,7 @@ unsupported, and the script refuses to run there.
 ## Script install (recommended)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.8/install.sh | sh -s -- --no-runtime
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalb/aether-midnight/releases/download/v0.1.0-rc.8/install.sh | sh -s -- --no-runtime
 # offline: sh scripts/install.sh --archive-file aether-midnight-0.1.0-rc.8-macos-universal2.tar.gz --sha256 <hex>
 ```
 
