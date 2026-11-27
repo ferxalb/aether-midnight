@@ -19,7 +19,7 @@ rc.8 is the candidate for the stable-readiness review; it migrates the database 
 **macOS (Apple silicon or Intel).** No Rust or sudo needed:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalbs/aether-midnight/releases/download/v0.1.0-rc.8/install.sh | sh -s -- --no-runtime
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ferxalb/aether-midnight/releases/download/v0.1.0-rc.8/install.sh | sh -s -- --no-runtime
 ```
 
 This verifies the download's SHA-256 and installs `aether-midnight` to `~/.local/bin`, plus a shorter `midnight` alias. Add `~/.local/bin` to your `PATH` if it is not there yet. The binary is not signed or notarized; if macOS blocks it, see [docs/installation.md](docs/installation.md).
@@ -27,7 +27,7 @@ This verifies the download's SHA-256 and installs `aether-midnight` to `~/.local
 **From source (any platform).** Needs Rust 1.98+ and a C compiler. SQLite is bundled.
 
 ```sh
-git clone https://github.com/ferxalbs/aether-midnight.git
+git clone https://github.com/ferxalb/aether-midnight.git
 cd aether-midnight
 cargo build --release --locked   # binaries: target/release/midnight, target/release/aether-midnight
 ```

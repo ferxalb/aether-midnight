@@ -2,6 +2,12 @@
 
 Development history of unreleased work, not a release record (releases go in `CHANGELOG.md`).
 
+## 2026-11-27 (14) — Point install, update and package URLs at the canonical `ferxalb` account
+
+- `ferxalb` is the canonical GitHub owner. The installer (`scripts/install.sh` `RELEASE_BASE`), the self-updater (`src/update.rs` `REPO`), the npm manifest (`npm/prepare.mjs`), README, `docs/installation.md`, the release notes and the updater test fixture still named the previous owner and relied on GitHub's rename redirect. All 12 references now name `ferxalb`.
+- Signing release artifacts with a key held outside GitHub would make updates independent of the repository path; not done here.
+- Verified on Linux with Rust 1.98: `cargo fmt --check` and `cargo test --locked` pass. The `cli_update` integration tests are `cfg(target_os = "macos")` and did not run; the `update` unit tests did. Not run: Clippy, macOS, a real install or update.
+
 ## 2026-11-15 (13) — Fix the npm-pack checksum parser for Windows archives; keep Windows out of rc.8 assets
 
 - The second rc.8 tag run (`Native release artifacts` #14) passed `universal2` and all four native jobs but failed in `npm-pack` at `npm/prepare.mjs`: `Binary checksum mismatch: windows-x64`. The archive itself was fine. On Windows (Git Bash) `sha256sum` writes `<hash> *./bin/aether-midnight.exe`, with a `*` binary-mode marker before the path, and `prepare.mjs` compared the path without stripping it, so it found no entry. Confirmed on the real Windows artifact (hash of the extracted binary equals the hash in `SHA256SUMS`).

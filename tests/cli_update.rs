@@ -86,7 +86,7 @@ fn serve(
             let line = String::from_utf8_lossy(&request);
             let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
             log.lock().unwrap().push(path.clone());
-            let (status, body) = if path.starts_with("/repos/ferxalbs/aether-midnight/releases") {
+            let (status, body) = if path.starts_with("/repos/ferxalb/aether-midnight/releases") {
                 (200, serde_json::to_vec(&releases(&origin)).unwrap())
             } else if let Some(bytes) = files.get(&path) {
                 (200, bytes.clone())
